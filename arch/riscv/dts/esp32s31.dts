@@ -17,6 +17,13 @@
 	chosen {
 		bootargs = "earlycon=sbi console=ttyESP0";
 		stdout-path = "serial0:115200n8";
+
+		opensbi-config {
+			compatible = "opensbi,config";
+			/* Reserve enough heap for the normal two-hart allocations plus the
+			 * 12-KiB private FDT used by the official-style handoff. */
+			heap-size = <0x8000>;
+		};
 	};
 
 	cpus {
@@ -30,6 +37,18 @@
 			device_type = "cpu";
 			mmu-type = "riscv,sv32";
 			reg = <0>;
+			riscv,isa = "rv32imac_zicsr_zifencei";
+			bootph-all;
+		};
+
+		/* U-Boot proper remains single-threaded, but OpenSBI needs this node
+		 * to allocate hart1 scratch state and park it in the HSM warmboot loop.
+		 */
+		cpu1: cpu@1 {
+			compatible = "riscv";
+			device_type = "cpu";
+			mmu-type = "riscv,sv32";
+			reg = <1>;
 			riscv,isa = "rv32imac_zicsr_zifencei";
 			bootph-all;
 		};
@@ -85,4 +104,5 @@
 		device_type = "memory";
 		reg = <0x50000000 0x01000000>;	/* 16 MB PSRAM */
 	};
+
 };

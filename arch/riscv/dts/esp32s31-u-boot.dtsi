@@ -16,7 +16,9 @@
 		fit {
 			description = "ESP32-S31 SPL FIT";
 			#address-cells = <1>;
-			fit,external-offset = <0>;
+			/* Keep external data at 0x400 so OpenSBI can execute in place
+			 * from a stable, cache-line-aligned NOR XIP address. */
+			fit,external-offset = <0x400>;
 
 			images {
 				opensbi {
