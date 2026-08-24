@@ -99,6 +99,11 @@ void s31_spl_pma_psram_rwx(void)
 #define SPI1_USER                  (SPI1_BASE + 0x18U)
 #define SPI1_USER1                 (SPI1_BASE + 0x1CU)
 #define SPI1_USER2                 (SPI1_BASE + 0x20U)
+#define SPI1_CTRL1                 (SPI1_BASE + 0x0CU)
+#define SPI1_FLASH_WAITI_CTRL      (SPI1_BASE + 0x98U)
+#define SPI1_FLASH_SUS_CTRL        (SPI1_BASE + 0x9CU)
+#define SPI1_FLASH_SUS_CMD         (SPI1_BASE + 0xA0U)
+#define SPI1_SUS_STATUS            (SPI1_BASE + 0xA4U)
 #define CMD_USR                    BIT(18)
 #define USR2_CMD_BITLEN_8          (7U << 28)
 
@@ -111,6 +116,42 @@ void s31_spl_pma_psram_rwx(void)
 #define SPI0_USER2                 (SPI0_BASE + 0x20U)
 #define SPI0_RD_STATUS             (SPI0_BASE + 0x2CU)
 #define SPI0_CACHE_FCTRL           (SPI0_BASE + 0x3CU)
+#define SPI0_FSM                   (SPI0_BASE + 0x54U)
+
+/* ESP-IDF spi_flash_hal auto-suspend settings for the XMC-D NOR fitted to
+ * ESP32-S31 modules.  At 80 MHz, 50 us suspend/resume delays round up to 32
+ * units of 128 SPI clocks. */
+#define FLASH_SUSPEND_CMD           0x75U
+#define FLASH_RESUME_CMD            0x7AU
+#define FLASH_RDSR2_CMD             0x35U
+#define FLASH_SUS_MASK              0x80U
+#define FLASH_SUS_DELAY             32U
+#define FLASH_CS_HIGH_DELAY         15U
+#define FLASH_SPI0_LOCK_DELAY       0x1FU
+
+#define SPI1_CTRL1_SUS_DLY_M        GENMASK(11, 2)
+#define SPI1_CTRL1_RES_DLY_M        GENMASK(21, 12)
+#define SPI1_WAITI_EN               BIT(0)
+#define SPI1_WAITI_CMD_M            GENMASK(31, 16)
+#define SPI1_SUS_PER_WAIT_EN        BIT(2)
+#define SPI1_SUS_PES_WAIT_EN        BIT(3)
+#define SPI1_SUS_AUTO_RESUME_EN     BIT(4)
+#define SPI1_SUS_AUTO_SUSPEND_EN    BIT(5)
+#define SPI1_SUS_MASK_M             GENMASK(21, 6)
+#define SPI1_SUS_STATUS_2B          BIT(22)
+#define SPI1_SUS_RES_CHECK_EN       BIT(23)
+#define SPI1_SUS_PES_CHECK_EN       BIT(24)
+#define SPI1_SUS_TIMEOUT_M          GENMASK(31, 25)
+#define SPI1_SUS_CMD_M              GENMASK(15, 0)
+#define SPI1_SUS_RDSR_CMD_M         GENMASK(31, 16)
+#define SPI1_SUS_RDSR_2B            BIT(1)
+#define SPI1_SUS_RES_DLY_128        BIT(5)
+#define SPI1_SUS_PES_DLY_128        BIT(6)
+#define SPI1_SUS_SPI0_LOCK_EN       BIT(7)
+#define SPI1_SUS_CMDS_2B            BIT(15)
+#define SPI1_SUS_RES_CMD_M          GENMASK(31, 16)
+#define SPI0_CS_HIGH_DELAY_M        GENMASK(30, 25)
+#define SPI0_LOCK_DELAY_M           GENMASK(18, 7)
 
 /*
  * Flash core-clock config (HP_SYS_CLKRST.flash_ctrl0 @ 0x20587064):
@@ -131,6 +172,11 @@ void s31_spl_pma_psram_rwx(void)
 #define FLASH_XIP_TEST_ADDR        0x40000000U
 /* QE = status-register-2 bit 1 => bit 9 of the 16-bit combined status. */
 #define FLASH_SR_QE_BIT            BIT(9)
+#define FLASH_CHIP_SIZE            0x01000000U
+#define FLASH_BLOCK_SIZE           0x00010000U
+#define FLASH_SECTOR_SIZE          0x00001000U
+#define FLASH_PAGE_SIZE            0x00000100U
+#define FLASH_STATUS_MASK          0x0000FFFFU
 
 /* Send a bare single-line flash command (no address/data) via SPIMEM1. */
 static void s31_flash_cmd(u8 cmd)
@@ -168,10 +214,58 @@ static u32 s31_flash_read_sr(void *chip)
 	return (sr_lo & 0x00FFU) | (sr_hi & 0xFF00U);
 }
 
+static void s31_flash_auto_suspend_init(void)
+{
+	u32 reg;
+
+	reg = readl((void *)SPI1_FLASH_SUS_CMD);
+	reg &= ~(SPI1_SUS_CMD_M | SPI1_SUS_RDSR_CMD_M);
+	reg |= FLASH_SUSPEND_CMD | (FLASH_RDSR2_CMD << 16);
+	writel(reg, (void *)SPI1_FLASH_SUS_CMD);
+
+	reg = readl((void *)SPI1_SUS_STATUS);
+	reg &= ~(SPI1_SUS_RDSR_2B | SPI1_SUS_CMDS_2B |
+		 SPI1_SUS_RES_CMD_M);
+	reg |= SPI1_SUS_RES_DLY_128 | SPI1_SUS_PES_DLY_128 |
+		 SPI1_SUS_SPI0_LOCK_EN | (FLASH_RESUME_CMD << 16);
+	writel(reg, (void *)SPI1_SUS_STATUS);
+
+	reg = readl((void *)SPI1_FLASH_WAITI_CTRL);
+	reg &= ~SPI1_WAITI_CMD_M;
+	reg |= SPI1_WAITI_EN | (0x05U << 16);
+	writel(reg, (void *)SPI1_FLASH_WAITI_CTRL);
+
+	reg = readl((void *)SPI1_CTRL1);
+	reg &= ~(SPI1_CTRL1_SUS_DLY_M | SPI1_CTRL1_RES_DLY_M);
+	reg |= FLASH_SUS_DELAY << 2 | FLASH_SUS_DELAY << 12;
+	writel(reg, (void *)SPI1_CTRL1);
+
+	reg = readl((void *)SPI0_CTRL2);
+	reg &= ~SPI0_CS_HIGH_DELAY_M;
+	reg |= FLASH_CS_HIGH_DELAY << 25;
+	writel(reg, (void *)SPI0_CTRL2);
+
+	reg = readl((void *)SPI0_FSM);
+	reg &= ~SPI0_LOCK_DELAY_M;
+	reg |= FLASH_SPI0_LOCK_DELAY << 7;
+	writel(reg, (void *)SPI0_FSM);
+
+	reg = readl((void *)SPI1_FLASH_SUS_CTRL);
+	reg &= ~(SPI1_SUS_MASK_M | SPI1_SUS_STATUS_2B |
+		 SPI1_SUS_TIMEOUT_M);
+	reg |= SPI1_SUS_PER_WAIT_EN | SPI1_SUS_PES_WAIT_EN |
+		 SPI1_SUS_AUTO_RESUME_EN | SPI1_SUS_AUTO_SUSPEND_EN |
+		 (FLASH_SUS_MASK << 6) | SPI1_SUS_RES_CHECK_EN |
+		 SPI1_SUS_PES_CHECK_EN | (5U << 25);
+	writel(reg, (void *)SPI1_FLASH_SUS_CTRL);
+}
+
 void s31_spl_flash_reconfig_qio(void)
 {
 	void *chip = *(void **)rom_spiflash_legacy_data;
-	u32 sr, ref, chk, fc0;
+	u32 *chip_params = chip;
+	u32 sr, target_sr, ref, chk, fc0;
+	int ret;
 	u32 o_ctrl, o_user, o_user1, o_user2, o_rdst, o_fctrl, o_fc0;
 
 	if (!chip) {
@@ -179,15 +273,35 @@ void s31_spl_flash_reconfig_qio(void)
 		return;
 	}
 
-	/* Ensure the flash's Quad-Enable bit is set (SR2 bit 1). */
+	/* The mask ROM's erase/write entry points consume this legacy parameter
+	 * block.  The IDF second-stage bootloader refreshes it from the image
+	 * header before allowing flash writes; U-Boot otherwise inherits the ROM
+	 * bootloader defaults, whose chip size is too small for the persist MTD at
+	 * 0xb00000.  Match IDF's 16 MiB setup exactly while preserving the RDID
+	 * value that the mask ROM already discovered.
+	 */
+	ret = esp_rom_spiflash_config_param(chip_params[0], FLASH_CHIP_SIZE,
+					     FLASH_BLOCK_SIZE,
+					     FLASH_SECTOR_SIZE,
+					     FLASH_PAGE_SIZE,
+					     FLASH_STATUS_MASK);
+	if (ret) {
+		printf("flash-qio: ROM flash parameter setup failed (%d)\n", ret);
+		return;
+	}
+
+	/* Clear block protection while SPL still executes from SRAM, and retain
+	 * only the Quad-Enable bit just like esp_rom_spiflash_unlock(). */
 	sr = s31_flash_read_sr(chip);
-	if (!(sr & FLASH_SR_QE_BIT)) {
+	target_sr = FLASH_SR_QE_BIT;
+	if (sr != target_sr) {
 		esp_rom_spiflash_wait_idle(chip);
-		esp_rom_spiflash_write_status(chip, sr | FLASH_SR_QE_BIT);
+		ret = esp_rom_spiflash_write_status(chip, target_sr);
 		esp_rom_spiflash_wait_idle(chip);
 		sr = s31_flash_read_sr(chip);
-		if (!(sr & FLASH_SR_QE_BIT)) {
-			printf("flash-qio: QE set failed, staying DIO\n");
+		if (ret || sr != target_sr) {
+			printf("flash-qio: unlock/QE failed (ret=%d sr=0x%04x), staying DIO\n",
+			       ret, sr);
 			return;
 		}
 	}
@@ -248,5 +362,7 @@ void s31_spl_flash_reconfig_qio(void)
 		return;
 	}
 
-	printf("flash-qio: QIO @ 80 MHz enabled\n");
+	s31_flash_auto_suspend_init();
+
+	printf("flash-qio: QIO @ 80 MHz + auto-suspend enabled\n");
 }

@@ -50,6 +50,9 @@ typedef int (*rom_cache_range_fn_t)(u32 map, u32 addr, u32 size);
 typedef int (*rom_sf_status_fn_t)(void *chip, u32 *status);
 typedef int (*rom_sf_wstatus_fn_t)(void *chip, u32 status);
 typedef int (*rom_sf_waitidle_fn_t)(void *chip);
+typedef int (*rom_sf_config_param_fn_t)(u32 device_id, u32 chip_size,
+					u32 block_size, u32 sector_size,
+					u32 page_size, u32 status_mask);
 typedef int (*rom_sf_readmode_fn_t)(u32 mode);
 typedef void (*rom_sf_qiopins_fn_t)(u32 wp_gpio, u32 spiconfig);
 typedef void (*rom_pad_drv_fn_t)(u32 gpio, u32 drv);
@@ -58,6 +61,7 @@ typedef void (*rom_pad_drv_fn_t)(u32 gpio, u32 drv);
 #define esp_rom_spiflash_read_statushigh ((rom_sf_status_fn_t)0x2F8001A4U)
 #define esp_rom_spiflash_write_status    ((rom_sf_wstatus_fn_t)0x2F8001A8U)
 #define esp_rom_spiflash_wait_idle       ((rom_sf_waitidle_fn_t)0x2F80012CU)
+#define esp_rom_spiflash_config_param    ((rom_sf_config_param_fn_t)0x2F80017CU)
 #define esp_rom_spiflash_config_readmode ((rom_sf_readmode_fn_t)0x2F80019CU)
 #define esp_rom_spiflash_select_qio_pins ((rom_sf_qiopins_fn_t)0x2F800184U)
 #define rom_gpio_pad_set_drv             ((rom_pad_drv_fn_t)0x2F800740U)
