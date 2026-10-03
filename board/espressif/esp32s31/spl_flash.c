@@ -3,6 +3,7 @@
  * ESP32-S31 SPL flash address-space map + DIO->QIO retune.
  */
 
+#include <config.h>
 #include <stdio.h>
 #include <asm/io.h>
 #include <linux/bitops.h>
@@ -23,6 +24,8 @@
 #define S31_MMU_PAGE_SIZE          0x10000U
 #define S31_MMU_PAGE_MASK          (S31_MMU_PAGE_SIZE - 1U)
 #define S31_FLASH_START            0x40000000U
+#define S31_FLASH_SIZE             0x01000000U
+#define S31_MMU_ENTRY_NUM          1024U
 
 static void reg_clr_bits(u32 reg, u32 mask)
 {
@@ -34,12 +37,16 @@ int s31_spl_flash_map(u32 vaddr, u32 paddr, u32 size)
 	u32 first_entry, page_count, first_paddr_page, i;
 
 	if (!size || (vaddr & S31_MMU_PAGE_MASK) || (paddr & S31_MMU_PAGE_MASK) ||
-	    (size & S31_MMU_PAGE_MASK) || vaddr < S31_FLASH_START)
+	    (size & S31_MMU_PAGE_MASK) || vaddr < S31_FLASH_START ||
+	    paddr >= S31_FLASH_SIZE || size > S31_FLASH_SIZE - paddr)
 		return -1;
 
 	first_entry = (vaddr - S31_FLASH_START) / S31_MMU_PAGE_SIZE;
 	page_count = size / S31_MMU_PAGE_SIZE;
 	first_paddr_page = paddr / S31_MMU_PAGE_SIZE;
+	if (first_entry >= S31_MMU_ENTRY_NUM ||
+	    page_count > S31_MMU_ENTRY_NUM - first_entry)
+		return -1;
 
 	cache_disable_all();
 	for (i = 0; i < page_count; i++)
@@ -169,10 +176,10 @@ void s31_spl_pma_psram_rwx(void)
 #define FLASH_CORE_80M_DIV         6U
 
 /* Mapped XIP word (u-boot.itb first slot) to verify cache reads. */
-#define FLASH_XIP_TEST_ADDR        0x40000000U
+#define FLASH_XIP_TEST_ADDR        CFG_SYS_UBOOT_BASE
 /* QE = status-register-2 bit 1 => bit 9 of the 16-bit combined status. */
 #define FLASH_SR_QE_BIT            BIT(9)
-#define FLASH_CHIP_SIZE            0x01000000U
+#define FLASH_CHIP_SIZE            S31_FLASH_SIZE
 #define FLASH_BLOCK_SIZE           0x00010000U
 #define FLASH_SECTOR_SIZE          0x00001000U
 #define FLASH_PAGE_SIZE            0x00000100U
