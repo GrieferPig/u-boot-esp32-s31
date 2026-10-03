@@ -60,13 +60,18 @@ void spl_board_init(void)
 {
 	puts("ESP32-S31 SPL active\n");
 
-	/* Map the flash into the XIP window so SPL can read the FIT and, later,
-	 * u-boot's booti bootcmd can reach the kernel Image (0x40400000) and dtb
-	 * (0x40200000). Base flash 0x100000 -> vaddr 0x40000000; map 16 MB so
-	 * the whole u-boot.itb + kernel-slot span is visible.
+	/* One linear map covers the actual 16 MiB NOR: raw offset zero maps
+	 * to 0x40000000. FIT is at 0x4000e000, Linux DTB at 0x4005e000,
+	 * and the kernel at 0x40400000. Keep the kernel 4 MiB aligned for
+	 * Linux's RV32 XIP page-table mapping (including images over 4 MiB).
+	 * OpenSBI and Linux retain this map; no aliases or out-of-chip pages.
 	 */
 	s31_spl_cache_mmu_init();
-	s31_spl_flash_map(0x40000000, 0x100000, 0x1000000);
+	if (s31_spl_flash_map(0x40000000, 0x0, 0x1000000)) {
+		puts("spl: flash mapping failed; boot stopped\n");
+		for (;;)
+			asm volatile("wfi");
+	}
 	s31_spl_pma_psram_rwx();
 	/* Upgrade the flash read path to QIO now that it's mapped, so the FIT
 	 * load (and later the XIP kernel) fetch at ~2x. First-stage bring-up:

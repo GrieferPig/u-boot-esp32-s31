@@ -10,9 +10,10 @@
 
 /*
  * SPL reads the FIT from the flash XIP window (mapped by the SPL
- * before load; see board/espressif/esp32s31/spl_flash.c).
+ * before load; see board/espressif/esp32s31/spl_flash.c). The linear
+ * mapping starts at raw flash zero; FIT is at raw offset 0xe000.
  */
-#define CFG_SYS_UBOOT_BASE     0x40000000
+#define CFG_SYS_UBOOT_BASE     0x4000e000
 
 /*
  * booti allocates below board_get_usable_ram_top() by default, which is
