@@ -10,6 +10,7 @@
  */
 
 #include <cpu_func.h>
+#include <stdio.h>
 #include <asm/io.h>
 #include <linux/bitops.h>
 #include <linux/kernel.h>
@@ -254,18 +255,27 @@ static void psram_pin_init(void)
 #define AP_OCT_PSRAM_CS_HOLD_TIME         4
 #define AP_OCT_PSRAM_CS_HOLD_DELAY        3
 
-/* PSRAM speed at init: MPLL (500 MHz) / divisor. Set to 125 MHz so
- * MPLL can run at 500 MHz — required for the EMAC's 125 MHz RGMII
- * reference (CNNT_HP_EMAC_REF_CTRL.DIV = 3 -> MPLL/4 = 125 MHz).
+/* Keep MPLL at 500 MHz for EMAC's independent /4 RGMII reference.
+ * PSRAM has its own divider: /2 gives the AP-octal 250 MHz profile already
+ * used by the mode registers and AXI dummy cycles below. Start commands
+ * at 20 MHz, then qualify the high-speed sampling window before mapping.
  */
-#define PSRAM_SPEED_MHZ                   125
+#define PSRAM_SPEED_MHZ                   250
 #define PSRAM_BUS_FREQ_DIV                (PSRAM_MPLL_FREQ_MHZ / PSRAM_SPEED_MHZ)
+
+static void psram_bus_clock(u32 freqdiv)
+{
+	u32 bits = ((freqdiv - 1) << SPI_MEM_S_SCLKCNT_N_S) |
+		   ((freqdiv / 2 - 1) << SPI_MEM_S_SCLKCNT_H_S) |
+		   ((freqdiv - 1) << SPI_MEM_S_SCLKCNT_L_S);
+
+	writel(bits, (void *)SPI_MEM_S_SRAM_CLK_REG);
+	writel(bits, (void *)SPI1_MEM_S_CLOCK_REG);
+}
 
 static void psram_ctrlr_init(void)
 {
 	u32 ac;
-	u32 freqdiv = PSRAM_BUS_FREQ_DIV;
-	u32 freqbits;
 
 	/* CS timing — written together with split-trans enable. */
 	ac = SPI_SMEM_S_CS_SETUP | SPI_SMEM_S_CS_HOLD |
@@ -284,11 +294,7 @@ static void psram_ctrlr_init(void)
 	 *   (SMEM/AXI-cached path) and MSPI_ID_3 (MEM/command-mode path
 	 *   that the ROM SPI helpers drive) need their own clock.
 	 */
-	freqbits = ((freqdiv - 1) << SPI_MEM_S_SCLKCNT_N_S) |
-		   ((freqdiv / 2 - 1) << SPI_MEM_S_SCLKCNT_H_S) |
-		   ((freqdiv - 1) << SPI_MEM_S_SCLKCNT_L_S);
-	writel(freqbits, (void *)SPI_MEM_S_SRAM_CLK_REG);
-	writel(freqbits, (void *)SPI1_MEM_S_CLOCK_REG);
+	psram_bus_clock(PSRAM_MPLL_FREQ_MHZ / 20);
 
 	/* DLL enable for timing calibration — both SMEM (PSRAM AXI) and
 	 * MEM (ROM-helper command) paths.
@@ -444,7 +450,7 @@ static void psram_xact(u16 cmd, u32 addr, u32 *tx, u32 tx_bits,
 {
 	const u32 cmd_bit_len = 16;
 	const u32 addr_bit_len = 32;
-	u32 user;
+	u32 user, i;
 
 	/* Wait for prior transaction (if any). OPI-DTR mode is set once
 	 * by the caller (psram_mode_reg_init) before the batch of
@@ -481,7 +487,8 @@ static void psram_xact(u16 cmd, u32 addr, u32 *tx, u32 tx_bits,
 		writel((tx_bits - 1) & S1_USR_MOSI_DBITLEN_M,
 		       (void *)SPI1_MEM_S_MOSI_DLEN_REG);
 		if (tx)
-			writel(*tx, (void *)SPI1_MEM_S_W0_REG);
+			for (i = 0; i < DIV_ROUND_UP(tx_bits, 32); i++)
+				writel(tx[i], (void *)(SPI1_MEM_S_W0_REG + i * 4));
 	} else {
 		writel(0, (void *)SPI1_MEM_S_MOSI_DLEN_REG);
 	}
@@ -508,7 +515,8 @@ static void psram_xact(u16 cmd, u32 addr, u32 *tx, u32 tx_bits,
 	setbits_le32((void *)SPI1_MEM_S_MISC_REG, S1_CS1_DIS);
 
 	if (rx_bits && rx)
-		*rx = readl((void *)SPI1_MEM_S_W0_REG);
+		for (i = 0; i < DIV_ROUND_UP(rx_bits, 32); i++)
+			rx[i] = readl((void *)(SPI1_MEM_S_W0_REG + i * 4));
 }
 
 static u32 s_psram_size;
@@ -697,6 +705,129 @@ static void psram_axi_config(void)
 		     SPI_MEM_S_AR_SPLICE_EN | SPI_MEM_S_AW_SPLICE_EN);
 }
 
+/* Boot-only DQS qualification, following ESP-IDF's S31 hardware sequence:
+ * write 128 reference bytes at low clock, sweep four DQS phases, then sweep
+ * DQS-minus-data delay over 31 taps with 100 reads per point. Use the centre
+ * of the widest passing delay window. No unqualified slow-clock fallback.
+ * All work runs in SRAM before the PSRAM MMU or any Linux allocation exists.
+ */
+#define PSRAM_PIN_BASE                   DR_REG_IOMUX_MSPI_PIN_BASE
+#define PSRAM_DQS_REG                    (PSRAM_PIN_BASE + 0x3c)
+#define PSRAM_DQS_PHASE_MASK             (3U << 1)
+#define PSRAM_DQS_DELAY_MASK             ((15U << 7) | (15U << 18))
+#define PSRAM_TUNE_ADDR                  0x80
+#define PSRAM_TUNE_WORDS                 32
+
+static void psram_tune_pins(u32 phase, u32 tap)
+{
+	u32 dqs = tap < 15 ? 15 - tap : 0;
+	u32 data = tap > 15 ? tap - 15 : 0;
+	u32 i;
+
+	clrsetbits_le32((void *)PSRAM_DQS_REG,
+		PSRAM_DQS_PHASE_MASK | PSRAM_DQS_DELAY_MASK,
+		(phase << 1) | (dqs << 7) | (dqs << 18));
+	for (i = 0; i < 8; i++)
+		clrsetbits_le32((void *)(PSRAM_PIN_BASE + 0x1c + i * 4),
+			       15U << 4, data << 4);
+	clrsetbits_le32((void *)(PSRAM_PIN_BASE + 0x40), 15U << 4, data << 4);
+	clrsetbits_le32((void *)(PSRAM_PIN_BASE + 0x44), 15U << 4, data << 4);
+}
+
+static bool psram_tune_read(u32 *reference)
+{
+	u32 readback[16];
+	u32 offset, i;
+
+	/* Each command uses at most the controller's 64-byte FIFO. */
+	for (offset = 0; offset < PSRAM_TUNE_WORDS; offset += 16) {
+		psram_xact(AP_OCT_PSRAM_SYNC_READ, PSRAM_TUNE_ADDR + offset * 4,
+			   NULL, 0, readback, 512, AP_OCT_PSRAM_RD_DUMMY_BITLEN);
+		for (i = 0; i < 16; i++)
+			if (readback[i] != reference[offset + i])
+				return false;
+	}
+	return true;
+}
+
+static int psram_timing_tune(void)
+{
+	u32 reference[PSRAM_TUNE_WORDS];
+	u32 pattern = 0x6d2b79f5;
+	u32 phase, selected = 4, tap, trial, run = 0, best = 0, end = 0, mask = 0;
+	u32 i;
+
+	psram_tune_pins(0, 15);
+	for (i = 0; i < PSRAM_TUNE_WORDS; i++) {
+		pattern ^= pattern << 13;
+		pattern ^= pattern >> 17;
+		pattern ^= pattern << 5;
+		reference[i] = pattern;
+	}
+	for (i = 0; i < PSRAM_TUNE_WORDS; i += 16)
+		psram_xact(AP_OCT_PSRAM_SYNC_WRITE, PSRAM_TUNE_ADDR + i * 4,
+			   reference + i, 512, NULL, 0, AP_OCT_PSRAM_WR_DUMMY_BITLEN);
+	if (!psram_tune_read(reference)) {
+		puts("PSRAM: low-clock reference failed\n");
+		return -1;
+	}
+	psram_bus_clock(PSRAM_BUS_FREQ_DIV);
+	for (phase = 0; phase < 4; phase++) {
+		psram_tune_pins(phase, 15);
+		if (psram_tune_read(reference)) {
+			mask |= BIT(phase);
+			run++;
+			if (run > best) {
+				best = run;
+				selected = phase - run + 1;
+			}
+		} else {
+			run = 0;
+		}
+	}
+	if (selected == 4) {
+		puts("PSRAM: no passing 250 MHz DQS phase\n");
+		return -1;
+	}
+	run = best = 0;
+	for (tap = 0; tap < 31; tap++) {
+		psram_tune_pins(selected, tap);
+		for (trial = 0; trial < 100; trial++)
+			if (!psram_tune_read(reference))
+				break;
+		if (trial == 100) {
+			run++;
+			if (run > best) {
+				best = run;
+				end = tap;
+			}
+		} else {
+			run = 0;
+		}
+	}
+	if (best < 3) {
+		puts("PSRAM: insufficient 250 MHz DQS delay margin\n");
+		return -1;
+	}
+	tap = end - best / 2;
+	psram_tune_pins(selected, tap);
+	if (!psram_tune_read(reference))
+		return -1;
+	/* Qualify writes at the selected high-speed point as well as reads. */
+	for (i = 0; i < PSRAM_TUNE_WORDS; i++)
+		reference[i] = ~reference[i];
+	for (i = 0; i < PSRAM_TUNE_WORDS; i += 16)
+		psram_xact(AP_OCT_PSRAM_SYNC_WRITE, PSRAM_TUNE_ADDR + i * 4,
+			   reference + i, 512, NULL, 0, AP_OCT_PSRAM_WR_DUMMY_BITLEN);
+	if (!psram_tune_read(reference)) {
+		puts("PSRAM: high-speed write verification failed\n");
+		return -1;
+	}
+	printf("PSRAM: %u MHz phase=%u phases=0x%x delay=%u margin=%u\n",
+	       PSRAM_SPEED_MHZ, selected, mask, tap, best);
+	return 0;
+}
+
 /*------------------------------------------------------------------------
  * PSRAM MMU map
  *
@@ -750,9 +881,9 @@ int psram_init(void)
 	psram_pin_init();
 	psram_ctrlr_init();
 	psram_mode_reg_init();
-	psram_axi_config();
-	if (!s_psram_size)
+	if (!s_psram_size || psram_timing_tune())
 		return -1;
+	psram_axi_config();
 	psram_mmu_map(s_psram_size);
 	return 0;
 }
