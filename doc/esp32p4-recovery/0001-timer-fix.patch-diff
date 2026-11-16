@@ -1,0 +1,13 @@
+diff --git a/buildroot-external/board/esp32-p4/patches/uboot/0001-add-esp32p4-mmode-emulator-board.patch b/buildroot-external/board/esp32-p4/patches/uboot/0001-add-esp32p4-mmode-emulator-board.patch
+index a98a9d4..3abe20b 100644
+--- a/buildroot-external/board/esp32-p4/patches/uboot/0001-add-esp32p4-mmode-emulator-board.patch
++++ b/buildroot-external/board/esp32-p4/patches/uboot/0001-add-esp32p4-mmode-emulator-board.patch
+@@ -199,7 +199,7 @@ index 00000000..ade7ae9a
+ +
+ +	priv->base = dev_read_addr_ptr(dev);
+ +	uc_priv->clock_rate = 16000000;
+-+	setbits_le32(clkrst + 0x30, BIT(23));
+++	setbits_le32(clkrst + 0x1c, BIT(23));
+ +	clrsetbits_le32(clkrst + 0x98, BIT(29), BIT(30));
+ +	writel(0, priv->base + 0x64);
+ +	writel(7, priv->base + 0x6c);
