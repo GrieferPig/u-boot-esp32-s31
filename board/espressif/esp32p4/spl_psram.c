@@ -66,7 +66,7 @@
 #define P4_MPLL_BLOCK		0x63
 #define P4_MPLL_DIV_REG		2
 #define P4_MPLL_REF_DIV		0	/* bits [2:0] */
-#define P4_MPLL_FB_DIV		9	/* bits [7:3]: (9+1)/(0+1) = 10x */
+#define P4_MPLL_FB_DIV		7	/* bits [7:3]: (7+1)/(0+1) = 8x -> 320 MHz */
 
 /* Mask ROM OPI helpers (fixed addresses for this ROM revision). */
 #define P4_ROM_SPI_CMD_CONFIG	0x4fc00108ul
@@ -140,7 +140,8 @@ static void psram_clock_init(void)
 	setbits_le32((void *)P4_PMU_RF_PWC, P4_PMU_XPD_PERIF_I2C);
 	setbits_le32((void *)P4_PMU_RF_PWC, P4_PMU_PERIF_I2C_RSTB);
 
-	/* MPLL 400 MHz = 40 MHz * (9 + 1) / (0 + 1). */
+	/* MPLL 320 MHz = 40 MHz * (7 + 1) / (0 + 1): the reference build
+	 * uses CONFIG_SPIRAM_SPEED_80M (MPLL 320 / 4 = 80 MHz). */
 	regi2c_write(P4_MPLL_BLOCK, P4_MPLL_DIV_REG,
 		     (P4_MPLL_FB_DIV << 3) | P4_MPLL_REF_DIV);
 
@@ -793,8 +794,8 @@ static void psram_mode_reg_init(void)
  * once the command path is retired, otherwise every cache read samples the
  * data four cycles too early and the controller waits forever.
  */
-#define P4_PSRAM_RD_LATENCY_FINAL	4
-#define P4_PSRAM_WR_LATENCY_FINAL	1
+#define P4_PSRAM_RD_LATENCY_FINAL	2
+#define P4_PSRAM_WR_LATENCY_FINAL	2
 
 static void psram_final_latency(void)
 {
@@ -996,7 +997,7 @@ static void psram_enable_l2_cache(void)
 	void (*enable)(u32 autoload) =
 		(void (*)(u32))P4_ROM_CACHE_ENABLE_L2;
 
-	set_mode(9 /* CACHE_SIZE_128K */, 8, 3 /* CACHE_LINE_SIZE_64B */);
+	set_mode(10 /* CACHE_SIZE_256K */, 8, 3 /* CACHE_LINE_SIZE_64B */);
 	enable(0);
 
 	p4_spl_early_puts("l2: enabled\n");

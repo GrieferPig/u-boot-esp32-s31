@@ -2565,3 +2565,55 @@ yet the read never completes and the bus has to be reset. Next: compare the
 read transaction itself against the reference (e.g. freeze the reference in a
 PSRAM read with a watchpoint and dump the MSPI2 transaction state, or try the
 `smem_ac`/`outminbytelen` fields that govern the read data phase).
+
+## Round 72: the reference actually runs at 80 MHz, not 200
+
+Found the reference project's own configuration
+(`firmware/p4-hardware-loader/sdkconfig`):
+
+```
+CONFIG_SPIRAM_MODE_HEX=y
+CONFIG_SPIRAM_SPEED_80M=y              (CONFIG_SPIRAM_SPEED=80)
+CONFIG_CACHE_L2_CACHE_256KB=y
+CONFIG_CACHE_L2_CACHE_LINE_64B=y
+```
+
+So the reference runs PSRAM at **80 MHz**: `AP_HEX_PSRAM_MPLL_DEFAULT_FREQ_MHZ
+320` divided by `320/80 = 4`, which is exactly the `0x00030103` found in
+`0x5008e014`. Our SPL had MPLL at 400 MHz (10x 40 MHz) and the same divider,
+i.e. 100 MHz - 25 % over the reference - and round 70 had moved the mode
+registers to the 200 MHz latency profile on a wrong assumption.
+
+Corrected to match the reference build:
+
+| item | before | now |
+| --- | --- | --- |
+| MPLL | 400 MHz (`FB_DIV 9`) | 320 MHz (`FB_DIV 7`) |
+| MR0 read latency | 4 (`0x8d30`) | 2 (`0x8d28`) |
+| MR4 write latency | 1 (`0x12b`) | 2 (`0x14b`) |
+| L2 cache split | 128 KB | 256 KB (reference) |
+
+Verified after the change:
+
+```
+mode: mr0 0x00008d28 mr4 0x000080df mr8 0x0000054b
+tune: ok
+lat: mr0 0x00008d28 mr4 0x0000014b
+l2: enabled
+axis: burst written
+esp32p4>
+```
+
+### The read hang is not the clock
+
+With MPLL 320 and the 80 MHz latency profile the read still hangs: `md
+0x48000000 4` and `md 0x48200000 8` both freeze the bus. Also tried
+`SMEM_DDR.ddr_dqs_loop` (bit 21, internal DQS loopback) - no change, reverted.
+So the overspeed theory is rejected too.
+
+Everything the reference exposes now matches: chip mode registers, the whole
+MSPI2 register file, the clock divider, MMU entries, pads and the cache split.
+The remaining difference has to be in the *read transaction itself*, which is
+not visible in the steady-state registers. Next: freeze the reference in a real
+PSRAM read (hardware watchpoint on `0x48xxxxxx`) and dump MSPI2 while the
+transaction is in flight, then compare against a trace of ours.
