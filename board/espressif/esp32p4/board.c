@@ -57,8 +57,11 @@ phys_addr_t board_get_usable_ram_top(phys_size_t total_size)
 	return P4_UBOOT_RAM_TOP;
 }
 
+void p4_systimer_enable(void);
+
 int board_init(void)
 {
+	p4_systimer_enable();
 	P4DBG("P4SPL:board-init\n");
 	return 0;
 }

@@ -41,19 +41,6 @@ static void p4_systimer_enable(void)
 	       clkrst + P4_SOC_CLK_CTRL2);
 }
 
-unsigned long notrace timer_read_counter(void)
-{
-	void *timer = (void *)P4_SYSTIMER_BASE;
-	int tries;
-
-	writel(P4_UPDATE | P4_VALUE_VALID, timer + P4_UNIT0_OP);
-	for (tries = 0; tries < 1000; tries++) {
-		if (readl(timer + P4_UNIT0_OP) & P4_VALUE_VALID)
-			break;
-	}
-
-	return readl(timer + P4_VALUE_LO);
-}
 
 #if CONFIG_IS_ENABLED(TIMER_EARLY)
 unsigned long notrace timer_early_get_rate(void)
