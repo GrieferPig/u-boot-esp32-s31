@@ -200,7 +200,15 @@ static int initr_malloc(void)
 	 * This value MUST match the value of gd->start_addr_sp in board_f.c:
 	 * reserve_noncached().
 	 */
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+	/*
+	 * U-Boot runs in place at CONFIG_TEXT_BASE (no relocation), so the heap
+	 * goes right above the image instead of below a relocated copy.
+	 */
+	start = ALIGN(gd->relocaddr + gd->mon_len, 4096);
+#else
 	start = gd->relocaddr - TOTAL_MALLOC_LEN;
+#endif
 	gd_set_malloc_start(start);
 	mem_malloc_init((ulong)map_sysmem(start, TOTAL_MALLOC_LEN),
 			TOTAL_MALLOC_LEN);

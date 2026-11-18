@@ -52,6 +52,29 @@
 
 DECLARE_GLOBAL_DATA_PTR;
 
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+#include <asm/io.h>
+static void p4_reloc_report(ulong a, ulong b, ulong c)
+{
+	static const char hex[] = "0123456789abcdef";
+	ulong vals[3];
+	int v, i;
+
+	vals[0] = a;
+	vals[1] = b;
+	vals[2] = c;
+	for (v = 0; v < 3; v++) {
+		writel(' ', (void *)0x500ca000);
+		for (i = 28; i >= 0; i -= 4)
+			writel(hex[(vals[v] >> i) & 0xf], (void *)0x500ca000);
+	}
+	writel(10, (void *)0x500ca000);
+}
+#else
+#define p4_reloc_report(a, b, c) do { } while (0)
+#endif
+
+
 /*
  * TODO(sjg@chromium.org): IMO this code should be
  * refactored to a single function, something like:
@@ -491,7 +514,17 @@ static int reserve_uboot(void)
 		      gd->mon_len >> 10, gd->relocaddr);
 	}
 
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+	/*
+	 * There is no cache-coherent way to relocate here (the copy would sit in
+	 * the write-back data cache while the instruction fetch reads SRAM), so
+	 * keep U-Boot where the SPL loaded it and put the heap and stack above it.
+	 */
+	gd->relocaddr = CONFIG_TEXT_BASE;
+	gd->start_addr_sp = gd->ram_top;
+#else
 	gd->start_addr_sp = gd->relocaddr;
+#endif
 
 	return 0;
 }
@@ -1001,28 +1034,6 @@ static const init_fnc_t init_sequence_f[] = {
 	NULL,
 };
 
-#if defined(CONFIG_ESP32P4_SRAM_ONLY)
-#include <asm/io.h>
-static void p4_reloc_report(ulong a, ulong b, ulong c)
-{
-	static const char hex[] = "0123456789abcdef";
-	ulong vals[3];
-	int v, i;
-
-	vals[0] = a;
-	vals[1] = b;
-	vals[2] = c;
-	for (v = 0; v < 3; v++) {
-		writel(' ', (void *)0x500ca000);
-		for (i = 28; i >= 0; i -= 4)
-			writel(hex[(vals[v] >> i) & 0xf], (void *)0x500ca000);
-	}
-	writel('
-', (void *)0x500ca000);
-}
-#else
-#define p4_reloc_report(a, b, c) do { } while (0)
-#endif
 
 void board_init_f(ulong boot_flags)
 {
