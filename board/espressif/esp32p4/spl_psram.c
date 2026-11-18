@@ -712,7 +712,7 @@ static void psram_mode_reg_init(void)
 
 #define P4_PSRAM_RD_DUMMY	(2 * (14 - 1))
 /* The cache path needs the same 46-cycle read latency the tuning found. */
-#define P4_PSRAM_CACHE_RD_DUMMY	46
+#define P4_PSRAM_CACHE_RD_DUMMY	49
 #define P4_PSRAM_WR_DUMMY	(2 * (7 - 1))
 
 static void psram_axi_config(void)
@@ -758,23 +758,22 @@ static void psram_axi_config(void)
  * machine: U-Boot's "cp" command crashes on this port, and the SPL has working
  * bulk reads and writes.
  */
+static void psram_dcache_flush(void *addr, u32 size);
+static void psram_dcache_invalidate(void *addr, u32 size);
+
 void p4_spl_psram_load_payload(void)
 {
 	u32 *kern = (u32 *)0x40200000;		/* flash 0x200000 */
 	u32 *dtb = (u32 *)0x40900000;		/* flash 0x900000 */
-	u32 ksize = kern[4];			/* arm64 image_size at 0x10 */
-	u32 dsize = swab32(dtb[1]);		/* fdt totalsize at 0x04, big endian */
+	u32 ksize, dsize;
 
-	if (kern[0] == 0x0addbad0u || dtb[0] != 0xedfe0dd0u) {
-		p4_spl_early_puts("payload: flash window unreadable\n");
+	if (dtb[0] != 0xedfe0dd0u) {
+		p4_spl_early_puts("payload: no fdt at 0x900000\n");
 		return;
 	}
 
-	p4_spl_early_puts("payload: kern ");
-	p4_spl_early_hex(ksize);
-	p4_spl_early_puts(" dtb ");
-	p4_spl_early_hex(dsize);
-	p4_spl_early_puts("\n");
+	ksize = kern[4];			/* arm64 image_size at 0x10 */
+	dsize = swab32(dtb[1]);			/* fdt totalsize, big endian */
 
 	if (ksize < 0x100000u || ksize > 0x01000000u || dsize < 0x100u ||
 	    dsize > 0x10000u) {
@@ -782,55 +781,28 @@ void p4_spl_psram_load_payload(void)
 		return;
 	}
 
+	/* The cache path works now, so a plain copy is enough. */
+	memcpy((void *)0x48e00000, dtb, dsize);
+	memcpy((void *)0x48000000, kern, ksize);
+
+	/* Confirm through the command path that the data really is in the chip. */
 	{
-		void *wdt = (void *)0x50116000;
-		u32 off;
+		u32 v = 0;
 
-		/* Nothing feeds the RWDT while we copy, so switch it off. */
-		writel(0x50d83aa1, wdt + 0x18);
-		clrbits_le32(wdt + 0x00, BIT(31) | BIT(14));
-		writel(0, wdt + 0x18);
-		writel(0x50d83aa1, wdt + 0x20);
-		setbits_le32(wdt + 0x1c, BIT(30));
-		writel(0, wdt + 0x20);
-
-		/*
-		 * Word-at-a-time copy: this is the primitive that was verified to
-		 * work (writel/readl pairs), and memcpy through a bounce buffer did
-		 * not land the data.
-		 */
-		{
-			u32 off;
-
-			for (off = 0; off < dsize; off += 4)
-				writel(readl((u32 *)((u32)dtb + off)),
-				       (u32 *)(0x48f00000 + off));
-			for (off = 0; off < ksize; off += 4) {
-				writel(readl((u32 *)((u32)kern + off)),
-				       (u32 *)(0x48200000 + off));
-				if (!(off & 0x3ffff)) {
-					p4_spl_early_puts(".");
-					writel(0x50d83aa1, wdt + 0x18);
-					writel(1, wdt + 0x14);
-					writel(0, wdt + 0x18);
-				}
-			}
-		}
+		psram_xact(0x0000, 0, NULL, 0, &v, 32, 46);
+		p4_spl_early_puts("payload: chip word0 ");
+		p4_spl_early_hex(v);
+		p4_spl_early_puts("\n");
 	}
 
-	p4_spl_early_puts("src ");
-	p4_spl_early_hex(readl((void *)0x40200000));
-	p4_spl_early_puts(" ");
-	p4_spl_early_hex(readl((void *)0x40900000));
-	p4_spl_early_puts("\n");
-	p4_spl_early_puts("payload: kernel ");
+	p4_spl_early_puts("payload: kern ");
+	p4_spl_early_hex(readl((void *)0x48000000));
+	p4_spl_early_puts(" size ");
 	p4_spl_early_hex(ksize);
 	p4_spl_early_puts(" dtb ");
+	p4_spl_early_hex(readl((void *)0x48e00000));
+	p4_spl_early_puts(" size ");
 	p4_spl_early_hex(dsize);
-	p4_spl_early_puts(" kern[0] ");
-	p4_spl_early_hex(readl((void *)0x48200000));
-	p4_spl_early_puts(" dtb[0] ");
-	p4_spl_early_hex(readl((void *)0x48f00000));
 	p4_spl_early_puts("\n");
 }
 
@@ -845,18 +817,19 @@ void p4_spl_psram_load_payload(void)
 #define P4_ROM_CACHE_INVALIDATE_ADDR	0x4fc003e4
 #define P4_ROM_CACHE_WRITEBACK_ADDR	0x4fc003f4
 #define P4_CACHE_MAP_DCACHE		0x10
+#define P4_CACHE_MAP_ALL		0x13	/* L1 I0|I1|D; 0x3f hits undefined bits */
 #define P4_CACHE_MAP_ICACHE0		0x01
 
 static void psram_dcache_flush(void *addr, u32 size)
 {
 	((int (*)(u32, u32, u32))P4_ROM_CACHE_WRITEBACK_ADDR)
-		(P4_CACHE_MAP_DCACHE, (u32)addr, size);
+		(P4_CACHE_MAP_ALL, (u32)addr, size);
 }
 
 static void psram_dcache_invalidate(void *addr, u32 size)
 {
 	((int (*)(u32, u32, u32))P4_ROM_CACHE_INVALIDATE_ADDR)
-		(P4_CACHE_MAP_DCACHE, (u32)addr, size);
+		(P4_CACHE_MAP_ALL, (u32)addr, size);
 }
 
 
@@ -895,26 +868,6 @@ static void psram_range_check(void)
 static void psram_cache_check(void)
 {
 	u32 r1 = 0, r2 = 0;
-
-	{
-		u32 d, found = 0;
-
-		for (d = 8; d <= 63; d++) {
-			u32 v = 0x11223344 + d;
-
-			clrsetbits_le32((void *)P4_CACHE_SCTRL, 0x3fu << 6, d << 6);
-			writel(v, (void *)0x48100000);
-			psram_dcache_flush((void *)0x48100000, 0x1000);
-			psram_xact(0x0000, 0x100000, NULL, 0, &r1, 32, 46);
-			if (r1 == v) {
-				found = d;
-				break;
-			}
-		}
-		p4_spl_early_puts("cache: rd dummy ");
-		p4_spl_early_hex(found);
-		p4_spl_early_puts("\n");
-	}
 
 	writel(0x11223344, (void *)0x48100000);
 	psram_dcache_flush((void *)0x48100000, 0x1000);

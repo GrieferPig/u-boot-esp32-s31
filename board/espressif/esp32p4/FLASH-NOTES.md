@@ -2102,3 +2102,53 @@ bring-up) has to fix the PMS configuration first.
 The traceback positioned the failing store exactly, and everything before it
 (`tune: reference ok`, `fastest div 0x1`, `margin 0x1f`, `tune: ok`) still works
 with `CACHE_SCTRL` bit 21 set, which is now kept.
+
+## Round 64: PSRAM CACHE/AXI PATH WORKS
+
+The cache path came alive. The two ingredients were found by separating the two
+directions and testing each on its own:
+
+* **fill (chip -> cache)**: command-write a fresh marker, invalidate the cached
+  line, read through the window, and sweep `CACHE_SCTRL`'s read latency. The
+  winning value is the field value **48** (`P4_PSRAM_CACHE_RD_DUMMY` = 49 because
+  the macro stores `dummy - 1`). Note the *command* path wants 46, the *cache*
+  path 48 - they are different samples.
+* **writeback (cache -> chip)**: the ROM cache helpers must be called with the
+  full L1 mask **0x13** (`CACHE_MAP_L1_ICACHE_0 | L1_ICACHE_1 | L1_DCACHE`), not
+  `0x10`. With 0x10 the writeback did nothing; with 0x13 (and 0x3f, which also
+  works but touches undefined bits 2/3/5) the data lands.
+
+Verified in one run:
+
+```
+cache: write->chip 0x11223344 chip->read 0x55667788
+```
+
+i.e. a `writel` at `0x48100000` + flush is visible through the *command* path,
+and a value written through the *command* path at offset `0x100004` +
+invalidate is visible through the *cache*. Both directions work.
+
+Also fixed: the obsolete `CACHE_SCTRL` sweep in `psram_cache_check()` (round 56)
+was clobbering the tuned value and had to go.
+
+### Payload load
+
+`p4_spl_psram_load_payload()` now copies kernel and DTB with a plain `memcpy`
+(cache path works) and the result verifies **inside the chip**:
+
+```
+payload: chip word0 0xa0450000
+payload: kern 0x0000a045 size 0x00354c60 dtb 0xedfe0dd0 size 0x0000113d
+```
+
+(`0xa0450000` is the command path's 16-bit swap of `0x0000a045` - the arm64
+header is really there.)
+
+But when the SPL performs that load, U-Boot then dies right after printing
+`U-B` of its banner and the board loops (36 boots). Without the SPL load U-Boot
+boots to the prompt normally. Moving the DTB to `0x48e00000` changes nothing, so
+it is the 3.4 MB kernel copy that upsets U-Boot's start - something to chase next.
+
+`cp.b` from the prompt still resets the board even with the working cache path, so
+U-Boot's own `cp` command remains unusable; the plan is a small dedicated
+`p4load` command that does word copies plus explicit cache maintenance instead.
