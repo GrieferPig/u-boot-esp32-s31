@@ -2152,3 +2152,38 @@ it is the 3.4 MB kernel copy that upsets U-Boot's start - something to chase nex
 `cp.b` from the prompt still resets the board even with the working cache path, so
 U-Boot's own `cp` command remains unusable; the plan is a small dedicated
 `p4load` command that does word copies plus explicit cache maintenance instead.
+
+## Round 64 (continued): the payload load corrupts the PSRAM mode registers
+
+Chased the "U-Boot dies after the SPL loads the payload" loop. Two more tests
+disproved the obvious theories:
+
+* moving the DTB from 0x48f00000 to 0x48e00000 changed nothing,
+* switching the watchdogs off around the copy (RWDT `wdt_en`/`flashboot`, SWDT
+  `swd_disable`, the four TIMG MWDTs) changed nothing.
+
+What the loop actually is becomes clear from a later cycle in the same log:
+
+```
+psram probe: d0x08=0x00008d28 ...
+mode: mr0 0x00008d28 mr4 0x8d288d48 mr8 0x8d288d6b
+ firmware 0x02f7cc39
+ wordtest wrote 0x00000001 read80 0x00000000 read84 0x00000000
+ mismatch 0 want 0x40aec71f got 0x4ff432b0
+tune: low-clock reference failed
+```
+
+The PSRAM **mode registers read back differently** than on a healthy boot
+(`mr4 0x8d288d48` / `mr8 0x8d288d6b` instead of `0x8d08a05f` / `0x8d088d4b`) and
+the command path then returns **SRAM addresses** (`0x4ff432b0`) instead of chip
+data. So the multi-megabyte copy leaves the part in a state where the next boot's
+probe and tuning fail, and each subsequent boot dies before U-Boot - hence the
+30-odd banners.
+
+So the payload path has to be re-done from a state that keeps the mode registers
+valid: either write the payload in bounded bursts with the mode registers
+re-checked afterwards, or (better) do the load from U-Boot proper with a dedicated
+`p4load` command, where only a single well-defined copy runs after the chip is
+fully up.
+
+The U-Boot prompt state is restored (payload loading disabled in the SPL).

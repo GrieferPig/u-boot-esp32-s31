@@ -219,7 +219,7 @@ void spl_board_init(void)
 			;
 	}
 
-	/* payload now loaded from the U-Boot prompt */
+	/* payload loading happens from the U-Boot prompt for now */
 
 	if (p4_spl_load_uboot()) {
 		p4_spl_puts("spl: uboot load failed; boot stopped\n");

@@ -761,6 +761,30 @@ static void psram_axi_config(void)
 static void psram_dcache_flush(void *addr, u32 size);
 static void psram_dcache_invalidate(void *addr, u32 size);
 
+
+/* Nothing feeds the watchdogs during a multi-megabyte copy, so turn them off. */
+static void psram_watchdogs_off(void)
+{
+	void *wdt = (void *)0x50116000;
+	u32 t;
+
+	writel(0x50d83aa1, wdt + 0x18);			/* WPROTECT */
+	clrbits_le32(wdt + 0x00, BIT(31) | BIT(14));
+	writel(0, wdt + 0x18);
+
+	writel(0x50d83aa1, wdt + 0x20);			/* SWD_WPROTECT */
+	setbits_le32(wdt + 0x1c, BIT(30));		/* swd_disable */
+	writel(0, wdt + 0x20);
+
+	for (t = 0; t < 4; t++) {
+		u32 base = 0x500c2000 + t * 0x1000;
+
+		writel(0x50d83aa1, (void *)(base + 0x64));
+		clrbits_le32((void *)(base + 0x48), BIT(31));
+		writel(0, (void *)(base + 0x64));
+	}
+}
+
 void p4_spl_psram_load_payload(void)
 {
 	u32 *kern = (u32 *)0x40200000;		/* flash 0x200000 */
@@ -780,6 +804,8 @@ void p4_spl_psram_load_payload(void)
 		p4_spl_early_puts("payload: implausible sizes, skipped\n");
 		return;
 	}
+
+	psram_watchdogs_off();
 
 	/* The cache path works now, so a plain copy is enough. */
 	memcpy((void *)0x48e00000, dtb, dsize);
