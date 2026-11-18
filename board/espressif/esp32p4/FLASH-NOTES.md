@@ -1848,3 +1848,30 @@ So the remaining work is the AXI/cache side: sweep the `CACHE_SCTRL` read latenc
 and the AXI write parameters the same way the command path was swept (write a
 pattern with `writel`, read it back with `readl`, and check persistence across a
 reboot), then the MMU map, payload load and `booti`.
+
+## Round 55: the command path works, the cache path fills with junk
+
+Cross-checked both views of the same PSRAM location (`0x48100000` is offset
+`0x100000` in both):
+
+```
+cache: write->chip 0xaaaaeaaa chip->read 0x2baaaaaa
+```
+
+* `writel(0x11223344, 0x48100000)` followed by a **command-path** read of the
+  same location returns `0xaaaaeaaa` - the cache write never reaches the chip,
+* a **command-path** write of `0x55667788` followed by `readl(0x48100004)`
+  returns `0x2baaaaaa` - the cache fill returns junk instead of the chip data.
+
+Explicit cache maintenance does not change it: added `psram_dcache_flush()` /
+`psram_dcache_invalidate()` through the ROM helpers
+(`Cache_WriteBack_Addr` = 0x4fc003f4, `Cache_Invalidate_Addr` = 0x4fc003e4,
+mask `CACHE_MAP_L1_DCACHE` = 0x10) and the results are identical.
+
+So the cache is *on* (writes and reads of the same address are coherent, which is
+why every same-address test in rounds 1-50 "passed") but neither direction talks
+to the PSRAM. The next concrete experiment is to sweep the **`CACHE_SCTRL` read
+latency** (`SRAME_RDUMMY_CYCLELEN`, currently 45) and the AXI-side parameters the
+same way the command path was swept - write a pattern with `writel`, flush, and
+check it through the command path, sweeping one field at a time until the cache
+write appears in the chip.

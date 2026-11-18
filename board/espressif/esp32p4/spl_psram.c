@@ -833,6 +833,52 @@ void p4_spl_psram_load_payload(void)
 }
 
 /* Bulk write/read test: find the size at which PSRAM writes start to fail. */
+
+/*
+ * Cross-check the cache/AXI path against the (now working) command path.
+ * 0x48100000 is PSRAM offset 0x100000 in both views.
+ */
+
+/* ROM helpers: Cache_WriteBack_Addr / Cache_Invalidate_Addr in mask 0x10 (L1 D). */
+#define P4_ROM_CACHE_INVALIDATE_ADDR	0x4fc003e4
+#define P4_ROM_CACHE_WRITEBACK_ADDR	0x4fc003f4
+#define P4_CACHE_MAP_DCACHE		0x10
+#define P4_CACHE_MAP_ICACHE0		0x01
+
+static void psram_dcache_flush(void *addr, u32 size)
+{
+	((int (*)(u32, u32, u32))P4_ROM_CACHE_WRITEBACK_ADDR)
+		(P4_CACHE_MAP_DCACHE, (u32)addr, size);
+}
+
+static void psram_dcache_invalidate(void *addr, u32 size)
+{
+	((int (*)(u32, u32, u32))P4_ROM_CACHE_INVALIDATE_ADDR)
+		(P4_CACHE_MAP_DCACHE, (u32)addr, size);
+}
+
+static void psram_cache_check(void)
+{
+	u32 r1 = 0, r2 = 0;
+
+	/* cache write -> flush -> is it visible through the command path? */
+	writel(0x11223344, (void *)0x48100000);
+	psram_dcache_flush((void *)0x48100000, 0x1000);
+	psram_xact(0x0000, 0x100000, NULL, 0, &r1, 32, 46);
+
+	/* command write -> invalidate -> is it visible through the cache? */
+	r2 = 0x55667788;
+	psram_xact(0x8080, 0x100004, &r2, 32, NULL, 0, P4_PSRAM_WR_DUMMY);
+	psram_dcache_invalidate((void *)0x48100000, 0x1000);
+	r2 = readl((void *)0x48100004);
+
+	p4_spl_early_puts("cache: write->chip ");
+	p4_spl_early_hex(r1);
+	p4_spl_early_puts(" chip->read ");
+	p4_spl_early_hex(r2);
+	p4_spl_early_puts("\n");
+}
+
 static void psram_bulk_test(void)
 {
 	static const u32 sizes[] = { 0x40, 0x100, 0x400, 0x1000, 0x4000 };
@@ -1157,6 +1203,7 @@ int p4_spl_psram_init(void)
 	psram_timing_tune();
 	psram_mmu_map(0x01000000);
 	psram_rw_test();
+	psram_cache_check();
 	psram_bulk_test();
 	psram_mmu_report();
 
