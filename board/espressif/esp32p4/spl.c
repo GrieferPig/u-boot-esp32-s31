@@ -16,6 +16,7 @@
 #include <asm/sections.h>
 #include <linux/bitops.h>
 
+#include "spl_nor.h"
 #include "spl_psram.h"
 
 /* SYSTIMER, used as the SPL timebase (the P4 has no CLINT / rdtime). */
@@ -77,7 +78,7 @@ u64 notrace timer_early_get_count(void)
 #define P4_UART_TXFIFO_CNT_M	0x00ff0000
 #define P4_UART_TXFIFO_CNT_S	16
 
-static void p4_spl_putc(const char c)
+void p4_spl_putc(const char c)
 {
 	void *uart = (void *)P4_UART0_BASE;
 	int guard = 100000;
@@ -91,7 +92,7 @@ static void p4_spl_putc(const char c)
 	writel((u32)(unsigned char)c, uart);
 }
 
-static void p4_spl_puts(const char *s)
+void p4_spl_puts(const char *s)
 {
 	while (*s) {
 		if (*s == '\n')
@@ -176,6 +177,10 @@ void spl_board_init(void)
 {
 	p4_spl_puts("ESP32-P4 SPL active\n");
 	p4_psram_dump();
+
+	if (p4_spl_nor_probe()) {
+		p4_spl_puts("P4SPL:nor probe failed\n");
+	}
 
 	if (p4_spl_psram_init()) {
 		p4_spl_puts("spl: psram_init not ported yet; boot stopped\n");
