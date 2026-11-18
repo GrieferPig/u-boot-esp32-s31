@@ -335,9 +335,40 @@ static int psram_check(void)
 
 
 
+
+/*
+ * HP_SYS_CLKRST bits that the reference (IDF) boot has set and that we do not:
+ * without them the PSRAM side of the MMU never answers (reads return junk and
+ * any access past the ROM-mapped pages faults).
+ */
+static void psram_clkrst_fixup(void)
+{
+	void *c = (void *)P4_CLKRST_BASE;
+
+	setbits_le32(c + 0x14, BIT(13));
+	setbits_le32(c + 0x18, 0x1030);
+	setbits_le32(c + 0x1c, BIT(13));
+	setbits_le32(c + 0x2c, BIT(8));
+	writel(0x2a3, c + 0x3c);
+	setbits_le32(c + 0x40, BIT(27));
+}
+
+/* Read back one PSRAM MMU entry: the reference returns page | 0xC00. */
+static void psram_mmu_report(void)
+{
+	writel(0, (void *)(P4_MSPI2_BASE + 0x380));
+	p4_spl_early_puts("mmu0 ");
+	p4_spl_early_hex(readl((void *)(P4_MSPI2_BASE + 0x37c)));
+	writel(1, (void *)(P4_MSPI2_BASE + 0x380));
+	p4_spl_early_puts(" mmu1 ");
+	p4_spl_early_hex(readl((void *)(P4_MSPI2_BASE + 0x37c)));
+	p4_spl_early_puts("\n");
+}
+
 int p4_spl_psram_init(void)
 {
 	p4_spl_early_puts("psram: clock\n");
+	psram_clkrst_fixup();
 	psram_clock_init();
 
 	p4_spl_early_puts("psram: replay\n");
@@ -345,6 +376,7 @@ int p4_spl_psram_init(void)
 
 	p4_spl_early_puts("psram: cmds\n");
 	psram_cache_cmds();
+	psram_mmu_report();
 
 	p4_spl_early_puts("psram: check\n");
 	if (psram_check())
