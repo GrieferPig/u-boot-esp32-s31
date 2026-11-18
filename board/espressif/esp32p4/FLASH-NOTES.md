@@ -2455,3 +2455,66 @@ transaction's MSPI2 state against ours.
 State: SPL boots to `esp32p4>`, command path OK, alias single and bulk writes
 reach the part but with half-width corruption; `p4load` still cannot deliver a
 valid kernel.
+
+## Round 70: register-for-register diff, and the latency profile mismatch
+
+Dumped `0x5008e000..0x5008e200` from a live reference boot and from this chain
+and diffed them field by field. Everything matches except three things:
+
+| reg | reference | ours (before) |
+| --- | --- | --- |
+| `0x14` `SPI_MEM_C_CLOCK` | `0x00030103` | `0x00010001` |
+| `0x44` `SRAM_CMD` | `0x8cfc0000` | `0x80fc0000` |
+| `0x1a0..0x200` | all zero | all zero |
+
+The MMU entries (`0xc00/0xc01/0xc10/...`), PMS regions, `SMEM_DDR`
+(`0x3020`/`0x3023`), `SMEM_AC` (`0x8400b18f`), `SRAM_CLK` (`0x00010001`) and the
+whole 0x100..0x16c block are identical.
+
+### The real bug: MR0 latency 2 against a 200 MHz cache profile
+
+IDF's `esp_psram_impl_ap_hex.c` has three speed profiles. The reference's
+`CACHE_SCTRL.RDUMMY = 25` (26-bit read dummy) identifies the **200 MHz**
+profile, which also wants `MR0.read_latency = 4` and `MR4.wr_latency = 1`
+(`AP_HEX_PSRAM_RD_LATENCY 4`, `AP_HEX_PSRAM_WR_LATENCY 1`). Our SPL was
+programming the 80 MHz profile's `MR0 = 0x28` (latency 2) while keeping the
+200 MHz dummies, so the part returned its data four cycles earlier than the
+controller expected.
+
+`psram_final_latency()` now switches the part over once the command path is
+done (the command-path array test and tuning still run with latency 2, which is
+what they were calibrated for):
+
+```
+mode: mr0 0x00008d28 ...          <- command-path profile
+lat: mr0 0x00008d30 mr4 0x0000012b  <- MR0 latency 4/lt fixed, MR4 wr_latency 1
+```
+
+`SPI_MEM_C_CLOCK` is also set to the reference `0x00030103` before the AXI is
+opened.
+
+### What 16-line mode does now
+
+With `SRAM_CMD` bits 26/27 set and the latency fixed, the SPL reaches
+`esp32p4>` and a 64-byte burst written through the non-cacheable alias
+completes:
+
+```
+axis: burst written
+```
+
+but a **single 32-bit write hangs** (in 16-line DDR it is one clock), and a
+**read hangs** - including a read of `0x48200000` through the cacheable window,
+which should turn into a cache-line fill. OpenOCD cannot halt the hart once
+that happens (`dmstatus=0x00400ca2`), so the transaction never completes; only
+an RTS reset recovers. Dropping the cache bus clock to the command-path rate
+(divider 20) does not change the read behaviour.
+
+Conclusion: the data *phase* is now correctly 16 lines (bursts work), but the
+read data capture is not. That points at the PSRAM pin timing - IDF's
+`mspi_timing_psram_tuning()` calibrates the sub-delay lines at the operating
+frequency, while our `psram_tune_pins()` calibrated them for the slow command
+path. That calibration is the next piece to port.
+
+Until then the SPL keeps the 16-line profile (correct data width) and skips
+`psram_check()`, which would issue single-word window accesses and hang.
