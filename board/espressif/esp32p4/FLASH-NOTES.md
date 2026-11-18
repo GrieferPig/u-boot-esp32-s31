@@ -436,3 +436,42 @@ Next: disassemble the current `initr_malloc` (offsets shift between builds) and
 tick just before its `ret` and inside the loop after the call; if the return
 itself is the problem, dump the stack around `gd->start_addr_sp` (0x4ff8f8b0)
 over JTAG while halted at the tick.
+
+## Round 19: U-Boot's second init sequence completes, and the console speaks
+
+Two findings:
+
+1. **`CONFIG_SYS_MALLOC_CLEAR_ON_INIT` broke the return from `initr_malloc`.**
+   With it enabled, `mem_malloc_init()` memsets the whole `TOTAL_MALLOC_LEN`
+   (0x2f000) region, and `initr_malloc` never returned (`123` printed but no
+   `.` after the call). Disabling it in `espressif_esp32p4_sram_defconfig` fixes
+   that and the whole `init_sequence_r` now runs.
+2. **U-Boot's own console output works.** The trace now ends with real U-Boot
+   messages:
+
+```
+... : 4ff0a008.: 4ff0d772
+No serial driver found
+resetting ...
+### ERROR ### Please RESET the board ###
+```
+
+So `printf`/`puts`/`panic_str` all work: the early console is fine. What fails
+is `serial_init()` finding a `UCLASS_SERIAL` device, which panics because
+`CONFIG_REQUIRE_SERIAL_CONSOLE=y`.
+
+Things checked this round:
+
+- `arch/riscv/dts/esp32p4.dts` has `uart0: serial@500ca000` with
+  `compatible = "esp,uart0"`, `aliases { serial0 = &uart0; }` and
+  `chosen { stdout-path = "serial0:115200n8"; }` - all correct.
+- `drivers/serial/serial_esp.c` is in the build (the `esp,uart0` string is in
+  the image) and its `setbrg` falls back to `clock-frequency` when no clock
+  driver is present, so `clock-frequency = <40000000>` was added to the uart0
+  node - the panic is unchanged, so the device is not being bound at all
+  rather than failing to probe.
+- `CONFIG_LOG` and `CONFIG_BOOTSTAGE` are off, `CONFIG_ESP_SERIAL=y`.
+
+Next: check whether device model sees the DT at all (print `gd->fdt_blob` and
+the result of `initr_dm`), then either fix the bind or set
+`CONFIG_SERIAL_SEARCH_ALL` so `serial_init` can fall back to any working device.
