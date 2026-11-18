@@ -80,6 +80,19 @@ static void p4_putc_wait(char c)
 	writel((u32)c, (void *)0x500ca000);
 }
 static void p4_tick(char c) { p4_putc_wait(c); }
+
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+static void p4_hex(ulong v)
+{
+	static const char hex[] = "0123456789abcdef";
+	int i;
+
+	for (i = 28; i >= 0; i -= 4)
+		p4_putc_wait(hex[(v >> i) & 0xf]);
+}
+#endif
+
+
 #else
 #define p4_tick(c) do { } while (0)
 #endif
@@ -271,6 +284,24 @@ static int initr_dm(void)
 	bootstage_start(BOOTSTAGE_ID_ACCUM_DM_R, "dm_r");
 	ret = dm_init_and_scan(false);
 	bootstage_accum(BOOTSTAGE_ID_ACCUM_DM_R);
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+	p4_tick('D');
+	p4_tick(' ');
+	p4_hex((ulong)gd->fdt_blob);
+	p4_tick(' ');
+	p4_hex((ulong)fdt_check_header(gd->fdt_blob));
+	p4_tick(' ');
+	p4_hex(ret);
+	p4_tick(' ');
+	p4_hex((ulong)uclass_id_count(UCLASS_SERIAL));
+	p4_tick(' ');
+	p4_hex((ulong)fdt_path_offset(gd->fdt_blob, "/soc/serial@500ca000"));
+	p4_tick(' ');
+	p4_hex((ulong)fdt_totalsize(gd->fdt_blob));
+	p4_tick(' ');
+	p4_hex((ulong)uclass_id_count(UCLASS_SIMPLE_BUS));
+	p4_tick(10);
+#endif
 	if (ret)
 		return ret;
 

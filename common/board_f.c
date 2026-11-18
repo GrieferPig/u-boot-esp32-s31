@@ -580,6 +580,20 @@ static int reserve_global_data(void)
 
 static int reserve_fdt(void)
 {
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+	/*
+	 * U-Boot runs in place. The appended DT sits where .bss will be cleared,
+	 * so it must be copied out before the BSS wipe: park it in the free SRAM
+	 * between the SPL area and the heap.
+	 */
+	if (gd->fdt_blob) {
+		gd->fdt_size = ALIGN(fdt_totalsize(gd->fdt_blob), 32);
+		gd->new_fdt = (void *)0x4ff70000;
+		debug("Reserving %lu Bytes for FDT at: %08lx\n",
+		      gd->fdt_size, (ulong)gd->new_fdt);
+	}
+	return 0;
+#endif
 	if (!IS_ENABLED(CONFIG_OF_EMBED)) {
 		/*
 		 * If the device tree is sitting immediately above our image
