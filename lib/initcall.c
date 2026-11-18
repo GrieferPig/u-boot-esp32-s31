@@ -85,6 +85,7 @@ int initcall_run_list(const init_fnc_t init_sequence[])
 	int ret = 0;
 
 	for (ptr = init_sequence; func = *ptr, func; ptr++) {
+		p4_tick(58);	/* ':' marks the top of each iteration */
 		type = initcall_is_event(func);
 
 		if (type) {
