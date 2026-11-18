@@ -2694,3 +2694,33 @@ sequenced/sampled - most likely the read-data capture timing that IDF's
 does not implement. Porting that tuning (DIN dummy sweep + DQS phase + delay
 line) is the next real step; register archaeology against the end state has
 been exhausted.
+
+## Round 75: the read dummy decides whether a read completes at all
+
+Bisecting the two settings that changed since round 67 (where window reads
+returned data) against the current ones:
+
+| config | window read of a command-path marker |
+| --- | --- |
+| 16-line, dummy 26, L2 on | hangs |
+| 8-line, dummy 26, L2 on | garbage (`0x4b4b`-style) |
+| 8-line, dummy 46, L2 off | **completes**: `0x1111ffff` for marker `0x11111111` |
+| 8-line, dummy 46, L2 on | same as above |
+| 16-line, dummy 46, L2 off | hangs |
+
+So `CACHE_SCTRL.RDUMMY = 45` (46 cycles), the value this port tuned for itself
+in round 67, is what lets the read transaction complete; the reference's 25
+(26 cycles) never completes a read here. With dummy 46 the window read is
+partially right - the low 16 bits of the marker come back correctly
+(`0x1111ffff` vs the command path's `0x11111111`), and reading eight
+consecutive words shows a mix of correct low halves and `0xffffffff`.
+
+That pins the remaining defect precisely: the cache-path data phase moves only
+16 bits per access. In 16-line mode one clock would be exactly 32 bits, which
+is why that mode is the right target - but with the reference's 26-cycle dummy
+it hangs and with 46 it still hangs, so the 16-line read has a separate
+sequencing problem (a line-fill read never completes).
+
+State left: 16-line data phase (correct write width), reference dummy 26 as
+committed, boots to `esp32p4>`. p4load still cannot deliver because window
+reads are not usable; the command path remains the only correct reader.
