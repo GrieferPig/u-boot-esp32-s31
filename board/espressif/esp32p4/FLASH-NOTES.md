@@ -890,3 +890,46 @@ Next round: replicate the whole IDF `HP_SYS_CLKRST` state (0x14 |= BIT(13),
 the SPL before the PSRAM cache commands, then re-test the MMU read-back - if the
 entries read back as `page | 0xC00` the window is available and the kernel load
 path can go ahead.
+
+## Round 30: clkrst and PMU comparison
+
+Mirrored the reference `HP_SYS_CLKRST` bits in the SPL
+(`spl_psram.c: psram_clkrst_fixup()`: 0x14 |= BIT(13), 0x18 |= 0x1030,
+0x1c |= BIT(13), 0x2c |= BIT(8), 0x3c = 0x2a3, 0x40 |= BIT(27)), added a one-shot
+MMU read-back print, and retested:
+
+```
+psram: clock
+psram: replay
+psram: cmds
+mmu0 0x000001a0 mmu1 0x00001118     <- still junk, reference reads 0xc00/0xc01
+```
+
+So the clkrst bits alone do not wake the PSRAM MMU block.
+
+Dumped the PMU (`0x50115000`) on both chains. **Lots of differences**, e.g.
+
+| offset | our chain | reference |
+|---|---|---|
+| 0x14 | 00000000 | 7f800000 |
+| 0x18 | 00500000 | 02ec0000 |
+| 0x1c | 00000000 | 210000a0 |
+| 0x20 | 00000000 | ffffffff |
+| 0x24 | 00000000 | 08000000 |
+| 0x28 | c6677180 | a04037f0 |
+| 0x80 | 00500000 | c0800000 |
+| 0x84 | 00000000 | 92800200 |
+| 0x88 | 00000000 | ffffffff |
+| 0x8c | 00000000 | 30000000 |
+| 0x90 | c6670000 | c0640000 |
+| 0x9c | 00000000 | e8400000 |
+| 0x1c0 | 40200000 | 40200180 |
+| 0x1c4 | a0000000 | 97000000 |
+| 0x1d4 | a0000000 | 86800000 |
+
+Caveat: the reference dump was taken with Linux running, so some of these are
+runtime power-management values rather than bootloader ones. The next comparison
+must be taken during the IDF **loader** phase (halt a few hundred ms after reset,
+before Linux starts) so the PSRAM/analogue power state can be copied faithfully -
+`0x80..0x9c` and `0x1c0..0x1d4` look like the PSRAM PHY/LDO configuration that
+our `psram: replay` tables do not cover.
