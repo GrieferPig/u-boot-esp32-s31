@@ -2029,3 +2029,38 @@ So the next round should start the ground-up port as planned: a new
 clock, mode registers through MSPI3, the connection check, then
 `s_config_mspi_for_psram()` and `mspi_timing_psram_tuning()`), rather than
 layering more writes onto the hand-rolled sequence.
+
+## Round 61: the clock block offsets are now known, and the clock is not the problem
+
+Read the `HP_SYS_CLKRST` struct layout from
+`soc/esp32p4/register/hw_ver3/soc/hp_sys_clkrst_struct.h` (all registers are 4
+bytes wide, in order):
+
+| offset | register |
+|---|---|
+| 0x00 | clk_en0 |
+| 0x04..0x10 | root_clk_ctrl0..3 |
+| 0x14..0x20 | soc_clk_ctrl0..3 |
+| 0x24..0x2c | ref_clk_ctrl0..2 |
+| 0x30..0x3c | peri_clk_ctrl00..03 |
+| 0x40 | peri_clk_ctrl10 |
+
+So the registers IDF's `psram_ctrlr_ll_enable_module_clock()` touches are
+`peri_clk_ctrl00` (0x30, `reg_psram_pll_clk_en` / `reg_psram_core_clk_en` /
+`reg_psram_clk_src_sel`), and `soc_clk_ctrl0` is **0x14**, not 0x2c. Both of
+those match the reference in our dump - so the PSRAM module clock, its source
+select and the core clock are all already correct.
+
+The three registers that differ (`0x2c` = `ref_clk_ctrl2`, `0x3c` =
+`peri_clk_ctrl03`, `0x40` = `peri_clk_ctrl10`) are **not** touched by IDF's
+PSRAM enable at all: the reference simply has them set from earlier stages.
+Trying to force `0x2c` bit 8 through the replay table (so it stays set) puts the
+board straight into a reset loop again.
+
+Conclusion: the clock path is not what gates the AXI port. With the clock, the
+MMU entries, the PMS regions and every MSPI2 field eliminated, the remaining
+suspects for the cache path are the ones we have still not exercised
+individually: `SMEM_ECC_CTRL` page size (0x174), the `MMU_ITEM_*` way selection
+versus what the AXI port consults, and the `SMEM_DDR` DDR/DQS loop bits. The
+ground-up port remains the plan, but it should be built around IDF's exact
+`psram_ctrlr_ll` helper set rather than ad-hoc writes.
