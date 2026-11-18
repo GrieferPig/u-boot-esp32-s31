@@ -841,3 +841,52 @@ configuration**, not by the MMU table - `SPI_MEM_S_CTRL/CTRL2/CACHE_SCTRL`
 (0x08/0x10/0x40 on 0x5008e000) describe the address window and the PSRAM size.
 Compare those against a working IDF boot (`psram: cmds` replayed only a subset),
 and check `SPI_MEM_S_MISC` for the "cache size" field before touching the MMU.
+
+## Round 29: the PSRAM MMU block does not answer on our chain
+
+Compared our chain with the working reference (IDF) chain over JTAG, register by
+register.
+
+**MSPI2 (0x5008e000) is identical** - CMD/CTRL/CTRL1/CTRL2/CLOCK/USER1/USER2,
+`CACHE_FCTRL` 0x3c = 0x40000001, `CACHE_SCTRL` 0x40 = 0x02f7c679, the SRAM
+command registers 0x44..0x54, PMS 0x100..0x10c = 3 and 0x160 = 0 - all match the
+reference boot where PSRAM works.
+
+**The MMU entries answer on the reference and not on ours.** Reading an entry is
+"write the index to `+0x380`, read `+0x37c`" (exactly what IDF's
+`mmu_ll_read_entry()` does):
+
+| entry | reference chain | our chain |
+|---|---|---|
+| 0 | `00000c00` | `000001a0` |
+| 1 | `00000c01` | `00001510` |
+| 16 | `00000c10` | `00000e9d` |
+| 255 | `00000cff` | `00000d73` |
+
+So the reference has the expected `page | 0xC00` entries for the whole 16 MiB,
+while our reads are garbage - the S-side MMU is not responding at all.
+`MMU_POWER_CTRL` (0x384) reads `0x13200004` on **both** chains, so the page size
+and power bits are not the difference.
+
+**HP_SYS_CLKRST (0x500e6000) differs**, and these are the clock enables IDF sets
+that our SPL does not:
+
+| offset | our chain | reference |
+|---|---|---|
+| 0x14 | `e6df97ff` | `e6dfb7ff` (bit 13) |
+| 0x18 | `0e040004` | `0e041034` (bits 12, 5, 4) |
+| 0x1c | `60a000be` | `60a020be` (bit 13) |
+| 0x2c | `00000000` | `00000100` (bit 8) |
+| 0x38 | `00000492` | `00000000` (we set the cache force-on bits here) |
+| 0x3c | `00000000` | `000002a3` |
+| 0x40 | `00000000` | `08000000` (bit 27) |
+
+Setting only 0x40 bit 27 from the prompt is not enough (the board still resets on
+the first access past the ROM-mapped pages), so the remaining enables are among
+0x2c bit 8 and 0x3c = 0x2a3 (they look like the cache/PSRAM clock dividers).
+
+Next round: replicate the whole IDF `HP_SYS_CLKRST` state (0x14 |= BIT(13),
+0x18 |= 0x1030, 0x1c |= BIT(13), 0x2c |= BIT(8), 0x3c = 0x2a3, 0x40 |= BIT(27)) in
+the SPL before the PSRAM cache commands, then re-test the MMU read-back - if the
+entries read back as `page | 0xC00` the window is available and the kernel load
+path can go ahead.
