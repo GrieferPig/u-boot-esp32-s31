@@ -999,3 +999,37 @@ So our SPL leaves clock selectors/dividers at 0x80/0x84 and 0xa4/0xa8 in a state
 the reference never has. Next round: identify those fields (they look like the
 MSPI/PSRAM clock dividers of `HP_SYS_CLKRST`) and bring them to the reference
 values, then re-check whether the PSRAM MMU answers.
+
+## Round 33: the PSRAM MMU responds now - the block was gated by clkrst 0x38
+
+`HP_SYS_CLKRST + 0x38` (`PERI_CLK_CTRL02`) is the gate. Our SPL was setting
+`CACHE_CTRL0_FORCE_ON` bits there (`0x492`), while the reference boot leaves the
+register at **0**. With those bits set, every read of the PSRAM MMU item content
+(`0x5008e37c`) returned junk; with them cleared the same read returns the real
+entry:
+
+```
+psram: clock / replay / cmds
+psram mmu0 0x00000c00          <- correct entry, was 0x1a0 before
+```
+
+So after all these rounds the PSRAM-side MMU is finally readable and writable
+from our chain. What still fails is the actual *access*: reading (or writing)
+`0x48100000` right after mapping still resets the board, while `0x48000000`
+works.
+
+Also learned this round: `Cache_Invalidate_All` (0x4fc00404) **does** work from
+the SPL when called with the same mask the flash init uses (`0x3`, the
+`CACHE_MAP_L1_ALL` value), and resets the board when called with `0x3f`. So the
+helper itself is fine - the mask matters.
+
+State: the `0x38` write is removed in `spl_nor.c` (the flash window and the
+prompt still work), U-Boot writes the 256 PSRAM entries in `board_late_init`
+(`P4_UBOOT: psram mmu written`), and the chain is verified working again
+(`md 0x48000000` -> `00000000 01010101`). The mapping code that reads a page as
+a test was removed again because that read resets the board.
+
+Next: bisect which page is the last one that works (entry 1, 2, 4, 8...) by
+mapping and reading one page at a time from U-Boot, and check whether the PSRAM
+chip needs 4-byte addressing or a different mode for pages beyond the first
+ones - the MMU side is no longer the suspect.

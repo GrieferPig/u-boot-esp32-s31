@@ -160,12 +160,31 @@ void hw_watchdog_init(void)
 }
 #endif
 
+
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+/* Map the PSRAM window through the MSPI2 "S" MMU. */
+static void p4_psram_map(u32 size)
+{
+	u32 entries = size >> 16;
+	u32 i;
+
+	for (i = 0; i < entries; i++) {
+		writel(i, (void *)0x5008e380);
+		writel(i | BIT(11) | BIT(10), (void *)0x5008e37c);
+	}
+	puts("P4_UBOOT: psram mmu written\n");
+}
+#endif
+
 int board_late_init(void)
 {
 #ifdef CONFIG_ESP32P4_HW_IDF_HANDOFF
 	puts("P4_UBOOT: IDF hardware handoff (experimental)\n");
 #else
 	puts("P4_UBOOT: M-mode bootloader active (emulator only)\n");
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+	p4_psram_map(0x01000000);
+#endif
 #endif
 	return 0;
 }

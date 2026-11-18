@@ -85,7 +85,10 @@ int p4_spl_flash_init(u32 size)
 		return -1;
 
 	/* Make sure the cache block clock is up before touching the MMU. */
-	setbits_le32((void *)CACHE_CTRL0_REG, CACHE_CTRL0_FORCE_ON);
+	/*
+	 * Do not touch PERI_CLK_CTRL02 here: the reference boot leaves it at 0,
+	 * and setting those bits stops the PSRAM side of the MMU from answering.
+	 */
 
 	p4_spl_puts("init ");
 	((rom_void_fn)ROM_CACHE_INIT)();
