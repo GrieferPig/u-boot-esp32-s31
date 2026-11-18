@@ -722,3 +722,46 @@ So the idle prompt is stable now. Follow-ups:
 - the heartbeat print should be removed once the port is finished,
 - the real objective now is loading the DT and kernel and running `booti`,
   which needs a PSRAM window beyond the ~128 KiB the SPL can map today.
+
+## Round 26: clean watchdog hook, and the prompt can be driven
+
+The watchdog feed is now idiomatic:
+
+- `arch/riscv/cpu/cpu.c` has a `__weak void hw_watchdog_reset(void) {}` default,
+  which matters because the ESP32-P4 SPL is a **separate U-Boot build** (its own
+  defconfig, no `CONFIG_SPL_BUILD`), so the SPL links the weak stub while
+  U-Boot proper uses the board implementation.
+- `board/espressif/esp32p4/board.c` implements it: RWDT feed, SWDT feed and the
+  feed key of all four TIMG MWDTs (`0x50116000`, key `0x50d83aa1`).
+- `drivers/serial/serial_esp.c` calls it from `esp_serial_pending()`, which is
+  the only regular activity U-Boot has while idling at the prompt.
+
+Verified: 20 s capture, **0 ROM banners, 1 prompt**, no resets.
+
+A small tool to drive the prompt from Windows now exists:
+`C:\Users\evanl\AppData\Local\Temp\p4x\p4_cmd.ps1 -Commands "cmd1;cmd2"`
+(resets the board, waits for `esp32p4>`, then sends the commands and captures
+the output). `md` and `bdinfo` work over it:
+
+```
+esp32p4> md 0x48000000 4
+48000000: 00000000 01010101 02020202 03030303
+esp32p4> bdinfo
+relocaddr   = 0x4ff00000
+reloc off   = 0x00000000
+fdt_blob    = 0x4ff70000
+```
+
+So U-Boot can read PSRAM at 0x48000000 (the first bytes are the SPL's own test
+pattern), but **writing at 0x48100000 resets the board**: the mapped PSRAM
+window is still only about 128 KiB, exactly as measured from the SPL earlier.
+
+Next round: extend the PSRAM MMU mapping in the SPL. The flash window is already
+mapped read-only at 0x40000000 (`md 0x40200000` reads the kernel image), so once
+PSRAM beyond 128 KiB works the path is:
+
+```
+copy flash 0x900000 -> PSRAM 0x48f00000   (DT)
+copy flash 0x200000 -> PSRAM 0x48000000   (kernel)
+booti 0x48000000 - 0x48f00000
+```
