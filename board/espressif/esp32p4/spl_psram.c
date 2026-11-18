@@ -987,17 +987,27 @@ static void psram_range_check(void)
  * cache-line fills instead.
  */
 #define P4_ROM_CACHE_SET_L2_MODE	0x4fc003d4u
+#define P4_ROM_CACHE_INVALIDATE_ALL	0x4fc00404u
 #define P4_ROM_CACHE_ENABLE_L2		0x4fc00504u
+#define P4_CACHE_MAP_L2			BIT(5)
 
 
 static void psram_enable_l2_cache(void)
 {
 	void (*set_mode)(u32 size, u32 ways, u32 line) =
 		(void (*)(u32, u32, u32))P4_ROM_CACHE_SET_L2_MODE;
+	void (*invalidate_all)(u32 map) = (void (*)(u32))P4_ROM_CACHE_INVALIDATE_ALL;
 	void (*enable)(u32 autoload) =
 		(void (*)(u32))P4_ROM_CACHE_ENABLE_L2;
 
+	/*
+	 * cache_hal_init_l2_cache() invalidates the L2 after programming the
+	 * split; without it the cache wakes up with whatever tags the power-on
+	 * state left behind and reads come back as 0xffffffff without ever
+	 * touching the part.
+	 */
 	set_mode(10 /* CACHE_SIZE_256K */, 8, 3 /* CACHE_LINE_SIZE_64B */);
+	invalidate_all(P4_CACHE_MAP_L2);
 	enable(0);
 
 	p4_spl_early_puts("l2: enabled\n");

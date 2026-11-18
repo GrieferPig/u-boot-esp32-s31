@@ -2617,3 +2617,36 @@ The remaining difference has to be in the *read transaction itself*, which is
 not visible in the steady-state registers. Next: freeze the reference in a real
 PSRAM read (hardware watchpoint on `0x48xxxxxx`) and dump MSPI2 while the
 transaction is in flight, then compare against a trace of ours.
+
+## Round 73: window reads never reach the part
+
+Planted markers through the proven command path and read them back through the
+cacheable window. With the 8-line data phase (the mode where window reads do
+not hang):
+
+```
+command write 0xdeadbeef -> PSRAM 0x1000
+command write 0xcafebabe -> PSRAM 0x1004
+esp32p4> md 0x48001000 2
+48001000: ffffffff ffffffff
+```
+
+The chip holds the markers (the command path wrote and verified them), but the
+window read returns all ones. So window reads **never reach the part** - they
+complete (in 8-line mode) with an all-ones data phase. In 16-line mode the same
+access hangs instead. That rules out "the read is a cache hit" as the
+explanation and pins the fault to the MSPI2 read data capture itself.
+
+Also added the missing L2 invalidate: IDF's `cache_hal_init_l2_cache()` calls
+`Cache_Invalidate_All(CACHE_MAP_L2_CACHE)` right after
+`Cache_Set_L2_Cache_Mode()`, and we had only programmed the split and enabled
+the cache. With stale tags a read can be answered as `0xffffffff` without ever
+touching the part, so this was a plausible cause - but adding it (ROM
+`0x4fc00404`, map `BIT(5)`) did not change the result, so the all-ones data
+comes from the controller, not from stale cache tags.
+
+State: 16-line data phase, 80 MHz operating point, 256 KB L2 cache with
+invalidate, burst write through the alias, boots to `esp32p4>`.
+
+Remaining question is narrow now: why does the MSPI2 read shift in all ones
+when the chip is driving data for the same address on MSPI3?
