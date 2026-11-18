@@ -2724,3 +2724,56 @@ sequencing problem (a line-fill read never completes).
 State left: 16-line data phase (correct write width), reference dummy 26 as
 committed, boots to `esp32p4>`. p4load still cannot deliver because window
 reads are not usable; the command path remains the only correct reader.
+
+## Round 76: self-healing init, and what the S31 port does differently
+
+### Self-healing PSRAM init
+
+An aborted transaction (watchdog reset, bus wedge) leaves the MSPI blocks
+holding a half-finished command, so the next boot reads the same stale value
+from every register and the mode-register verify fails. `psram_mode_reg_init()`
+now reports failure, and `p4_spl_psram_init()` reacts by pulsing the dual-MSPI
+resets and re-establishing the pads, OPI/DTR mode, replay and mode registers:
+
+```
+psram: mode unverified, resetting
+mode: mr0 0x00008d28 mr4 0x000080df mr8 0x0000054b
+```
+
+Verified by forcing both verifies to fail once: the recovery ran, the second
+programming verified, and the boot continued to `esp32p4>`. (The plain
+single retry inside the init is separate and still there.)
+
+### Why the S31 code cannot simply be dropped in
+
+`board/espressif/esp32s31/spl_psram.c` is genuinely the model - this port's
+`psram_xact()`, `psram_tune_pins()`, mode-register programming and AXI config
+layout come from it - but the two chips expose the PSRAM through different
+hardware:
+
+| | S31 | P4 |
+| --- | --- | --- |
+| device | octal (8-line) PSRAM | hex (16-line) PSRAM |
+| controller bases | `0x20500000`/`0x20502000` | `0x5008e000`/`0x5008f000` |
+| MMU entries | 1024 | 256 |
+| bus clock used | MPLL/20 (20 MHz) | reference build: 80 MHz |
+| boot layout | SPL entirely in internal RAM | U-Boot and stack also in L2MEM |
+
+What the S31 does that this port still does not:
+
+1. `psram_bus_clock(PSRAM_MPLL_FREQ_MHZ / 20)` - the whole S31 chain runs the
+   part at 20 MHz, which is also the clock our own dummy tuning was done at.
+   Tested on the P4: reads still return exactly 16 bits per access
+   (`0x1111ffff` for `0x11111111`), so the clock is not the cause.
+2. `SPI_SMEM_S_ECC_CTRL_REG` page size = 2048.
+3. `SPI_SMEM_S_TIMING_CALI_REG` / `SPI_MEM_S_TIMING_CALI_REG` DLL enable on both
+   controllers.
+4. The cache/MMU bring-up in `spl_cache_mmu.c`: force the cache clocks on
+   (`HP_SYS_CLKRST_CACHE_CTRL0`, bits 1/4/7/10), set the MMU page size to 64 K,
+   invalidate all MMU entries, then `Cache_Enable_L1_DCache()` +
+   `Cache_Enable_L1_CORE0_ICache()`.
+
+Those four are the concrete next steps to port; items 1 and 4 are the ones
+never attempted on the P4. The P4's cache clock lives in the HP_SYSTEM block
+(`HP_SYSTEM_L2_CACHE_CLK_ON`), not in HP_SYS_CLKRST as on the S31, so item 4
+needs the P4 register located first.

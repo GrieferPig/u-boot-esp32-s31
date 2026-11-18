@@ -482,6 +482,21 @@ static const u32 psram_pad_state[][2] = {
 	{ 0x500e10d8, 0x00000802u }, { 0x500e10dc, 0x00000802u },
 };
 
+/*
+ * A watchdog reset (or any abort) in the middle of a PSRAM transaction leaves
+ * the MSPI blocks holding a half-finished command: the next boot then reads
+ * the same stale value from every register and the mode-register verify
+ * fails. Pulse the dual-MSPI resets so the controllers come back clean before
+ * the state is replayed.
+ */
+static void psram_controller_reset(void)
+{
+	setbits_le32((void *)P4_RST_EN0, P4_RST_DUAL_MSPI_AXI | P4_RST_DUAL_MSPI_APB);
+	udelay(10);
+	clrbits_le32((void *)P4_RST_EN0, P4_RST_DUAL_MSPI_AXI | P4_RST_DUAL_MSPI_APB);
+	udelay(200);
+}
+
 static void psram_pads_init(void)
 {
 	u32 i;
@@ -719,7 +734,7 @@ static int psram_mode_reg_verify(u32 mr0, u32 mr8)
 	return -1;
 }
 
-static void psram_mode_reg_init(void)
+static int psram_mode_reg_init(void)
 {
 	/*
 	 * Mode registers are volatile: a cold power cycle starts from the
@@ -739,7 +754,7 @@ static void psram_mode_reg_init(void)
 	if (psram_mode_reg_verify(mr0, mr8)) {
 		psram_mode_reg_write(mr0, mr8);
 		if (psram_mode_reg_verify(mr0, mr8))
-			p4_spl_early_puts("mode: registers unverified\n");
+			return -1;
 	}
 
 	p4_spl_early_puts("mode: mr0 ");
@@ -749,6 +764,8 @@ static void psram_mode_reg_init(void)
 	p4_spl_early_puts(" mr8 ");
 	p4_spl_early_hex(psram_read_reg(0x8, 12));
 	p4_spl_early_puts("\n");
+
+	return 0;
 }
 
 
@@ -1353,7 +1370,17 @@ int p4_spl_psram_init(void)
 
 	psram_pads_init();
 	psram_probe();
-	psram_mode_reg_init();
+	if (psram_mode_reg_init()) {
+		p4_spl_early_puts("psram: mode unverified, resetting\n");
+		/* The reset clears the controllers, so the pads and the OPI/DTR
+		 * mode have to be re-established before the state is replayed. */
+		psram_controller_reset();
+		psram_pin_mux_init();
+		psram_opi_dtr_mode();
+		psram_replay();
+		psram_pmu_fixup();
+		psram_mode_reg_init();
+	}
 	psram_cache_cmds();
 	psram_axi_config();
 
