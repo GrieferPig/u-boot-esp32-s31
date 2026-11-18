@@ -2064,3 +2064,41 @@ individually: `SMEM_ECC_CTRL` page size (0x174), the `MMU_ITEM_*` way selection
 versus what the AXI port consults, and the `SMEM_DDR` DDR/DQS loop bits. The
 ground-up port remains the plan, but it should be built around IDF's exact
 `psram_ctrlr_ll` helper set rather than ad-hoc writes.
+
+## Round 62/63: found the rev3 MSPI workaround, but HP_SYS 0x500001a4 is sealed off
+
+IDF has a **P4 rev3 specific PSRAM workaround** we had never seen
+(`esp_psram_p4_rev3_workaround()` in `esp_psram/system_layer/esp_psram.c`, plus
+`esp_hw_support/lowpower/port/esp32p4/p4_rev3_mspi_workaround.S`): the MSPI needs
+
+1. `psram_ctrlr_ll_disable_core_err_resp()` writes 0x7 to
+   `HP_SYSTEM_CORE_ERR_RESP_DIS_REG` = `DR_REG_HP_SYS_BASE + 0x1a4`,
+2. one MMU entry mapped, then **two dummy reads** through the PSRAM window
+   (IDF uses `0x88000000`; its comment says the mapping is later overwritten by
+   the real one),
+3. `esp_rom_delay_us(1)`,
+4. `_psram_ctrlr_ll_reset_module_clock(MSPI2)` (pulse `HP_SYS_CLKRST` `hp_rst_en0`
+   0xc0, `reg_rst_en_dual_mspi_axi` = bit 22 and `reg_rst_en_dual_mspi_apb` = bit 24),
+5. `psram_ctrlr_ll_enable_core_err_resp()` and a register restore.
+
+Also learned the exact reset bits: **MSPI AXI reset = 0xc0 bit 22, APB = bit 24** -
+which our `psram_clock_init()` already pulses.
+
+Tried the workaround in the SPL: with the module reset it never reaches the cache
+check (30 banners), and without it the same. The trap log shows why:
+
+```
+P4TRAP cause=0x38000007 epc=0x4ff4164e TVAL=500001a4
+```
+
+**`0x500001a4` (the error-response control register) is not writable from our
+SPL** - a store access fault. So the workaround cannot be reproduced as-is: our
+chain does not have the same access rights to HP_SYS that IDF's bootloader has
+(the PMS/security configuration we replay blocks it). That is itself a useful
+finding: the SPL is running with restricted HP_SYS access, and any future step
+that needs those registers (error-response control, possibly parts of the AXI
+bring-up) has to fix the PMS configuration first.
+
+The traceback positioned the failing store exactly, and everything before it
+(`tune: reference ok`, `fastest div 0x1`, `margin 0x1f`, `tune: ok`) still works
+with `CACHE_SCTRL` bit 21 set, which is now kept.

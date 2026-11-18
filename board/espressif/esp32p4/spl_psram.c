@@ -890,6 +890,8 @@ static void psram_range_check(void)
 	p4_spl_early_puts("\n");
 }
 
+
+
 static void psram_cache_check(void)
 {
 	u32 r1 = 0, r2 = 0;
@@ -1254,6 +1256,7 @@ int p4_spl_psram_init(void)
 	psram_word_test();
 	psram_timing_tune();
 	psram_mmu_map(0x01000000);
+
 	psram_rw_test();
 	psram_range_check();
 	psram_cache_check();
