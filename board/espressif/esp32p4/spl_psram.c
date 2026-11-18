@@ -395,70 +395,52 @@ static void psram_mmu_report(void)
 }
 
 
+
 /*
- * Local user-mode transaction on MSPI3, needed because the ROM's
- * esp_rom_spi_cmd_start never returns when driven from the SPL.
+ * Hex PSRAM register transactions over MSPI3.
  *
- * Register map (0x5008f000, hw_ver3 spi_mem_s_reg.h):
- *   0x00 CMD    bit18 USR (start, clears when done)
- *   0x04 ADDR
- *   0x08 CTRL   bit4 DQ_OE, bit5 CK_OE, bit6 CS_OE, bit9 CK_IDLE_EDGE
- *   0x18 USER   bit27 MOSI, bit28 MISO, bit29 DUMMY, bit30 ADDR, bit31 CMD
- *   0x1c USER1  [5:0] DUMMY_CYCLELEN, [8:6] DBYTELEN, [31:26] ADDR_BITLEN
- *   0x20 USER2  [15:0] COMMAND_VALUE, [31:28] COMMAND_BITLEN
- *   0x24 MOSI_DLEN, 0x28 MISO_DLEN, 0x40.. W0..W15 (2 bytes per DDR cycle)
+ * Ported from the working ESP32-S31 implementation in this tree
+ * (board/espressif/esp32s31/spl_psram.c), with the P4 register bases:
+ *   CMD 0x00, ADDR 0x04, CTRL 0x08, USER 0x18, USER1 0x1c, USER2 0x20,
+ *   MOSI_DLEN 0x24, MISO_DLEN 0x28, MISC 0x34, CACHE_FCTRL 0x3c,
+ *   DDR 0xd4 and the data buffer at 0x58 (W0).
  */
-static int psram_txn_local(u16 cmd, u16 cmd_bits, u32 addr, u32 addr_bits,
-			   u32 dummy_bits, u32 *tx, u32 tx_bits,
-			   u32 *rx, u32 rx_bits)
-{
-	u32 user = 0, user1, user2;
-	int i;
+#define P4_MSPI_S_CMD		(P4_MSPI3_BASE + 0x00)
+#define P4_MSPI_S_ADDR		(P4_MSPI3_BASE + 0x04)
+#define P4_MSPI_S_CTRL		(P4_MSPI3_BASE + 0x08)
+#define P4_MSPI_S_USER		(P4_MSPI3_BASE + 0x18)
+#define P4_MSPI_S_USER1		(P4_MSPI3_BASE + 0x1c)
+#define P4_MSPI_S_USER2		(P4_MSPI3_BASE + 0x20)
+#define P4_MSPI_S_MOSI_DLEN	(P4_MSPI3_BASE + 0x24)
+#define P4_MSPI_S_MISO_DLEN	(P4_MSPI3_BASE + 0x28)
+#define P4_MSPI_S_MISC		(P4_MSPI3_BASE + 0x34)
+#define P4_MSPI_S_CACHE_FCTRL	(P4_MSPI3_BASE + 0x3c)
+#define P4_MSPI_S_W0		(P4_MSPI3_BASE + 0x58)
+#define P4_MSPI_S_DDR		(P4_MSPI3_BASE + 0xd4)
 
-	if (cmd_bits)
-		user |= BIT(31);
-	if (addr_bits)
-		user |= BIT(30);
-	if (dummy_bits) {
-		user |= BIT(29);
-		user |= BIT(26);			/* DUMMY_IDLE */
-	}
-	if (tx_bits) {
-		user |= BIT(27);
-		writel(tx_bits - 1, (void *)(P4_MSPI3_BASE + 0x24));
-	}
-	if (rx_bits) {
-		user |= BIT(28);
-		writel(rx_bits - 1, (void *)(P4_MSPI3_BASE + 0x28));
-	}
-
-	writel(addr, (void *)(P4_MSPI3_BASE + 0x04));
-
-	user1 = ((addr_bits ? addr_bits - 1 : 0) << 26) | (1u << 6) |
-		(dummy_bits / 2);
-	writel(user1, (void *)(P4_MSPI3_BASE + 0x1c));
-
-	user2 = ((cmd_bits ? cmd_bits - 1 : 0) << 28) | cmd;
-	writel(user2, (void *)(P4_MSPI3_BASE + 0x20));
-
-	if (tx && tx_bits)
-		memcpy((void *)(P4_MSPI3_BASE + 0x40), tx, (tx_bits + 7) / 8);
-
-	writel(user, (void *)(P4_MSPI3_BASE + 0x18));
-	writel(BIT(18), (void *)(P4_MSPI3_BASE + 0x00));
-
-	for (i = 0; i < 100000; i++) {
-		if (!(readl((void *)(P4_MSPI3_BASE + 0x00)) & BIT(18)))
-			break;
-	}
-	if (readl((void *)(P4_MSPI3_BASE + 0x00)) & BIT(18))
-		return -1;
-
-	if (rx && rx_bits)
-		*rx = readl((void *)(P4_MSPI3_BASE + 0x40));
-
-	return 0;
-}
+#define P4_USR			BIT(18)
+#define P4_USR_MOSI		BIT(27)
+#define P4_USR_MISO		BIT(28)
+#define P4_USR_DUMMY		BIT(29)
+#define P4_USR_ADDR		BIT(30)
+#define P4_USR_COMMAND		BIT(31)
+#define P4_USR_ADDR_BITLEN_S	26
+#define P4_USR_COMMAND_BITLEN_S	28
+#define P4_CS0_DIS		BIT(0)
+#define P4_CS1_DIS		BIT(1)
+#define P4_CACHE_USR_ADDR_4BYTE	BIT(1)
+#define P4_FDOUT_OCT		BIT(4)
+#define P4_FDIN_OCT		BIT(5)
+#define P4_FADDR_OCT		BIT(6)
+#define P4_FCMD_QUAD		BIT(8)
+#define P4_FCMD_OCT		BIT(9)
+#define P4_FASTRD_MODE		BIT(13)
+#define P4_FREAD_DUAL		BIT(14)
+#define P4_FREAD_QUAD		BIT(20)
+#define P4_FREAD_DIO		BIT(23)
+#define P4_FREAD_QIO		BIT(24)
+#define P4_FMEM_DDR_EN		BIT(0)
+#define P4_FMEM_DDR_CMD_DIS	BIT(4)
 
 /*
  * PSRAM pad configuration: the reference boot has the output enable bit and the
@@ -500,25 +482,107 @@ static void psram_pads_init(void)
 		writel(psram_pad_state[i][1], (void *)psram_pad_state[i][0]);
 }
 
-/* Hex PSRAM register read: cmd 0x4040, 32 bit address, 16 bit result. */
-static int psram_read_reg(u32 reg, u32 dummy, u32 *out)
+static void psram_opi_dtr_mode(void)
 {
-	return psram_txn_local(0x4040, 16, reg, 32, dummy, NULL, 0, out, 16);
+	u32 clear = P4_FCMD_OCT | P4_FCMD_QUAD | P4_FREAD_QIO | P4_FREAD_QUAD |
+		    P4_FREAD_DIO | P4_FREAD_DUAL | P4_FASTRD_MODE |
+		    P4_FADDR_OCT | P4_FDIN_OCT | P4_FDOUT_OCT;
+
+	clrbits_le32((void *)P4_MSPI_S_CTRL, clear);
+	clrbits_le32((void *)P4_MSPI_S_USER, BIT(12) | BIT(13) | BIT(14) |
+						 BIT(15));
+	setbits_le32((void *)P4_MSPI_S_CTRL,
+		     P4_FCMD_OCT | P4_FADDR_OCT | P4_FDIN_OCT | P4_FDOUT_OCT |
+			     P4_FASTRD_MODE);
+	clrbits_le32((void *)P4_MSPI_S_DDR, P4_FMEM_DDR_CMD_DIS);
+	setbits_le32((void *)P4_MSPI_S_DDR, P4_FMEM_DDR_EN);
+}
+
+static int psram_xact(u16 cmd, u32 addr, u32 *tx, u32 tx_bits,
+		      u32 *rx, u32 rx_bits, u32 dummy)
+{
+	u32 user, i;
+
+	for (i = 0; i < 100000; i++) {
+		if (!readl((void *)P4_MSPI_S_CMD))
+			break;
+	}
+
+	writel(((u32)cmd & 0xffff) | ((16 - 1) << P4_USR_COMMAND_BITLEN_S),
+	       (void *)P4_MSPI_S_USER2);
+
+	user = ((32 - 1) << P4_USR_ADDR_BITLEN_S);
+	if (dummy)
+		user |= (dummy - 1) & 0x3f;
+	writel(user, (void *)P4_MSPI_S_USER1);
+
+	writel(addr, (void *)P4_MSPI_S_ADDR);
+	setbits_le32((void *)P4_MSPI_S_CACHE_FCTRL, P4_CACHE_USR_ADDR_4BYTE);
+
+	user = P4_USR_COMMAND | P4_USR_ADDR;
+	if (dummy)
+		user |= P4_USR_DUMMY;
+	if (tx_bits) {
+		user |= P4_USR_MOSI;
+		writel(tx_bits - 1, (void *)P4_MSPI_S_MOSI_DLEN);
+		if (tx)
+			for (i = 0; i < DIV_ROUND_UP(tx_bits, 32); i++)
+				writel(tx[i], (void *)(P4_MSPI_S_W0 + i * 4));
+	} else {
+		writel(0, (void *)P4_MSPI_S_MOSI_DLEN);
+	}
+	if (rx_bits) {
+		user |= P4_USR_MISO;
+		writel(rx_bits - 1, (void *)P4_MSPI_S_MISO_DLEN);
+	} else {
+		writel(0, (void *)P4_MSPI_S_MISO_DLEN);
+	}
+	writel(user, (void *)P4_MSPI_S_USER);
+
+	/* The PSRAM hangs off CS1. */
+	setbits_le32((void *)P4_MSPI_S_MISC, P4_CS0_DIS);
+	clrbits_le32((void *)P4_MSPI_S_MISC, P4_CS1_DIS);
+
+	setbits_le32((void *)P4_MSPI_S_CMD, P4_USR);
+	for (i = 0; i < 100000; i++) {
+		if (!(readl((void *)P4_MSPI_S_CMD) & P4_USR))
+			break;
+	}
+
+	clrbits_le32((void *)P4_MSPI_S_MISC, P4_CS0_DIS);
+	setbits_le32((void *)P4_MSPI_S_MISC, P4_CS1_DIS);
+
+	if (readl((void *)P4_MSPI_S_CMD) & P4_USR)
+		return -1;
+
+	if (rx_bits && rx)
+		for (i = 0; i < DIV_ROUND_UP(rx_bits, 32); i++)
+			rx[i] = readl((void *)(P4_MSPI_S_W0 + i * 4));
+
+	return 0;
+}
+
+static u32 psram_read_reg(u32 reg, u32 dummy)
+{
+	u32 rx = 0;
+
+	psram_xact(0x4040, reg, NULL, 0, &rx, 16, dummy);
+
+	return rx;
 }
 
 static void psram_probe(void)
 {
-	static const u32 dummies[] = { 4, 8, 14, 20, 26, 32, 40, 50, 60 };
-	u32 i, val = 0;
-	int ret;
+	static const u32 dummies[] = { 8, 12, 16, 20, 24, 28 };
+	u32 i, val;
 
 	p4_spl_early_puts("psram probe:");
+	psram_opi_dtr_mode();
 	for (i = 0; i < ARRAY_SIZE(dummies); i++) {
-		val = 0;
-		ret = psram_read_reg(0, dummies[i], &val);
+		val = psram_read_reg(0, dummies[i]);
 		p4_spl_early_puts(" d");
 		p4_spl_early_hex(dummies[i]);
-		p4_spl_early_puts(ret ? "=ERR " : "=");
+		p4_spl_early_puts("=");
 		p4_spl_early_hex(val);
 	}
 	p4_spl_early_puts("\n");
@@ -535,6 +599,7 @@ int p4_spl_psram_init(void)
 
 	p4_spl_early_puts("psram: cmds\n");
 	psram_pmu_fixup();
+
 	psram_pads_init();
 	psram_probe();
 	psram_cache_cmds();

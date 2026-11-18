@@ -1299,3 +1299,34 @@ Next round: read the ESP32-P4 TRM section on the PSRAM controller user-mode /
 (and how IDF's `esp_rom_spi_cmd_config` moves it), then finish the MR read. The
 pads, clocks, MMU gate and controller config are now all in place, so this is the
 last unknown.
+
+## Round 40: ported the ESP32-S31 transaction code - still zeros
+
+The important discovery of this round is in our own tree: the **ESP32-S31 port
+already contains a complete, working PSRAM implementation**
+(`board/espressif/esp32s31/spl_psram.c`, 889 lines: LDO, MPLL, MSPI clock, pin
+drive, bus clock, controller init, `psram_xact`, mode registers, AXI config, pin
+timing tuning, MMU map). That is the reference to follow instead of reverse
+engineering IDF.
+
+From it, the two things the P4 transaction was missing:
+
+* **the data buffer is at `+0x58` (`W0`)**, not `+0x40` (which is
+  `CACHE_SCTRL`) - that alone explains every "everything is zero" result;
+* **CS1 is selected through `MISC`: set `CS0_DIS` (BIT(0)), clear `CS1_DIS`
+  (BIT(1))**, and restore afterwards.
+
+Ported both into `psram_xact()` (plus `psram_opi_dtr_mode()`: CTRL oct/fastrd
+bits, USER write-mode bits cleared, `DDR_REG` = `FMEM_DDR_EN`,
+`FMEM_DDR_CMD_DIS` cleared) and rebuilt. The unbounded "wait for idle" loop had
+to be bounded or the SPL hung and the watchdog reset the board.
+
+Result now: the transactions complete cleanly, the chain still boots
+(`md 0x48000000` -> `00000000 01010101`, 0 banners), but **all reads still return
+zero**.
+
+Next round: port the S31's `psram_ctrlr_init()` (and `psram_mspi_clock_init`,
+`psram_bus_clock`, `psram_pin_init`, `psram_ctrlr_init`) properly instead of
+replaying MSPI3 registers, since the replay may leave the controller in a state
+that only supports the cache path. The S31 file is the blueprint and it is
+already in this tree, so this is now a porting exercise rather than research.
