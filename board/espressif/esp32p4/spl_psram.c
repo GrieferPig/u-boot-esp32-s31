@@ -1361,6 +1361,8 @@ static void psram_pma_non_cacheable(void)
 	asm volatile("fence" ::: "memory");
 }
 
+
+
 static void psram_mmu_map(u32 size)
 {
 	u32 entries = size >> 16;

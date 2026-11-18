@@ -2934,3 +2934,27 @@ State: boots to `esp32p4>` with the PMA entry in place. The window read still
 stalls, and a stalled read wedges the hart badly enough that OpenOCD cannot
 halt it ("dmstatus=0x00400ca2") - only an RTS reset recovers, so window reads
 must not be issued from the normal boot path.
+
+## Round 81: four more hypotheses eliminated for the window read stall
+
+Non-intrusive sampling works on the reference (debugger reads without halting:
+SCTRL/SRAM_CMD/DRD stay 0x02f7c679 / 0x8cfc0000 / 0xf0000000, i.e. the cache
+path does not reprogram them per access). Then, on this port:
+
+| change tested | result |
+| --- | --- |
+| skip the S31-derived DQS tuning, keep the reference's pads (`0x00010001` DQS phase 0/delay 0, `0x2020` data) | window read still stalls |
+| restore MSPI3 to the reference's idle values (ADDR 0, CLOCK div 2, USER1/USER2/MISO_DLEN) before the read | still stalls |
+| enable the HP cache clocks (TRM ch.22 Reg 22.15, 0x500E6020 bits 0/1/4/5) | still stalls |
+| same plus `Cache_Invalidate_All(L1 D|L2)` and `Cache_Enable_L1_DCache(0)` | **traps**: `P4TRAP cause=0x30000005 epc=0x4ff40408` |
+
+The last line is its own finding: enabling the L1 D-cache while the SPL is
+executing from L2MEM is unsafe here (the S31 port disables and invalidates all
+caches before enabling any, very early in its boot; the reference does its
+cache bring-up in the IDF bootloader before U-Boot exists). If the caches are
+wanted on the P4, that has to happen before the SPL starts using L2MEM as both
+code and stack, not in the middle of PSRAM init.
+
+So the stall is not the pads, not the tuning, not the S controller's leftover
+state and not the cache clock gating. State left as committed: tuning on,
+burst-write check only, boots to `esp32p4>`.
