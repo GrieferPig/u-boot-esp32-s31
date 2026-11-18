@@ -1340,6 +1340,27 @@ static int psram_timing_tune(void)
 /* Map the PSRAM window through the MSPI2 "S" MMU (64 KiB pages). */
 /* TRM ch.9 "System and Memory": the MMU maps the PSRAM window. The item
  * registers are not in the manual (see the file header). */
+/*
+ * TRM ch.2 "High-Performance CPU", Register 2.118 pma_cfgX (CSR 0xBC0+n) and
+ * pma_addrX (CSR 0xBD0+n): mark the external-RAM window non-cacheable so CPU
+ * accesses take the direct path instead of entering the HP cache, whose clocks
+ * are off in this chain (TRM ch.22 Register 22.15).
+ *
+ *   A = NAPOT (bits 31:30 = 0b11), EN bit0, R bit4, W bit3
+ *   ATTRIBUTE bit27 = 1 non-cacheable, bit25/24 = write/read miss no allocate
+ * pma_addrX holds the address shifted right by 2 (see IDF riscv/csr.h).
+ */
+static void psram_pma_non_cacheable(void)
+{
+	u32 addr = (0x48000000u | (0x04000000u / 2 - 1)) >> 2;
+	u32 cfg = 0xc0000000u | BIT(0) | BIT(4) | BIT(3) |
+		  BIT(27) | BIT(25) | BIT(24);
+
+	asm volatile("csrw 0xbd0, %0" :: "r"(addr));
+	asm volatile("csrw 0xbc0, %0" :: "r"(cfg));
+	asm volatile("fence" ::: "memory");
+}
+
 static void psram_mmu_map(u32 size)
 {
 	u32 entries = size >> 16;
@@ -1442,6 +1463,7 @@ int p4_spl_psram_init(void)
 
 	setbits_le32((void *)P4_SRAM_CMD, P4_CMD_SDIN_HEX | P4_CMD_SDOUT_HEX);
 	psram_mmu_map(0x01000000);
+	psram_pma_non_cacheable();
 	setbits_le32((void *)P4_CACHE_FCTRL, BIT(0));
 
 	psram_cache_check();

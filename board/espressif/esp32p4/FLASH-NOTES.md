@@ -2894,3 +2894,43 @@ both chains. Next step is to read the MSPI2 error/status registers after a
 failed window access and to compare the CPU-side cache configuration registers
 (L1/L2 cache control, CLKRST cache bus clocks) between a reference boot and
 this chain - both are TRM ch.9 §9.3.3.2 / ch.12 territory.
+
+## Round 80: PMA non-cacheable window does not fix it; MMU/flags verified correct
+
+Verified the PSRAM MMU really is the one this port writes. IDF's
+`mmu_ll_write_entry()` uses `SPI_MEM_S_MMU_ITEM_INDEX/CONTENT_REG`, which
+`spi_mem_s_reg.h` places at `DR_REG_PSRAM_MSPI0_BASE + 0x37c/0x380`
+(0x5008E37C/0x5008E380 - the same pair this port uses), while the *flash* MMU
+is `SPI_MEM_C_*` at `DR_REG_FLASH_SPI0_BASE` (0x5008C37C). Entry flags:
+
+```
+SOC_MMU_PSRAM_VALID  = BIT(11)      page | 0xC00
+SOC_MMU_ACCESS_PSRAM = BIT(10)
+```
+
+so `page | 0xC00` is the documented encoding and the read-back from the chip
+confirms it: index 0 -> 0xC00, index 5 -> 0xC05. Nothing wrong there.
+
+Tried marking the window non-cacheable through the documented PMA entry
+(TRM ch.2 Register 2.118; IDF `riscv/csr.h`: CSR_PMACFG0 0xBC0, CSR_PMAADDR0
+0xBD0, NAPOT 0xC0000000, R/W/X bits 4/3/2, address >> 2):
+
+```
+pma_addr0 = ((0x48000000 | (0x04000000/2 - 1)) >> 2)
+pma_cfg0  = NAPOT | EN | R | W | non-cacheable(bit27) | miss-no-allocate(25/24)
+```
+
+Result: the CPU read of the window still stalls (no change), so cacheability is
+not what blocks it. The setting is kept because it expresses the proven
+reference's intent - that window is uncached (TRM ch.22 cache clocks are off)
+- and it makes the attribute explicit instead of relying on a default.
+
+Also diffed MSPI2 0x200-0x3FF, a range never compared before. The reference is
+all zeros except 0x200 = 0x1, 0x35c = 0x20210907 (a version/date) and the MMU
+tail at 0x37c. So there is no hidden configuration register in that range that
+this port is missing.
+
+State: boots to `esp32p4>` with the PMA entry in place. The window read still
+stalls, and a stalled read wedges the hart badly enough that OpenOCD cannot
+halt it ("dmstatus=0x00400ca2") - only an RTS reset recovers, so window reads
+must not be issued from the normal boot path.
