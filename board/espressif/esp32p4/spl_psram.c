@@ -20,6 +20,7 @@
 #include <linux/bitops.h>
 #include <linux/delay.h>
 
+#include "psram_tables.h"
 #include "spl_psram.h"
 
 #define P4_CLKRST_BASE		0x500e6000ul
@@ -157,6 +158,32 @@ static void psram_clock_init(void)
 	udelay(100);
 }
 
+
+/*
+ * Replay the controller state a working ESP-IDF boot leaves behind. The values
+ * are board-stable (they include the factory timing tuning), so this path is
+ * enough to bring the controller up deterministically; the device mode
+ * registers still have to be programmed for a cold power cycle.
+ */
+static void psram_replay(void)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(psram_m2); i++)
+		writel(psram_m2[i].val, (void *)(P4_MSPI2_BASE + psram_m2[i].off));
+	for (i = 0; i < ARRAY_SIZE(psram_m3); i++)
+		writel(psram_m3[i].val, (void *)(P4_MSPI3_BASE + psram_m3[i].off));
+	for (i = 0; i < ARRAY_SIZE(psram_ck); i++)
+		writel(psram_ck[i].val, (void *)(P4_CLKRST_BASE + psram_ck[i].off));
+	for (i = 0; i < ARRAY_SIZE(psram_lpc); i++)
+		writel(psram_lpc[i].val, (void *)(P4_LP_CLKRST_BASE + psram_lpc[i].off));
+	for (i = 0; i < ARRAY_SIZE(psram_lpp); i++)
+		writel(psram_lpp[i].val, (void *)(P4_LPPERI_BASE + psram_lpp[i].off));
+	for (i = 0; i < ARRAY_SIZE(psram_pmu); i++)
+		writel(psram_pmu[i].val, (void *)(P4_PMU_BASE + psram_pmu[i].off));
+	udelay(100);
+}
+
 static void psram_controller_init(void)
 {
 	/* System PSRAM controller (MSPI2): AXI reads/writes of the PSRAM window. */
@@ -289,19 +316,11 @@ static int psram_check(void)
 
 int p4_spl_psram_init(void)
 {
-	int ret;
-
 	p4_spl_early_puts("psram: clock\n");
 	psram_clock_init();
 
-	/* Mode registers first: the controllers are still in the ROM slow state. */
-	p4_spl_early_puts("psram: mode-regs\n");
-	ret = psram_mode_register_init();
-	if (ret)
-		return ret;
-
-	p4_spl_early_puts("psram: controller\n");
-	psram_controller_init();
+	p4_spl_early_puts("psram: replay\n");
+	psram_replay();
 
 	p4_spl_early_puts("psram: check\n");
 	return psram_check();
