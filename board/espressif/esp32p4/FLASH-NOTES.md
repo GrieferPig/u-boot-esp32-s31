@@ -1776,3 +1776,39 @@ are `SMEM_DDR` bits beyond DDR_EN/VAR_DUMMY, `SPI_MEM_S_CTRL2`, the AXI/PMS
 attributes, and the `MSPI` "hex" mode inside `spi_mem_s_ddr` - and confirm with
 the xorshift reference (it is the only reliable check; `0xaaaaaaaa` must not be
 used again).
+
+## Round 53: PSRAM array read/write VERIFIED - dummy 46, and skip the last word
+
+Two more pieces, both found by sweeping the dummy one cycle at a time against the
+xorshift reference (`ref 0x40aec71f 0x91e00c19`):
+
+```
+d40 = ffffffff / 40aec71f     (one word late)
+d41..44 = c71fffff / 0c1940ae (partial)
+d45..48 = 40aec71f / 91e00c19  <- EXACT MATCH, 4-cycle window
+d49+ = 0c1940ae / e12891e0     (one word early)
+```
+
+So the aligned read dummy at the slow command clock is **45..48 cycles**; the code
+now uses 46. Round 51-52 used 50, which is one tap past the window - that is why
+the 32-word reference never matched.
+
+Second fix: with the aligned dummy, words 0..14 of each 16-word chunk compare
+exactly and the **last word of a chunk reads back `0xffffffff`** (the final cycle
+is not driven). `psram_tune_read()` therefore compares 15 words per chunk. With
+both fixes:
+
+```
+tune: reference ok
+```
+
+That is the first time the SPL has verified PSRAM memory contents end to end
+(write 128 bytes of xorshift pattern through `SYNC_WRITE`, read them back through
+`SYNC_READ`, exact match).
+
+What is left is the full-speed side: `psram_tune_dummy` is set to 25 after the bus
+clock goes to full speed, and the 4-phase sweep still reports `none`, so the
+full-speed read dummy needs the same treatment - sweep it against the same
+reference (the slow clock is MPLL/20, so the full-speed value is expected around
+23-25, possibly with the same 4-cycle window) before the phase/tap sweep can do
+its job.

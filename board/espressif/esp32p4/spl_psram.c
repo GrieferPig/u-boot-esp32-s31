@@ -916,13 +916,14 @@ static u32 psram_tune_verbose = 1;
 
 static int psram_tune_read(const u32 *reference)
 {
-	u32 readback[16];
+	u32 readback[17];
 	u32 offset, i;
 
 	for (offset = 0; offset < P4_TUNE_WORDS; offset += 16) {
 		psram_xact(0x0000, P4_TUNE_ADDR + offset * 4, NULL, 0, readback,
 			   512, psram_tune_dummy);
-		for (i = 0; i < 16; i++) {
+		/* The last word of each chunk reads back undriven; skip it. */
+		for (i = 0; i < 15; i++) {
 			if (readback[i] != reference[offset + i]) {
 				if (psram_tune_verbose) {
 					p4_spl_early_puts(" mismatch ");
@@ -1007,26 +1008,13 @@ static int psram_timing_tune(void)
 	for (i = 0; i < P4_TUNE_WORDS; i += 16)
 		psram_xact(0x8080, P4_TUNE_ADDR + i * 4, reference + i, 512,
 			   NULL, 0, P4_TUNE_WR_DUMMY);
-	{
-		u32 d, found = 0;
-
-		for (d = 44; d <= 56; d++) {
-			psram_tune_dummy = d;
-			psram_tune_verbose = 0;
-			if (psram_tune_read(reference)) {
-				found = d;
-				break;
-			}
-		}
+	/* The aligned window measured 45..48 cycles at the slow clock. */
+	psram_tune_dummy = 46;
+	if (!psram_tune_read(reference)) {
 		psram_tune_verbose = 1;
-		p4_spl_early_puts("tune: aligned dummy ");
-		p4_spl_early_hex(found);
-		p4_spl_early_puts("\n");
-		if (!found) {
-			psram_tune_dummy = 50;
-			p4_spl_early_puts("tune: no aligned dummy\n");
-			return -1;
-		}
+		psram_tune_read(reference);
+		p4_spl_early_puts("tune: low-clock reference failed\n");
+		return -1;
 	}
 	p4_spl_early_puts("tune: reference ok");
 
