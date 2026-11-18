@@ -1938,3 +1938,33 @@ Next round: check the P4 MSPI2 MMU layout (`SPI_MEM_S_MMU_ITEM_*` plus the
 MMU-way select registers around 0x370..0x39c) and confirm which way the AXI port
 uses - and whether the reference has extra entries/ways configured that our
 single-entry-per-page loop does not write.
+
+## Round 58: the command path covers all 16 MB; clock-reset diff found
+
+The direct command path works at **every** offset we tried - `0x80`, `0x1000`,
+`0x100000`, `0x200000`, `0x800000`, `0xf00000` all write and verify (`cmd@...=ok`).
+So the PSRAM itself is fully usable through the command engine, and only the
+cache/AXI port is dark.
+
+Dumped `HP_SYS_CLKRST` (0x500e6000) from our SPL and from the running reference
+(OpenOCD cannot read it while our SPL is halted, but works on the reference) and
+diffed:
+
+| reg | ours | reference |
+|---|---|---|
+| 0x500e602c | 00000000 | 00000100 |
+| 0x500e603c | 00000000 | 000002a3 |
+| 0x500e6040 | 00000000 | 08000000 |
+| 0x500e606c..78 | 04000000 | 00000000 |
+| 0x500e6080 | 01100008 | 00000000 |
+| 0x500e6084 | 00010000 | 00000000 |
+| 0x500e6094 | c9000000 | 80000000 |
+| 0x500e6098 | 52400000 | 40000008 |
+
+The three zeros are the interesting ones: `psram_clkrst_fixup()` programs
+`0x3c = 0x2a3` and `0x40 |= 0x08000000` early, but `psram_replay()` then writes its
+table over them and leaves zeros. Re-applying the fixup after the replay resets
+the MSPI domain again and puts the board into a reset loop (26 banners), so the
+fix has to be selective: find which of `0x2c`, `0x3c`, `0x40` is the AXI/cache
+clock or reset and set only that one *after* the replay, without touching the
+MSPI resets.

@@ -857,6 +857,37 @@ static void psram_dcache_invalidate(void *addr, u32 size)
 		(P4_CACHE_MAP_DCACHE, (u32)addr, size);
 }
 
+
+/* Does the command path work across the whole PSRAM, or only near offset 0? */
+static void psram_range_check(void)
+{
+	static const u32 offs[] = { 0x80, 0x1000, 0x100000, 0x200000, 0x800000,
+				    0xf00000 };
+	u32 i;
+
+	for (i = 0; i < ARRAY_SIZE(offs); i++) {
+		u32 w = 0x5a5a0000u + i, r = 0;
+
+		psram_xact(0x8080, offs[i], &w, 32, NULL, 0, P4_PSRAM_WR_DUMMY);
+		psram_xact(0x0000, offs[i], NULL, 0, &r, 32, 46);
+		p4_spl_early_puts("ckA");
+	{
+		u32 i2;
+
+		for (i2 = 0; i2 < 40; i2++) {
+			p4_spl_early_puts(" ");
+			p4_spl_early_hex(readl((void *)(P4_CLKRST_BASE + i2 * 4)));
+		}
+		p4_spl_early_puts("\n");
+	}
+
+	p4_spl_early_puts(" cmd@");
+		p4_spl_early_hex(offs[i]);
+		p4_spl_early_puts(r == w ? "=ok" : "=BAD");
+	}
+	p4_spl_early_puts("\n");
+}
+
 static void psram_cache_check(void)
 {
 	u32 r1 = 0, r2 = 0;
@@ -1222,6 +1253,7 @@ int p4_spl_psram_init(void)
 	psram_timing_tune();
 	psram_mmu_map(0x01000000);
 	psram_rw_test();
+	psram_range_check();
 	psram_cache_check();
 	psram_bulk_test();
 	psram_mmu_report();
