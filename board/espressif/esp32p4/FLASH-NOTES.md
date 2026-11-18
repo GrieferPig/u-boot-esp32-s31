@@ -1968,3 +1968,30 @@ the MSPI domain again and puts the board into a reset loop (26 banners), so the
 fix has to be selective: find which of `0x2c`, `0x3c`, `0x40` is the AXI/cache
 clock or reset and set only that one *after* the replay, without touching the
 MSPI resets.
+
+## Round 59: the clock-reset differences are a consequence, not a cause
+
+Applied the three `HP_SYS_CLKRST` writes the reference has and we lose after the
+replay, one at a time:
+
+* all three (`0x2c |= BIT(8)`, `0x3c = 0x2a3`, `0x40 |= BIT(27)`) -> reset loop,
+* **only** `0x2c |= BIT(8)` -> reset loop as well.
+
+So writing that clock bit at that point in our sequence takes the MSPI domain
+down; the reference can hold those values only because its init order differs.
+These differences are a consequence of the different bring-up order, not the
+missing link to the AXI port. Removed the experiment.
+
+### Decisions for the next rounds
+
+Every register-level avenue is now exhausted: the full MSPI2 file matches, the
+clock block differences cannot be copied, the cache read latency has no working
+value, and the command path is verified over the whole 16 MB. The realistic way
+forward is to stop reconstructing the driver and **port IDF's PSRAM driver
+itself** (`components/esp_psram/device/esp_psram_impl_ap_hex.c`, 605 lines, plus
+the `psram_ctrlr_ll` inline helpers it calls) into the SPL as-is, keeping IDF's
+order of operations for `s_config_mspi_for_psram()`, `s_init_psram_mode_reg()`,
+`s_check_psram_connected()`, `mspi_timing_psram_tuning()`, the MMU/cache enable
+and `Cache_Start_Dcache()`. The current hand-ported version has the registers
+right but the *order* wrong somewhere, and the driver is the only reliable
+oracle left.

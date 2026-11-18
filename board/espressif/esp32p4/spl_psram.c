@@ -370,6 +370,8 @@ static void psram_pmu_fixup(void)
 		writel(psram_pmu_state[i][1], pmu + psram_pmu_state[i][0]);
 }
 
+
+
 static void psram_clkrst_fixup(void)
 {
 	void *c = (void *)P4_CLKRST_BASE;
