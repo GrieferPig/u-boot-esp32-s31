@@ -72,7 +72,12 @@ u64 notrace timer_early_get_count(void)
 #define P4_LP_WDT_BASE		0x50116000
 #define P4_WDT_WKEY		0x50D83AA1
 #define P4_LP_WDT_WPROTECT	0x18
+#define P4_LP_WDT_CONFIG1		0x04
+#define P4_LP_WDT_FEED		0x14
 #define P4_LP_WDT_CONFIG0	0x00
+
+/* Timer-group watchdogs: WDT registers sit at 0x48/0x60/0x64 in each group. */
+#define P4_TIMG_BASE		0x500c2000
 
 /* HP UART0, used before the driver model exists. */
 #define P4_UART0_BASE		0x500ca000
@@ -137,10 +142,31 @@ void harts_early_init(void)
 	p4_systimer_enable();
 	p4_spl_puts("\nP4SPL:entry\n");
 
-	/* Disarm the ROM-armed LP watchdog before doing slow work. */
+	/*
+	 * Disarm the ROM-armed LP watchdog before doing slow work: unlock the
+	 * protection, clear the enable bit in CONFIG1 and the config registers,
+	 * feed the counter, then lock it again.
+	 */
 	writel(P4_WDT_WKEY, wdt + P4_LP_WDT_WPROTECT);
+	writel(0, wdt + P4_LP_WDT_CONFIG1);
 	writel(0, wdt + P4_LP_WDT_CONFIG0);
+	writel(P4_WDT_WKEY, wdt + P4_LP_WDT_FEED);
 	writel(0, wdt + P4_LP_WDT_WPROTECT);
+
+	/* Same for both timer-group watchdogs (the HP-domain MWDTs). */
+	{
+		u32 t;
+
+		for (t = 0; t < 2; t++) {
+			u32 base = P4_TIMG_BASE + t * 0x1000;
+
+			writel(P4_WDT_WKEY, (void *)(base + 0x64));
+			writel(readl((void *)(base + 0x48)) & ~(1u << 31),
+			       (void *)(base + 0x48));
+			writel(P4_WDT_WKEY, (void *)(base + 0x60));
+			writel(0, (void *)(base + 0x64));
+		}
+	}
 
 	p4_spl_puts("P4SPL:wdt-off\n");
 }
@@ -194,11 +220,12 @@ void spl_board_init(void)
 	}
 
 	/*
-	 * The flash read and PSRAM both work now, but the ROM only maps part of
-	 * the PSRAM window, so the payload cannot be placed at 0x48c00000 yet.
-	 * Mapping the rest needs the PSRAM MMU table, which is the next task.
+	 * The flash read works, but the PSRAM window is still limited: writes
+	 * beyond ~1 MiB from 0x48c00000 fault, so the payload cannot be placed
+	 * there yet. Program the PSRAM MMU the way IDF does before enabling the
+	 * load again.
 	 */
-	p4_spl_puts("spl: flash read ready; uboot load pending PSRAM map\n");
+	p4_spl_puts("spl: flash read ready; psram window limited\n");
 	for (;;)
 		;
 }

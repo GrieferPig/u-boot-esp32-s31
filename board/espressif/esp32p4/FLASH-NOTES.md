@@ -105,3 +105,28 @@ Writing the PSRAM MMU table (`MSPI2 + 0x37c` / `0x380`, entry
 so the table is not what gates the window (the candidate is the `SMEM_PMS*`
 window registers or an MMU mode bit). Until that is solved the SPL stops after
 confirming PSRAM and the flash read.
+
+## Round 8 findings
+
+- The whole 160 KiB payload can be read from flash in ~15 ms (0.75 ms per
+  16 KiB chunk), so the copy is not slow and watchdog timeouts are not the
+  issue.
+- The L2 cache has to be enabled for external memory; `Cache_Enable_L2_Cache`
+  (`0x4fc00504`) was missing from the first bring-up. With it, the payload
+  address `0x48c00000` becomes writable (`payload 0x12345678` read back).
+- The cache block (`0x3ff10000`, 0x00..0x60) and the PSRAM MMU power register
+  (`MSPI2 + 0x384 = 0x13200004`) in the SPL are **identical** to a working
+  ESP-IDF boot, so the cache is not the remaining difference.
+- The flash MMU entries read back exactly as written (128 pages, 0 bad) and the
+  flash read completes over the whole payload.
+- The remaining limit is the PSRAM window: copying with `dest = 0x48c00000 +
+  offset` traps at offset 0x10000 (`0x48d00000`), while a copy into a fixed
+  `0x48c00000` buffer works. So only a small window around `0x48c00000` is
+  mapped.
+- Trying to disable the data/L2 caches before rewriting the PSRAM MMU table
+  (`Cache_Disable_L1_DCache` `0x4fc004f0`, `Cache_Disable_L2_Cache`
+  `0x4fc00500`) traps, just like the icache disable did.
+
+Next: clear the PSRAM MMU table (write 0 to every entry, as IDF's
+`mmu_hal_unmap_all` does) *before* mapping all 512 pages, and probe the window
+one 64 KiB page at a time to measure its real size.

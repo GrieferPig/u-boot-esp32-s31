@@ -60,6 +60,8 @@ static void mmu_write_entry(u32 entry, u32 content)
 
 static void cache_enable_all(void)
 {
+	/* External memory (flash and PSRAM) goes through the L2 cache on the P4. */
+	((rom_flags_fn)ROM_CACHE_EN_L2)(0);
 	((rom_flags_fn)ROM_CACHE_EN_DC)(0);
 	((rom_flags_fn)ROM_CACHE_EN_IC0)(0);
 	((rom_flags_fn)ROM_CACHE_EN_IC1)(0);
