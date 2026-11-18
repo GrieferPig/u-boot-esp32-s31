@@ -418,8 +418,24 @@ call_board_init_r:
 	/* A real C cache callback may clobber caller-saved t6. */
 	mv	s6, t6
 #endif
+#ifdef CONFIG_ESP32P4_SRAM_ONLY
+	li	t0, 0x500ca000
+	li	t1, 75
+	sw	t1, 0(t0)
+#endif
 	jal	invalidate_icache_all
+#ifdef CONFIG_ESP32P4_SRAM_ONLY
+	li	t0, 0x500ca000
+	li	t1, 76
+	sw	t1, 0(t0)
+#endif
 	jal	flush_dcache_all
+#ifdef CONFIG_ESP32P4_SRAM_ONLY
+	li	t0, 0x500ca000
+	li	t1, 77
+	sw	t1, 0(t0)
+#endif
+
 #ifdef CONFIG_ESP32P4_HW_IDF_HANDOFF
 	mv	t6, s6
 #endif
@@ -435,6 +451,11 @@ call_board_init_r:
 /*
  * jump to it ...
  */
+#ifdef CONFIG_ESP32P4_SRAM_ONLY
+	li	t0, 0x500ca000
+	li	t1, 78
+	sw	t1, 0(t0)
+#endif
 	jr	t4			/* jump to board_init_r() */
 #endif /* !defined(CONFIG_SPL_BUILD) */
 

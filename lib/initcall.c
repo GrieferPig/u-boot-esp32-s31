@@ -11,6 +11,21 @@
 
 DECLARE_GLOBAL_DATA_PTR;
 
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+#include <asm/io.h>
+static void p4_dbg_addr(ulong addr)
+{
+	static const char hex[] = "0123456789abcdef";
+	int i;
+
+	writel(32, (void *)0x500ca000);
+	for (i = 28; i >= 0; i -= 4)
+		writel(hex[(addr >> i) & 0xf], (void *)0x500ca000);
+}
+#else
+#define p4_dbg_addr(a) do { } while (0)
+#endif
+
 static ulong calc_reloc_ofs(void)
 {
 #ifdef CONFIG_EFI_APP
@@ -70,6 +85,7 @@ int initcall_run_list(const init_fnc_t init_sequence[])
 			debug("initcall: %p\n", (char *)func - reloc_ofs);
 		}
 
+		p4_dbg_addr((ulong)(char *)func - reloc_ofs);
 		ret = type ? event_notify_null(type) : func();
 		if (ret)
 			break;

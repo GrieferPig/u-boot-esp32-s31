@@ -57,6 +57,20 @@ int dram_init_banksize(void)
 	return 0;
 }
 
+
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+/*
+ * The relocation copies U-Boot through the write-back data cache, so the copy
+ * has to be pushed to SRAM before the jump and the instruction cache dropped
+ * so it re-fetches the relocated code.
+ */
+void flush_dcache_all(void)
+{
+	((int (*)(u32))0x4fc00414)(0x10);	/* L1 dcache writeback */
+	((int (*)(u32))0x4fc00414)(0x20);	/* L2 writeback */
+}
+#endif
+
 #if !defined(CONFIG_SPL_BUILD)
 void *board_fdt_blob_setup(int *err)
 {
