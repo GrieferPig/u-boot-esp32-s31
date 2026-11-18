@@ -258,3 +258,41 @@ read it back through the cache, so it proved nothing.
 U-Boot proper (160 KiB) does not fit. Either the PSRAM mapping has to be
 extended for real, or U-Boot must be rebuilt small enough to fit in 128 KiB
 (a minimal build without commands/env could reach that).
+
+## Round 14: U-Boot proper runs from SRAM
+
+The PSRAM window is too small for a 160 KiB U-Boot, so the chain now loads
+U-Boot into the lower half of the HP SRAM instead (`espressif_esp32p4_sram_defconfig`,
+`TEXT_BASE = 0x4ff00000`, `CONFIG_ESP32P4_SRAM_ONLY`):
+
+```
+jump: entry 0x4ff00000 dtb 0x00000000
+
+U-Boot 2024.07-gc10b822539-dirty (Nov 18 2026 - 04:39:18 -0800)
+
+DRAM:  768 KiB
+```
+
+That is the SPL handing over to U-Boot proper with **no IDF bootloader in the
+chain** - the first stage bootloader part of the port works.
+
+Pieces that made it work:
+
+- `P4_UBOOT_LOAD_ADDR = 0x4ff00000` (`ubload.h`, written by the staging script,
+  which also refuses to stage a payload whose `_start` is not `0x4ff00000`).
+- SRAM is uncached, so the copy needs **no** cache flush. In fact the ROM cache
+  flush helpers (`Cache_WriteBack_All` / `Cache_Invalidate_All`) **trap** in the
+  SPL and had to be removed - they were the reason the earlier PSRAM attempts
+  "lost" data.
+- `dram_init()` / `dram_init_banksize()` in `board.c` report the SRAM window
+  (base `0x4ff00000`, top `0x4ffc0000`, 768 KiB) instead of the device tree's
+  32 MiB PSRAM node; the generic RISC-V versions in
+  `arch/riscv/cpu/generic/dram.c` are now `__weak` so the board wins.
+- Flash reads are deterministic (three reads of the same 16 KiB chunk give the
+  same checksum, and it matches the file), so the copy is trustworthy.
+
+Still open: U-Boot relocates itself to `ram_top - mon_len` (about `0x4ff93a00`)
+and then traps at `0x4ff93240` with `mcause 0x30000002` (illegal instruction) -
+i.e. it jumps a few hundred bytes below the relocated image into unused SRAM.
+Next: check `gd->mon_len`/`relocaddr` handling for this layout (or disable
+relocation for the SRAM build).
