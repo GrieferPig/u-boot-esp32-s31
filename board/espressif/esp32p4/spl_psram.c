@@ -105,6 +105,7 @@ typedef void (*rom_cmd_start_fn)(int spi_num, u8 *rx_buf, u16 rx_len,
 #define PSRAM_MR8_X16		1
 
 void p4_spl_early_puts(const char *s);
+void p4_spl_early_hex(u32 v);
 
 static void regi2c_write(u8 block, u8 reg, u8 data)
 {
@@ -314,6 +315,9 @@ static int psram_check(void)
 	return 0;
 }
 
+
+
+
 int p4_spl_psram_init(void)
 {
 	p4_spl_early_puts("psram: clock\n");
@@ -323,5 +327,8 @@ int p4_spl_psram_init(void)
 	psram_replay();
 
 	p4_spl_early_puts("psram: check\n");
-	return psram_check();
+	if (psram_check())
+		return -1;
+
+	return 0;
 }

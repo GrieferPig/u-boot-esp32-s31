@@ -69,3 +69,39 @@ ESP-IDF's own init sequence (`bootloader_init_ext_mem`) is
    `0x0addbad0` bus-error marker points in that direction.
 3. Fall back to reading through the ROM's flash code by calling
    `esp_rom_spiflash_attach()` and then using the ROM's SPI read path.
+
+## Working recipe (round 7)
+
+The flash read works with this exact sequence, run once before the first load:
+
+1. `HP_SYS_CLKRST + 0x38 |= (1 << 1) | (1 << 4) | (1 << 7) | (1 << 10)`
+   (cache block clock force-on, same bits the S31 port uses).
+2. `ROM_Boot_Cache_Init()` (`0x4fc003dc`) — required, otherwise the cache
+   helpers trap.
+3. `Cache_Invalidate_All(CACHE_MAP_L1_ALL)` (`0x4fc00404`).
+4. Flash MMU page size: `MSPI0 + 0x384` bits [4:3] = **2** (64 KiB). Leaving it
+   at the reset value 0 (max page size) makes every read return `0xffffffff`.
+5. Clear all 1024 entries, then map `content = page | BIT(12)` with
+   `index = page` (registers `MSPI0 + 0x37c` content, `MSPI0 + 0x380` index).
+6. `Cache_Enable_L1_DCache(0)`, `Cache_Enable_L1_CORE0_ICache(0)`,
+   `Cache_Enable_L1_CORE1_ICache(0)` (`0x4fc004f4`, `0x4fc004d4`, `0x4fc004e4`).
+7. Read with plain loads from `0x40000000 + offset`.
+
+Do **not** call `Cache_Disable_L1_CORE0_ICache()` (`0x4fc004d0`) — it traps even
+after `ROM_Boot_Cache_Init()`.
+
+Verified: flash offset 0 reads `0xffffffff` (erased) and offset 0x10000 reads
+`0x4f0306e9`, the first instruction of the U-Boot payload flashed there.
+
+## PSRAM window limit
+
+The ROM leaves only part of the PSRAM window accessible from the CPU:
+
+- `0x48000000` reads and writes fine (the PSRAM check passes there).
+- `0x48100000` traps, so the payload cannot be placed at `0x48c00000` yet.
+
+Writing the PSRAM MMU table (`MSPI2 + 0x37c` / `0x380`, entry
+`page | BIT(11) | BIT(10)`) reads back correctly but has no effect on access,
+so the table is not what gates the window (the candidate is the `SMEM_PMS*`
+window registers or an MMU mode bit). Until that is solved the SPL stops after
+confirming PSRAM and the flash read.

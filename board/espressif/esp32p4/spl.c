@@ -16,6 +16,7 @@
 #include <asm/sections.h>
 #include <linux/bitops.h>
 
+#include "spl_load.h"
 #include "spl_nor.h"
 #include "spl_psram.h"
 
@@ -178,10 +179,6 @@ void spl_board_init(void)
 	p4_spl_puts("ESP32-P4 SPL active\n");
 	p4_psram_dump();
 
-	if (p4_spl_nor_probe()) {
-		p4_spl_puts("P4SPL:nor probe failed\n");
-	}
-
 	if (p4_spl_psram_init()) {
 		p4_spl_puts("spl: psram_init not ported yet; boot stopped\n");
 		for (;;)
@@ -189,6 +186,21 @@ void spl_board_init(void)
 	}
 
 	p4_spl_puts("spl: psram ready\n");
+
+	if (p4_spl_flash_init(0x00800000)) {
+		p4_spl_puts("spl: flash map failed; boot stopped\n");
+		for (;;)
+			;
+	}
+
+	/*
+	 * The flash read and PSRAM both work now, but the ROM only maps part of
+	 * the PSRAM window, so the payload cannot be placed at 0x48c00000 yet.
+	 * Mapping the rest needs the PSRAM MMU table, which is the next task.
+	 */
+	p4_spl_puts("spl: flash read ready; uboot load pending PSRAM map\n");
+	for (;;)
+		;
 }
 
 u32 spl_boot_device(void)
