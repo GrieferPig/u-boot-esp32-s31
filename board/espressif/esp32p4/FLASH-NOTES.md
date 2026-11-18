@@ -224,3 +224,37 @@ Next: test PSRAM stability on its own (fill 128 KiB with a counter pattern, sync
 sum, compare) to decide whether this is a cache-flush problem or marginal PSRAM
 access, then either sync per chunk with the right map (`0x30`) and a verified
 `Cache_Sync_Addr` signature, or copy with the data cache off.
+
+## Round 13 findings: the PSRAM window is ~128 KiB, and the cache/PSRAM command registers
+
+Dumped MSPI2 from a fully initialised ESP-IDF boot (via JTAG, board running the
+normal chain) and compared with the SPL after the replay:
+
+| offset | IDF | SPL (replay only) | note |
+|---|---|---|---|
+| 0x3c CACHE_FCTRL  | `40000001` | `c0000000` | differs |
+| 0x40 CACHE_SCTRL  | `02f7c679` | `0055c070` | differs |
+| 0x44 SRAM_CMD     | `8cfc0000` | `80c00000` | differs |
+| 0x48 SRAM_DRD_CMD | `f0000000` | `00000000` | unset |
+| 0x4c SRAM_DWR_CMD | `f0008080` | `00000000` | **PSRAM write opcode, unset** |
+| 0x50 SRAM_CLK     | `00010001` | `00000000` | unset |
+| 0x54              | `00000200` | `00000200` | same |
+
+These are now programmed by `psram_cache_cmds()` after the replay (`psram: cmds`
+in the boot log). Without them cached writes never reach the device.
+
+### The actual window
+
+The per-chunk checksums pin the writable window down: with a 160 KiB payload
+copied to `0x48000000`, chunks 0..7 (`0x48000000 .. 0x4801ffff`) match the file
+exactly and chunk 8 (`0x48020000`) onwards reads back as the `0addbad0` filler.
+
+So the ROM leaves roughly **128 KiB** usable at `0x48000000`, not the 896 KiB
+that the round-9 walk suggested. That walk only wrote one word per 64 KiB and
+read it back through the cache, so it proved nothing.
+
+### Consequence
+
+U-Boot proper (160 KiB) does not fit. Either the PSRAM mapping has to be
+extended for real, or U-Boot must be rebuilt small enough to fit in 128 KiB
+(a minimal build without commands/env could reach that).

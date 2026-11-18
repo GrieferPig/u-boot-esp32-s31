@@ -83,10 +83,13 @@ int p4_spl_load_uboot(void)
 				return -1;
 			}
 			/*
-			 * The copy runs through the write-back data cache, so push each
-			 * chunk out to PSRAM right away. mask 0x30 = L1 dcache | L2.
+			 * The copy runs through the write-back data cache. The ROM
+			 * helper takes one cache map bit per call: L1 dcache = 0x10,
+			 * L2 = 0x20 (Cache_WriteBack_Addr).
 			 */
-			((int (*)(u32, u32, u32))0x4fc003e0)(0x30,
+			((int (*)(u32, u32, u32))0x4fc003f4)(0x10,
+					P4_UBOOT_LOAD_ADDR + done, chunk);
+			((int (*)(u32, u32, u32))0x4fc003f4)(0x20,
 					P4_UBOOT_LOAD_ADDR + done, chunk);
 			t1 = timer_read_counter();
 			{
@@ -132,12 +135,13 @@ void p4_spl_enter_uboot(u32 dtb)
 	 * region, so the first instruction fetch would return garbage.
 	 */
 	/*
-	 * The payload was written through the write-back data cache, so it has to
-	 * be flushed to PSRAM before the hand-over. The map argument is a bit mask:
-	 * L1 icache 0/1 = bits 0/1, L1 dcache = bit 4, L2 = bit 5.
+	 * Flush everything the copy left in the caches, then drop the lines so the
+	 * following reads really come from PSRAM. One map bit per call.
 	 */
-	((int (*)(u32))0x4fc00414)(0x33);	/* Cache_WriteBack_All */
-	((int (*)(u32))0x4fc00404)(0x33);	/* Cache_Invalidate_All */
+	((int (*)(u32))0x4fc00414)(0x10);	/* L1 dcache writeback */
+	((int (*)(u32))0x4fc00414)(0x20);	/* L2 writeback */
+	((int (*)(u32))0x4fc00404)(0x10);	/* L1 dcache invalidate */
+	((int (*)(u32))0x4fc00404)(0x20);	/* L2 invalidate */
 
 	p4_spl_puts("jump: entry ");
 	p4_spl_early_hex(P4_UBOOT_LOAD_ADDR);

@@ -166,6 +166,23 @@ static void psram_clock_init(void)
  * enough to bring the controller up deterministically; the device mode
  * registers still have to be programmed for a cold power cycle.
  */
+
+/*
+ * The replayed ROM state leaves the "cache line <-> PSRAM" command registers
+ * unset, so cached writes never reach the device: reads work, writes vanish.
+ * These are the values a fully initialised ESP-IDF boot has in MSPI2.
+ */
+static void psram_cache_cmds(void)
+{
+	writel(0x40000001u, (void *)0x5008e03c);	/* CACHE_FCTRL */
+	writel(0x02f7c679u, (void *)0x5008e040);	/* CACHE_SCTRL */
+	writel(0x8cfc0000u, (void *)0x5008e044);	/* SRAM_CMD */
+	writel(0xf0000000u, (void *)0x5008e048);	/* SRAM_DRD_CMD */
+	writel(0xf0008080u, (void *)0x5008e04c);	/* SRAM_DWR_CMD */
+	writel(0x00010001u, (void *)0x5008e050);	/* SRAM_CLK */
+	writel(0x00000200u, (void *)0x5008e054);
+}
+
 static void psram_replay(void)
 {
 	unsigned int i;
@@ -325,6 +342,9 @@ int p4_spl_psram_init(void)
 
 	p4_spl_early_puts("psram: replay\n");
 	psram_replay();
+
+	p4_spl_early_puts("psram: cmds\n");
+	psram_cache_cmds();
 
 	p4_spl_early_puts("psram: check\n");
 	if (psram_check())
