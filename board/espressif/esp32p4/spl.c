@@ -219,15 +219,13 @@ void spl_board_init(void)
 			;
 	}
 
-	/*
-	 * Flash reads and the low PSRAM window work; extending the PSRAM MMU map
-	 * from the SPL does not take effect yet, so the payload cannot be placed
-	 * at 0x48c00000. Park here until the window is solved, then load and
-	 * jump.
-	 */
-	p4_spl_puts("spl: flash read ready; psram map pending\n");
-	for (;;)
-		;
+	if (p4_spl_load_uboot()) {
+		p4_spl_puts("spl: uboot load failed; boot stopped\n");
+		for (;;)
+			;
+	}
+
+	p4_spl_enter_uboot(0);
 }
 
 u32 spl_boot_device(void)

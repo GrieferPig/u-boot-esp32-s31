@@ -18,6 +18,7 @@
 DECLARE_GLOBAL_DATA_PTR;
 
 #define P4_SRAM_TOP		0x4ff80000
+#define P4_PSRAM_LOW_TOP	0x480e0000
 #define P4_UBOOT_RAM_TOP	0x48f00000
 
 #if defined(CONFIG_SPL_BUILD)
@@ -32,11 +33,17 @@ void *board_fdt_blob_setup(int *err)
 {
 	void *fdt = (void *)(uintptr_t)gd->arch.firmware_fdt_addr;
 
+	extern char _end[];
+
 	*err = 0;
-	if (!fdt || fdt_check_header(fdt) != 0) {
-		*err = -ENXIO;
-		return NULL;
-	}
+
+	/*
+	 * The SPL may hand over without a device tree (a1 = 0); in that case use
+	 * the DT appended to this binary (CONFIG_OF_SEPARATE).
+	 */
+	if (!fdt || fdt_check_header(fdt) != 0)
+		return (void *)_end;
+
 	return fdt;
 }
 #endif
@@ -54,6 +61,10 @@ phys_addr_t board_get_usable_ram_top(phys_size_t total_size)
 	if (spl_phase() == PHASE_SPL)
 		return P4_SRAM_TOP;
 
+#ifdef CONFIG_ESP32P4_LOW_RAM_TOP
+	/* Only the ROM-mapped part of PSRAM is usable in this configuration. */
+	return P4_PSRAM_LOW_TOP;
+#endif
 	return P4_UBOOT_RAM_TOP;
 }
 

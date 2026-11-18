@@ -25,3 +25,10 @@ config ESP32P4_HW_IDF_HANDOFF
 	  revision metadata. The normal emulator board remains unchanged.
 
 endif
+
+config ESP32P4_LOW_RAM_TOP
+	bool "Run U-Boot from the ROM-mapped 896 KiB PSRAM window"
+	help
+	  The ROM only leaves part of the PSRAM window mapped. Select this to
+	  place U-Boot proper at 0x48000000 and cap usable RAM at 0x480e0000 so
+	  it can run from that window when booted by the SPL.

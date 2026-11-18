@@ -16,7 +16,6 @@ void p4_spl_puts(const char *s);
 void p4_spl_early_hex(u32 v);
 unsigned long notrace timer_read_counter(void);
 
-#define P4_UBOOT_LOAD_ADDR	0x48c00000ul
 #define P4_UBOOT_MAX_SIZE	0x00200000ul	/* 2 MB partition */
 
 
@@ -54,6 +53,12 @@ int p4_spl_load_uboot(void)
 	}
 
 	/* Check the payload address itself before copying anything. */
+	p4_spl_puts("P4F ");
+	p4_spl_early_hex(readl((void *)0x40010000));
+	p4_spl_early_hex(readl((void *)0x40100000));
+	p4_spl_early_hex(readl((void *)0x40100004));
+	p4_spl_puts("\n");
+
 	p4_spl_puts("payload ");
 	writel(0x12345678, (void *)P4_UBOOT_LOAD_ADDR);
 	p4_spl_early_hex(readl((void *)P4_UBOOT_LOAD_ADDR));
