@@ -394,6 +394,96 @@ static void psram_mmu_report(void)
 	p4_spl_early_puts("\n");
 }
 
+
+/*
+ * Local user-mode transaction on MSPI3, needed because the ROM's
+ * esp_rom_spi_cmd_start never returns when driven from the SPL.
+ *
+ * Register map (0x5008f000, hw_ver3 spi_mem_s_reg.h):
+ *   0x00 CMD    bit18 USR (start, clears when done)
+ *   0x04 ADDR
+ *   0x08 CTRL   bit4 DQ_OE, bit5 CK_OE, bit6 CS_OE, bit9 CK_IDLE_EDGE
+ *   0x18 USER   bit27 MOSI, bit28 MISO, bit29 DUMMY, bit30 ADDR, bit31 CMD
+ *   0x1c USER1  [5:0] DUMMY_CYCLELEN, [8:6] DBYTELEN, [31:26] ADDR_BITLEN
+ *   0x20 USER2  [15:0] COMMAND_VALUE, [31:28] COMMAND_BITLEN
+ *   0x24 MOSI_DLEN, 0x28 MISO_DLEN, 0x40.. W0..W15 (2 bytes per DDR cycle)
+ */
+static int psram_txn_local(u16 cmd, u16 cmd_bits, u32 addr, u32 addr_bits,
+			   u32 dummy_bits, u32 *tx, u32 tx_bits,
+			   u32 *rx, u32 rx_bits)
+{
+	u32 user = 0, user1, user2;
+	int i;
+
+	if (cmd_bits)
+		user |= BIT(31);
+	if (addr_bits)
+		user |= BIT(30);
+	if (dummy_bits) {
+		user |= BIT(29);
+		user |= BIT(26);			/* DUMMY_IDLE */
+	}
+	if (tx_bits) {
+		user |= BIT(27);
+		writel(tx_bits - 1, (void *)(P4_MSPI3_BASE + 0x24));
+	}
+	if (rx_bits) {
+		user |= BIT(28);
+		writel(rx_bits - 1, (void *)(P4_MSPI3_BASE + 0x28));
+	}
+
+	writel(addr, (void *)(P4_MSPI3_BASE + 0x04));
+
+	user1 = ((addr_bits ? addr_bits - 1 : 0) << 26) | (1u << 6) |
+		(dummy_bits / 2);
+	writel(user1, (void *)(P4_MSPI3_BASE + 0x1c));
+
+	user2 = ((cmd_bits ? cmd_bits - 1 : 0) << 28) | cmd;
+	writel(user2, (void *)(P4_MSPI3_BASE + 0x20));
+
+	if (tx && tx_bits)
+		memcpy((void *)(P4_MSPI3_BASE + 0x40), tx, (tx_bits + 7) / 8);
+
+	writel(user, (void *)(P4_MSPI3_BASE + 0x18));
+	writel(BIT(18), (void *)(P4_MSPI3_BASE + 0x00));
+
+	for (i = 0; i < 100000; i++) {
+		if (!(readl((void *)(P4_MSPI3_BASE + 0x00)) & BIT(18)))
+			break;
+	}
+	if (readl((void *)(P4_MSPI3_BASE + 0x00)) & BIT(18))
+		return -1;
+
+	if (rx && rx_bits)
+		*rx = readl((void *)(P4_MSPI3_BASE + 0x40));
+
+	return 0;
+}
+
+/* Hex PSRAM register read: cmd 0x4040, 32 bit address, 16 bit result. */
+static int psram_read_reg(u32 reg, u32 dummy, u32 *out)
+{
+	return psram_txn_local(0x4040, 16, reg, 32, dummy, NULL, 0, out, 16);
+}
+
+static void psram_probe(void)
+{
+	static const u32 dummies[] = { 8, 12, 16, 20, 24, 28 };
+	u32 i, val = 0;
+	int ret;
+
+	p4_spl_early_puts("psram probe:");
+	for (i = 0; i < ARRAY_SIZE(dummies); i++) {
+		val = 0;
+		ret = psram_read_reg(0, dummies[i], &val);
+		p4_spl_early_puts(" d");
+		p4_spl_early_hex(dummies[i]);
+		p4_spl_early_puts(ret ? "=ERR " : "=");
+		p4_spl_early_hex(val);
+	}
+	p4_spl_early_puts("\n");
+}
+
 int p4_spl_psram_init(void)
 {
 	p4_spl_early_puts("psram: clock\n");
@@ -405,6 +495,7 @@ int p4_spl_psram_init(void)
 
 	p4_spl_early_puts("psram: cmds\n");
 	psram_pmu_fixup();
+	psram_probe();
 	psram_cache_cmds();
 	psram_mmu_report();
 

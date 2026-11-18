@@ -1184,3 +1184,51 @@ Orders of work for the next round:
 
 Everything else (clkrst gate, MMU wiring, PMU state) is already in place, so this
 is the last mechanical piece before Linux can be loaded into PSRAM.
+
+## Round 37: local MSPI3 transaction works, chip still answers zeros
+
+Wrote `psram_txn_local()` (user-mode transaction on `0x5008f000`) instead of the
+ROM helper that hangs, and a probe that reads MR0|MR1 with several dummy
+lengths. The transaction now **completes** (the `USR` bit clears; before, the ROM
+path spun forever), but the returned data is zero for every dummy setting:
+
+```
+psram probe: d8=00000000 d12=00000000 d16=00000000 d20=00000000
+             d24=00000000 d28=00000000
+```
+
+Register fields used (hw_ver3 `spi_mem_s_reg.h`):
+
+```
+CMD  (0x00) bit18 USR (start / busy)
+USER (0x18) bit27 MOSI, 28 MISO, 29 DUMMY, 30 ADDR, 31 CMD, 26 DUMMY_IDLE
+USER1(0x1c) [5:0] DUMMY_CYCLELEN, [8:6] DBYTELEN, [31:26] ADDR_BITLEN
+USER2(0x20) [15:0] COMMAND_VALUE, [31:28] COMMAND_BITLEN
+0x24 MOSI_DLEN, 0x28 MISO_DLEN, 0x40.. W0..W15
+```
+
+Cross-check against the reference (IDF loader, PSRAM working):
+
+| reg | ours (after probe) | reference |
+|---|---|---|
+| CTRL 0x08 | 002ca27c | 002ca27c |
+| CTRL1 0x0c | 00000ffc | 00000ffc |
+| CLOCK 0x14 | 00010001 | 00010001 |
+| MISC 0x34 | 00000002 | 00000002 |
+| USER 0x18 | f4000000 | f0000000 |
+| USER1 0x1c | 7c00000e | 7c000019 |
+
+So the controller configuration matches; the difference is only in the leftover
+USER bits of the *last* transaction (the reference's last one was a 512 bit
+tuning read with `dummy_cyclelen` 25).
+
+Since the address/command phases evidently go out (the transaction completes) but
+nothing comes back on MISO, the next suspect is the **pin/pad configuration**:
+IDF calls `mspi_timing_ll_pin_drv_set(2)` and enables DQS before talking to the
+PSRAM, and the hex PSRAM has 16 dedicated data lines plus DQS. Our SPL never
+configures those pads for MSPI3, so the command may reach the chip while the data
+lines are not routed back.
+
+Next round: compare the IO-MUX / pad registers that IDF touches for the PSRAM
+(`mspi_timing_ll_pin_drv_set`, `*_dqs`, the `HP_SYS_CLKRST` "PSRAM pad" fields)
+between the two chains, then re-run the probe.
