@@ -521,3 +521,47 @@ Timeline of the console, for reference:
 Core: 7 devices, 5 uclasses   <- first output through the DM serial driver
 Loading Environment ... OK
 ```
+
+## Round 21: the heap is the remaining blocker
+
+`jumptable_init()` (right after `initr_env`) faults because `malloc()` returns
+NULL and the function stores straight through `gd->jt` (`EPC` inside
+`jumptable_init`, `RA` = its own `+0x10`, `TVAL 0`). Disassembly confirms the
+function has no NULL check:
+
+```
+sw a0,136(s0)      <- gd->jt = malloc(...)  (136 = offsetof(gd_t, jt))
+lw a5,136(gp)
+...
+sw a3,4(a4)        <- *(jt + 4) = ... with jt == 0
+```
+
+Tried and **reverted** this round:
+
+- `CONFIG_SYS_MALLOC_DEFAULT_TO_INIT=y` (calls `malloc_init()` from
+  `mem_malloc_init`): no change, still NULL, and the trace moved slightly, so it
+  was reverted to keep the tree at the verified round-20 state.
+- A temporary report inside `jumptable_init` (reverted).
+
+Current verified state (round-20 commit `6afafe9c68`, reproduced after the
+revert):
+
+```
+Core:  7 devices, 5 uclasses, devicetree: separate
+Loading Environment from nowhere... OK
+```
+
+So the console is fine; only the allocator is missing. `initr_malloc` sets
+`mem_malloc_start = 0x4ff90000`, `mem_malloc_end = 0x4ffbf000` (TOTAL_MALLOC_LEN
+0x2f000) and nothing else because `CONFIG_SYS_MALLOC_CLEAR_ON_INIT` is off.
+
+Next ideas, in order:
+
+1. Print `mem_malloc_start/end/brk` and the `malloc()` return value from
+   `jumptable_init` (the report harness is already written, just re-apply it)
+   to see whether the region is registered at all.
+2. Check whether `CONFIG_SYS_MALLOC_F` (`gd->malloc_base/ptr/limit`) interferes -
+   with the in-place layout the early heap limit may be stale.
+3. If dlmalloc keeps failing, give the SRAM build a `malloc()` that serves from
+   a bump allocator over `0x4ff90000..0x4ffbf000`; nothing in the first-stage
+   path needs free().
