@@ -22,8 +22,9 @@ void p4_spl_early_hex(u32 v);
 #define MMU_ITEM_INDEX		(P4_MSPI0_BASE + 0x380)
 #define MMU_POWER_CTRL		(P4_MSPI0_BASE + 0x384)
 
-#define MMU_PAGE_SIZE_MASK	(3u << 3)
-#define MMU_PAGE_SIZE_64K	(2u << 3)
+#define MMU_PAGE_SIZE_MASK	(3u << 2)
+/* The reference boot leaves 0x04 here (bit 2), not 0x10 (bit 4). */
+#define MMU_PAGE_SIZE_64K	(1u << 2)
 
 /* Cache clock force-on bits, as the S31 port uses. */
 #define CACHE_CTRL0_REG		(P4_CLKRST_BASE + 0x38)

@@ -971,3 +971,31 @@ as `2 << 3`. The reference simply has bit 2. Our flash window works regardless,
 but this is the one remaining known difference in the MMU-adjacent registers and
 should be the next thing to align (try `2 << 2`/plain `0x04` for the C-side and
 check whether the S-side MMU starts answering).
+
+## Round 32: page-size field aligned, clkrst 0x80/0xa4 still differ
+
+`MMU_POWER_CTRL` page-size field was wrong: the SPL encoded 64 KiB pages as
+`2 << 3` (bit 4), while the reference has `1 << 2` (bit 2). Fixed in
+`spl_nor.c` (`MMU_PAGE_SIZE_MASK` = `3 << 2`, `MMU_PAGE_SIZE_64K` = `1 << 2`).
+The flash MMU now reads `0x13200004`, exactly like the reference, and U-Boot
+still boots and reaches the prompt.
+
+The PSRAM-side MMU still returns junk (`mmu0 0x5a0`, `mmu1 0x1510`) and still
+faults on access past the ROM-mapped pages.
+
+Dumping the reset/clock region next to it (`HP_SYS_CLKRST` 0x80..0xa8) while the
+IDF loader runs shows more differences:
+
+| offset | our chain | reference (loader running) |
+|---|---|---|
+| 0x80 | 01100008 | 00000000 |
+| 0x84 | 00010000 | 00000000 |
+| 0xa4 | c9000000 | 80000000 |
+| 0xa8 | 52400000 | 40000008 |
+
+(0xc0..0xe0 and the 0xdc = 0x640 reset-release value match on both.)
+
+So our SPL leaves clock selectors/dividers at 0x80/0x84 and 0xa4/0xa8 in a state
+the reference never has. Next round: identify those fields (they look like the
+MSPI/PSRAM clock dividers of `HP_SYS_CLKRST`) and bring them to the reference
+values, then re-check whether the PSRAM MMU answers.
