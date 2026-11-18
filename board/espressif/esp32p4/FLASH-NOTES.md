@@ -1743,3 +1743,36 @@ command transactions and one of them is probably sampled differently.
 Next round: print the first mismatching word in `psram_tune_read()`, fix the
 chunking, and then let the tuning pick the final phase/tap; after that the MMU
 map, the payload load and `booti`.
+
+## Round 52: the data phase is shifted by 16 bits, and the pattern hid it
+
+The `0xaaaaaaaa` pattern from round 51 was a bad choice: it is invariant under a
+16-bit shift, so it "verified" while the data was still misaligned. Comparing the
+xorshift reference instead shows it immediately:
+
+```
+mismatch 0 want 0x40aec71f got 0x0c1940ae
+```
+
+`got` has `want`'s high half (`0x40ae`) in its *low* half, i.e. the incoming
+stream is displaced by **2 bytes / 16 bits**.
+
+Things ruled out:
+
+* **dummy length**: swept 44..56 cycles against the xorshift reference with the
+  full 32-word compare - *no* value aligns, so it is not a sampling delay,
+* **DBYTELEN**: `SPI_MEM_S_USR_DBYTELEN` is marked `HRO` (hardware read only) in
+  the P4 register header, so it cannot be programmed; setting it changes nothing
+  (confirmed: identical mismatch),
+* **hex data lines**: setting `SDIN_HEX`/`SDOUT_HEX` in `SRAM_CMD` makes it much
+  worse (`got 0x0000ff00`) and puts the board into a reset loop (26 banners),
+  so those bits must stay clear in our state.
+
+So the 2-byte displacement is a genuine width disagreement between the controller
+data phase (2 bytes per clock) and the hex part (4 bytes per clock), and the
+width is selected by something other than `SRAM_CMD`/`USER1`. Next round: find
+where the P4 selects the data-line width for the MSPI2 cache path - candidates
+are `SMEM_DDR` bits beyond DDR_EN/VAR_DUMMY, `SPI_MEM_S_CTRL2`, the AXI/PMS
+attributes, and the `MSPI` "hex" mode inside `spi_mem_s_ddr` - and confirm with
+the xorshift reference (it is the only reliable check; `0xaaaaaaaa` must not be
+used again).

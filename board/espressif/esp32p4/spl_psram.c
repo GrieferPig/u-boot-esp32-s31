@@ -546,6 +546,13 @@ static int psram_xact(u16 cmd, u32 addr, u32 *tx, u32 tx_bits,
 	writel(((u32)cmd & 0xffff) | ((16 - 1) << P4_USR_COMMAND_BITLEN_S),
 	       (void *)P4_MSPI_S_USER2);
 
+	/*
+	 * Hex PSRAM in DDR mode moves 4 bytes per clock (16 lines x 2 edges);
+	 * the 16-bit register transfers use a single line pair, which is
+	 * DBYTELEN 1. Pick the width from the data phase length.
+	 */
+	psram_dbyte = (rx_bits > 32 || tx_bits > 32) ? 3 : 1;
+
 	user = ((32 - 1) << P4_USR_ADDR_BITLEN_S);
 	if (dummy)
 		user |= (dummy - 1) & 0x3f;
@@ -905,6 +912,7 @@ static void psram_tune_pins(u32 phase, u32 tap)
 
 /* Read dummy in cycles depends on the clock: 50 at MPLL/20, 25 at full speed. */
 static u32 psram_tune_dummy = 50;
+static u32 psram_tune_verbose = 1;
 
 static int psram_tune_read(const u32 *reference)
 {
@@ -914,9 +922,20 @@ static int psram_tune_read(const u32 *reference)
 	for (offset = 0; offset < P4_TUNE_WORDS; offset += 16) {
 		psram_xact(0x0000, P4_TUNE_ADDR + offset * 4, NULL, 0, readback,
 			   512, psram_tune_dummy);
-		for (i = 0; i < 16; i++)
-			if (readback[i] != reference[offset + i])
+		for (i = 0; i < 16; i++) {
+			if (readback[i] != reference[offset + i]) {
+				if (psram_tune_verbose) {
+					p4_spl_early_puts(" mismatch ");
+					p4_spl_early_hex(offset + i);
+					p4_spl_early_puts(" want ");
+					p4_spl_early_hex(reference[offset + i]);
+					p4_spl_early_puts(" got ");
+					p4_spl_early_hex(readback[i]);
+					p4_spl_early_puts("\n");
+				}
 				return 0;
+			}
+		}
 	}
 
 	return 1;
@@ -988,9 +1007,26 @@ static int psram_timing_tune(void)
 	for (i = 0; i < P4_TUNE_WORDS; i += 16)
 		psram_xact(0x8080, P4_TUNE_ADDR + i * 4, reference + i, 512,
 			   NULL, 0, P4_TUNE_WR_DUMMY);
-	if (!psram_tune_read(reference)) {
-		p4_spl_early_puts("tune: low-clock reference failed\n");
-		return -1;
+	{
+		u32 d, found = 0;
+
+		for (d = 44; d <= 56; d++) {
+			psram_tune_dummy = d;
+			psram_tune_verbose = 0;
+			if (psram_tune_read(reference)) {
+				found = d;
+				break;
+			}
+		}
+		psram_tune_verbose = 1;
+		p4_spl_early_puts("tune: aligned dummy ");
+		p4_spl_early_hex(found);
+		p4_spl_early_puts("\n");
+		if (!found) {
+			psram_tune_dummy = 50;
+			p4_spl_early_puts("tune: no aligned dummy\n");
+			return -1;
+		}
 	}
 	p4_spl_early_puts("tune: reference ok");
 
