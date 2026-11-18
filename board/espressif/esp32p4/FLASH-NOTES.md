@@ -1670,3 +1670,37 @@ map.
 
 The code for the calibration is in place and can be re-enabled with one line once
 a write verifies.
+
+## Round 50: mode-register writes persist, array accesses do not
+
+Two facts, both measured:
+
+* **Mode-register writes do reach the chip and persist across a reset.** Every
+  boot after the first probes MR0|MR1 as `0x8d28`, while a virgin boot reads
+  `0x8d08` - exactly the `lt` + read-latency bits `psram_mode_reg_init()`
+  programs. So the command path transmits correctly, in both directions, for the
+  16-bit register transfers.
+* **Array accesses fail.** A single 32-bit word written at PSRAM 0x80 / 0x84
+  through the command path reads back `0xffffffff`, with both the sync opcodes
+  (`0x8080`/`0x0000`) and the burst opcodes (`0xa0a0`/`0x2020`):
+
+```
+wordtest wrote 0x1234abcd read80 0xffffffff read84 0xffffffff
+tune: low-clock reference failed
+```
+
+So the register (mode) transfer path works, the array (data) path does not - the
+data phases are the problem, not the command/address phases. That points at the
+data-line width/DDR handling or the DQS sampling for data bursts, i.e. exactly
+the part that IDF's driver handles with `mspi_timing_psram_tuning()` and the
+hex-data-line-mode settings.
+
+### Plan
+
+Stop guessing register by register and **port IDF's
+`components/esp_psram/device/esp_psram_impl_ap_hex.c` essentially verbatim** into
+the SPL (it is 605 lines and self-contained apart from a handful of
+`psram_ctrlr_ll` helpers that can be inlined): its `s_config_mspi_for_psram()`,
+`s_init_psram_mode_reg()`, `s_check_psram_connected()`, `mspi_timing_psram_tuning()`
+and the final AXI setup are the code that is known to work on this exact silicon,
+and it removes the remaining guesswork about data-line mode and dummy cycles.

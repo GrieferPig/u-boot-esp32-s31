@@ -916,6 +916,29 @@ static int psram_tune_read(const u32 *reference)
 	return 1;
 }
 
+
+/*
+ * Smallest possible array write test: one 32-bit word through the direct
+ * command path, written and then read back.
+ */
+static void psram_word_test(void)
+{
+	u32 w = 0x1234abcd, r = 0, r2 = 0;
+
+	psram_xact(0x8080, 0x80, &w, 32, NULL, 0, P4_PSRAM_WR_DUMMY);
+	psram_xact(0x0000, 0x80, NULL, 0, &r, 32, P4_PSRAM_RD_DUMMY);
+	psram_xact(0xa0a0, 0x84, &w, 32, NULL, 0, P4_PSRAM_WR_DUMMY);
+	psram_xact(0x2020, 0x84, NULL, 0, &r2, 32, P4_PSRAM_RD_DUMMY);
+
+	p4_spl_early_puts("wordtest wrote ");
+	p4_spl_early_hex(w);
+	p4_spl_early_puts(" read80 ");
+	p4_spl_early_hex(r);
+	p4_spl_early_puts(" read84 ");
+	p4_spl_early_hex(r2);
+	p4_spl_early_puts("\n");
+}
+
 static int psram_timing_tune(void)
 {
 	u32 reference[P4_TUNE_WORDS];
@@ -1051,6 +1074,7 @@ int p4_spl_psram_init(void)
 	psram_mode_reg_init();
 	psram_cache_cmds();
 	psram_axi_config();
+	psram_word_test();
 	psram_timing_tune();
 	psram_mmu_map(0x01000000);
 	psram_rw_test();
