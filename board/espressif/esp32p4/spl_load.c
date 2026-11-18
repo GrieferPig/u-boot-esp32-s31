@@ -21,6 +21,8 @@ unsigned long notrace timer_read_counter(void);
 
 
 
+
+
 int p4_spl_load_uboot(void)
 {
 	u32 size = P4_UBOOT_SIZE;
@@ -58,6 +60,19 @@ int p4_spl_load_uboot(void)
 	p4_spl_early_hex(readl((void *)0x40100000));
 	p4_spl_early_hex(readl((void *)0x40100004));
 	p4_spl_puts("\n");
+
+	/* Is the lower half of the HP SRAM free for U-Boot? */
+	{
+		static const u32 addr[] = { 0x4ff00000, 0x4ff20000, 0x4ff3fffc };
+		u32 i;
+
+		p4_spl_puts("P4S ");
+		for (i = 0; i < 3; i++) {
+			writel(~addr[i], (void *)addr[i]);
+			p4_spl_puts(readl((void *)addr[i]) == ~addr[i] ? ":ok" : ":BAD");
+		}
+		p4_spl_puts("\n");
+	}
 
 	p4_spl_puts("payload ");
 	writel(0x12345678, (void *)P4_UBOOT_LOAD_ADDR);
@@ -134,15 +149,6 @@ void p4_spl_enter_uboot(u32 dtb)
 	 * the store path while the cache still held no-memory lines for that
 	 * region, so the first instruction fetch would return garbage.
 	 */
-	/*
-	 * Flush everything the copy left in the caches, then drop the lines so the
-	 * following reads really come from PSRAM. One map bit per call.
-	 */
-	((int (*)(u32))0x4fc00414)(0x10);	/* L1 dcache writeback */
-	((int (*)(u32))0x4fc00414)(0x20);	/* L2 writeback */
-	((int (*)(u32))0x4fc00404)(0x10);	/* L1 dcache invalidate */
-	((int (*)(u32))0x4fc00404)(0x20);	/* L2 invalidate */
-
 	p4_spl_puts("jump: entry ");
 	p4_spl_early_hex(P4_UBOOT_LOAD_ADDR);
 	p4_spl_puts(" dtb ");

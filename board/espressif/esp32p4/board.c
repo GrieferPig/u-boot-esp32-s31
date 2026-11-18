@@ -18,6 +18,8 @@
 DECLARE_GLOBAL_DATA_PTR;
 
 #define P4_SRAM_TOP		0x4ff80000
+#define P4_SRAM_MID_BASE	0x4ff00000
+#define P4_SRAM_MID_TOP	0x4ffc0000
 #define P4_PSRAM_LOW_TOP	0x480e0000
 #define P4_UBOOT_RAM_TOP	0x48f00000
 
@@ -27,6 +29,33 @@ void p4_spl_early_puts(const char *s);
 #else
 #define P4DBG(s)	do { } while (0)
 #endif
+
+
+/*
+ * The usable RAM depends on how U-Boot was started: the ROM only leaves part
+ * of PSRAM mapped, and the SRAM build lives below the SPL.
+ */
+int dram_init(void)
+{
+#ifdef CONFIG_ESP32P4_SRAM_ONLY
+	gd->ram_base = P4_SRAM_MID_BASE;
+	gd->ram_size = P4_SRAM_MID_TOP - P4_SRAM_MID_BASE;
+#elif defined(CONFIG_ESP32P4_LOW_RAM_TOP)
+	gd->ram_base = 0x48000000;
+	gd->ram_size = P4_PSRAM_LOW_TOP - 0x48000000;
+#else
+	gd->ram_base = 0x48000000;
+	gd->ram_size = 0x02000000;	/* 32 MiB of PSRAM */
+#endif
+	return 0;
+}
+
+int dram_init_banksize(void)
+{
+	gd->bd->bi_dram[0].start = gd->ram_base;
+	gd->bd->bi_dram[0].size = gd->ram_size;
+	return 0;
+}
 
 #if !defined(CONFIG_SPL_BUILD)
 void *board_fdt_blob_setup(int *err)
@@ -61,6 +90,10 @@ phys_addr_t board_get_usable_ram_top(phys_size_t total_size)
 	if (spl_phase() == PHASE_SPL)
 		return P4_SRAM_TOP;
 
+#ifdef CONFIG_ESP32P4_SRAM_ONLY
+	/* U-Boot proper runs from internal SRAM in this configuration. */
+	return P4_SRAM_MID_TOP;
+#endif
 #ifdef CONFIG_ESP32P4_LOW_RAM_TOP
 	/* Only the ROM-mapped part of PSRAM is usable in this configuration. */
 	return P4_PSRAM_LOW_TOP;

@@ -32,3 +32,9 @@ config ESP32P4_LOW_RAM_TOP
 	  The ROM only leaves part of the PSRAM window mapped. Select this to
 	  place U-Boot proper at 0x48000000 and cap usable RAM at 0x480e0000 so
 	  it can run from that window when booted by the SPL.
+
+config ESP32P4_SRAM_ONLY
+	bool "Run U-Boot proper from internal SRAM"
+	help
+	  Load U-Boot proper into the lower half of the HP SRAM (0x4ff00000) so
+	  it does not depend on the PSRAM window the ROM leaves mapped.
