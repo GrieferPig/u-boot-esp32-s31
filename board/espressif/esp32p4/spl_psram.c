@@ -105,6 +105,7 @@ typedef void (*rom_cmd_start_fn)(int spi_num, u8 *rx_buf, u16 rx_len,
 #define PSRAM_MR8_X16		1
 
 void p4_spl_early_puts(const char *s);
+void p4_watchdogs_off(void);
 void p4_spl_early_hex(u32 v);
 
 static void regi2c_write(u8 block, u8 reg, u8 data)
@@ -549,16 +550,23 @@ static int psram_xact(u16 cmd, u32 addr, u32 *tx, u32 tx_bits,
 	       (void *)P4_MSPI_S_USER2);
 
 	/*
-	 * Hex PSRAM in DDR mode moves 4 bytes per clock (16 lines x 2 edges);
-	 * the 16-bit register transfers use a single line pair, which is
-	 * DBYTELEN 1. Pick the width from the data phase length.
+	 * Hex PSRAM in DDR mode moves at most 4 bytes per clock (16 lines x 2
+	 * edges), so USER1.DBYTELEN ("data byte length - 1") is 3 for every
+	 * 32-bit and wider data phase, 1 for a 16-bit register access and 0 for
+	 * the 8-bit MR8 read. Deriving it from "> 32" made a 32-bit array
+	 * access move only half of its bytes.
 	 */
-	psram_dbyte = (rx_bits > 32 || tx_bits > 32) ? 3 : 1;
+	{
+		u32 bits = rx_bits > tx_bits ? rx_bits : tx_bits;
+
+		psram_dbyte = bits >= 32 ? 3 : (bits ? bits / 8 - 1 : 0);
+	}
 
 	user = ((32 - 1) << P4_USR_ADDR_BITLEN_S);
 	if (dummy)
 		user |= (dummy - 1) & 0x3f;
-	writel(user | (psram_dbyte << 6), (void *)P4_MSPI_S_USER1);
+	user |= psram_dbyte << 6;
+	writel(user, (void *)P4_MSPI_S_USER1);
 
 	writel(addr, (void *)P4_MSPI_S_ADDR);
 	setbits_le32((void *)P4_MSPI_S_CACHE_FCTRL, P4_CACHE_USR_ADDR_4BYTE);
@@ -599,9 +607,16 @@ static int psram_xact(u16 cmd, u32 addr, u32 *tx, u32 tx_bits,
 	if (readl((void *)P4_MSPI_S_CMD) & P4_USR)
 		return -1;
 
-	if (rx_bits && rx)
-		for (i = 0; i < DIV_ROUND_UP(rx_bits, 32); i++)
-			rx[i] = readl((void *)(P4_MSPI_S_W0 + i * 4));
+	if (rx_bits && rx) {
+		for (i = 0; i < DIV_ROUND_UP(rx_bits, 32); i++) {
+			u32 v = readl((void *)(P4_MSPI_S_W0 + i * 4));
+			u32 left = rx_bits - i * 32;
+
+			if (left < 32)
+				v &= (1u << left) - 1;
+			rx[i] = v;
+		}
+	}
 
 	return 0;
 }
@@ -618,9 +633,16 @@ static u32 psram_read_reg(u32 reg, u32 dummy)
 static void psram_probe(void)
 {
 	static const u32 dummies[] = { 8, 12, 16, 20, 24, 28 };
+	static const u32 regs[] = { 0x0, 0x4, 0x8 };
 	u32 i, val;
 
 	p4_spl_early_puts("psram probe:");
+	p4_spl_early_puts(" w0pre ");
+	p4_spl_early_hex(readl((void *)P4_MSPI_S_W0));
+	p4_spl_early_puts(" ");
+	p4_spl_early_hex(readl((void *)(P4_MSPI_S_W0 + 4)));
+	p4_spl_early_puts("\n");
+
 	/*
 	 * Command-mode transactions must run at a slow bus clock: the S31 port
 	 * uses MPLL/20 (~20 MHz) for its register accesses, and the replay
@@ -632,9 +654,24 @@ static void psram_probe(void)
 	psram_pin_mux_init();
 	psram_opi_dtr_mode();
 	for (i = 0; i < ARRAY_SIZE(dummies); i++) {
+		writel(0xdeadbeef, (void *)P4_MSPI_S_W0);
 		val = psram_read_reg(0, dummies[i]);
 		p4_spl_early_puts(" d");
 		p4_spl_early_hex(dummies[i]);
+		p4_spl_early_puts("=");
+		p4_spl_early_hex(val);
+	}
+
+	/*
+	 * Poison W0 before each read. A result still equal to the poison means
+	 * nothing was captured; three different answers for the three register
+	 * addresses prove the address phase is decoded too.
+	 */
+	for (i = 0; i < ARRAY_SIZE(regs); i++) {
+		writel(0xdeadbeef, (void *)P4_MSPI_S_W0);
+		val = psram_read_reg(regs[i], 12);
+		p4_spl_early_puts(" mr");
+		p4_spl_early_hex(regs[i]);
 		p4_spl_early_puts("=");
 		p4_spl_early_hex(val);
 	}
@@ -648,43 +685,68 @@ static void psram_probe(void)
  * profile: lt = 1, read latency 2..4, write latency 1..2, bl = 3, rbx = 1,
  * x16 = 1 (hex mode).
  */
-static void psram_mode_reg_init(void)
+static int psram_mode_reg_write(u32 mr0, u32 mr8)
 {
-	u32 mr01 = 0, mr48 = 0, mr8 = 0;
 	u32 w;
 
-	psram_xact(0x4040, 0x0, NULL, 0, &mr01, 16, 12);
-	psram_xact(0x4040, 0x4, NULL, 0, &mr48, 16, 12);
-	psram_xact(0x4040, 0x8, NULL, 0, &mr8, 8, 12);
-
-	/*
-	 * Only MR0 is written. The MR4/MR8 read-modify-write is not safe here:
-	 * a 16-bit register read can come back with the previous transaction's
-	 * data in the upper half, and writing the modified value back then
-	 * corrupts the part (that is how the mode registers ended up as
-	 * 0x8d288d48 / 0x8d288d6b). The values the ROM/previous stage left in
-	 * MR4 and MR8 are kept.
-	 */
-	mr01 &= ~(0x3u | (0x7u << 2) | BIT(5));
-	mr01 |= (PSRAM_RD_LATENCY << 2) | BIT(5);
-
-	w = mr01 & 0xffff;
+	w = mr0 & 0xff;
 	psram_xact(0xC0C0, 0x0, &w, 16, NULL, 0, 0);
-
-	/*
-	 * MR8 must explicitly select x16 mode: if a previous stage left the part
-	 * in x8 mode every 16-line data phase returns garbage. bl = 3 (16 byte
-	 * burst), bt = 0, rbx = 1, x16 = 1.
-	 */
-	w = 0x4b;
+	w = mr8 & 0xff;
 	psram_xact(0xC0C0, 0x8, &w, 16, NULL, 0, 0);
 
-	p4_spl_early_puts("mode: mr0 ");
-	p4_spl_early_hex(mr01);
-	p4_spl_early_puts(" mr4 ");
-	p4_spl_early_hex(mr48);
+	return 0;
+}
+
+static int psram_mode_reg_verify(u32 mr0, u32 mr8)
+{
+	u32 r0 = 0, r8 = 0;
+	int i;
+
+	for (i = 0; i < 4; i++) {
+		r0 = psram_read_reg(0x0, 12) & 0xff;
+		r8 = psram_read_reg(0x8, 12) & 0xff;
+		if (r0 == (mr0 & 0xff) && r8 == (mr8 & 0xff))
+			return 0;
+	}
+
+	p4_spl_early_puts("mode: verify failed mr0 ");
+	p4_spl_early_hex(r0);
 	p4_spl_early_puts(" mr8 ");
-	p4_spl_early_hex(mr8);
+	p4_spl_early_hex(r8);
+	p4_spl_early_puts("\n");
+
+	return -1;
+}
+
+static void psram_mode_reg_init(void)
+{
+	/*
+	 * Mode registers are volatile: a cold power cycle starts from the
+	 * part's defaults, so program them unconditionally and prove the result
+	 * by reading them back, retrying once.
+	 *
+	 * MR0 = fixed read latency 2; MR8 = 2048 byte burst, x16 (hex) mode.
+	 * MR4 (write latency) is deliberately not written: this part ignores
+	 * the write (it reads back 0xdf before and after) and the reference
+	 * chain runs with the same value.
+	 */
+	u32 mr0 = (PSRAM_RD_LATENCY << 2) | BIT(5);
+	u32 mr8 = PSRAM_MR8_BL | (PSRAM_MR8_BT << 2) | (PSRAM_MR8_RBX << 3) |
+		  (PSRAM_MR8_X16 << 6);
+
+	psram_mode_reg_write(mr0, mr8);
+	if (psram_mode_reg_verify(mr0, mr8)) {
+		psram_mode_reg_write(mr0, mr8);
+		if (psram_mode_reg_verify(mr0, mr8))
+			p4_spl_early_puts("mode: registers unverified\n");
+	}
+
+	p4_spl_early_puts("mode: mr0 ");
+	p4_spl_early_hex(psram_read_reg(0x0, 12));
+	p4_spl_early_puts(" mr4 ");
+	p4_spl_early_hex(psram_read_reg(0x4, 12));
+	p4_spl_early_puts(" mr8 ");
+	p4_spl_early_hex(psram_read_reg(0x8, 12));
 	p4_spl_early_puts("\n");
 }
 
@@ -773,24 +835,7 @@ static void psram_dcache_invalidate(void *addr, u32 size);
 /* Nothing feeds the watchdogs during a multi-megabyte copy, so turn them off. */
 static void psram_watchdogs_off(void)
 {
-	void *wdt = (void *)0x50116000;
-	u32 t;
-
-	writel(0x50d83aa1, wdt + 0x18);			/* WPROTECT */
-	clrbits_le32(wdt + 0x00, BIT(31) | BIT(14));
-	writel(0, wdt + 0x18);
-
-	writel(0x50d83aa1, wdt + 0x20);			/* SWD_WPROTECT */
-	setbits_le32(wdt + 0x1c, BIT(30));		/* swd_disable */
-	writel(0, wdt + 0x20);
-
-	for (t = 0; t < 4; t++) {
-		u32 base = 0x500c2000 + t * 0x1000;
-
-		writel(0x50d83aa1, (void *)(base + 0x64));
-		clrbits_le32((void *)(base + 0x48), BIT(31));
-		writel(0, (void *)(base + 0x64));
-	}
+	p4_watchdogs_off();
 }
 
 void p4_spl_psram_load_payload(void)
@@ -879,18 +924,7 @@ static void psram_range_check(void)
 
 		psram_xact(0x8080, offs[i], &w, 32, NULL, 0, P4_PSRAM_WR_DUMMY);
 		psram_xact(0x0000, offs[i], NULL, 0, &r, 32, 46);
-		p4_spl_early_puts("ckA");
-	{
-		u32 i2;
-
-		for (i2 = 0; i2 < 40; i2++) {
-			p4_spl_early_puts(" ");
-			p4_spl_early_hex(readl((void *)(P4_CLKRST_BASE + i2 * 4)));
-		}
-		p4_spl_early_puts("\n");
-	}
-
-	p4_spl_early_puts(" cmd@");
+		p4_spl_early_puts(" cmd@");
 		p4_spl_early_hex(offs[i]);
 		p4_spl_early_puts(r == w ? "=ok" : "=BAD");
 	}
@@ -901,22 +935,23 @@ static void psram_range_check(void)
 
 static void psram_cache_check(void)
 {
-	u32 r1 = 0, r2 = 0;
+	u32 i, r;
 
-	writel(0x11223344, (void *)0x48100000);
+	/*
+	 * Does a write through the AXI/cache window actually reach the chip?
+	 * Write, flush, then read the same offset back through the command
+	 * path, which is the only path proven to touch the part.
+	 */
+	for (i = 0; i < 4; i++)
+		writel(0x13579bdfu + i, (void *)(0x48100000 + i * 4));
 	psram_dcache_flush((void *)0x48100000, 0x1000);
-	psram_xact(0x0000, 0x100000, NULL, 0, &r1, 32, 46);
-
-	/* command write -> invalidate -> is it visible through the cache? */
-	r2 = 0x55667788;
-	psram_xact(0x8080, 0x100004, &r2, 32, NULL, 0, P4_PSRAM_WR_DUMMY);
-	psram_dcache_invalidate((void *)0x48100000, 0x1000);
-	r2 = readl((void *)0x48100004);
-
-	p4_spl_early_puts("cache: write->chip ");
-	p4_spl_early_hex(r1);
-	p4_spl_early_puts(" chip->read ");
-	p4_spl_early_hex(r2);
+	p4_spl_early_puts("cache->chip:");
+	for (i = 0; i < 4; i++) {
+		r = 0;
+		psram_xact(0x0000, 0x100000 + i * 4, NULL, 0, &r, 32, 46);
+		p4_spl_early_puts(" ");
+		p4_spl_early_hex(r);
+	}
 	p4_spl_early_puts("\n");
 }
 
@@ -1225,6 +1260,13 @@ static void psram_rw_test(void)
 
 int p4_spl_psram_init(void)
 {
+	/*
+	 * The ROM arms MWDT0 flashboot mode on every flash boot; it keeps
+	 * resetting the SoC even after wdt_en is cleared and will abort a PSRAM
+	 * transaction mid-flight, leaving the controller stuck.
+	 */
+	p4_watchdogs_off();
+
 	p4_spl_early_puts("psram: clock\n");
 	psram_clkrst_fixup();
 	psram_clock_init();

@@ -2255,3 +2255,84 @@ handling for reads - both the register path and the array path fail the same way
 which points at a single bug in how the address is presented (register write,
 `USR` bit ordering or the `USER` address-bitlen field) rather than at the PSRAM
 timing.
+
+## Round 67: the address phase was never broken; DBYTELEN and a watchdog were
+
+Dumped the real ROM helpers over JTAG (`0x4fc00100` jump table, then
+`esp_rom_spi_cmd_config` at `0x4fc10124`, `esp_rom_spi_cmd_start` at
+`0x4fc1039e`) and disassembled them with the RISC-V toolchain. They are a
+complete specification of the user-mode path:
+
+* base = `(0x50008c + spi_num) << 12` (MSPI3 = `0x5008f000`),
+* `USER2` = command value, command bitlen `(16-1) << 28`; `USER` bits 31/30/29/
+  28/27 are the command/addr/dummy/miso/mosi enables; `USER1` = addr bitlen
+  `(32-1) << 26` | dummy `n-1`; `S_ADDR` = 32-bit address; `MOSI_DLEN`/
+  `MISO_DLEN` = bits-1; the data buffer is `0x58` (`W0`), and `cmd_start`
+  copies `W0..` into the caller's buffer with `memcpy`.
+
+Our sequence matched it, except for one field. The "register reads always
+return 0x8d28, so the address phase is ignored" theory was an artefact: the
+probe had been reading address 0 every time, and the value it returned was the
+last thing in `W0`. A poison test (`writel(0xdeadbeef, W0)` before each read)
+proves the data phase and address decode both work:
+
+```
+psram probe: mr0x0=0x8d08 mr0x4=0xa0df mr0x8=0x0540
+```
+
+three different answers for three register addresses, none equal to the poison.
+
+The real bug was `USER1.DBYTELEN` (`[8:6]`, "data byte length - 1"). It had been
+set to 3 only for phases wider than 32 bits, so a 32-bit array access announced
+1 and moved only 2 bytes per clock: a 32-bit write of `0x1234abcd` left
+`0xaaaa0000` in the part. `DBYTELEN` is 3 for every 32-bit-and-wider phase, 1
+for a 16-bit register access and 0 for the 8-bit MR8 read. Received words are
+now also masked to the access width, which removes the "0x8d088d28" doubling.
+
+Mode registers: MR0 and MR8 are programmed unconditionally and verified by
+read-back (four tries, then one retry), because the values are volatile:
+
+```
+mode: mr0 0x8d28 mr4 0x80df mr8 0x054b
+```
+
+`MR0 = lt 1 | read latency 2`, `MR8 = 0x4b` (bl 3, rbx 1, x16) both verify. MR4
+ignores writes on this part (it reads `0xdf` before and after a write), and the
+reference chain runs with the same value, so MR4 is deliberately left alone.
+
+### The resets were MWDT0 flashboot mode
+
+`p4load` from the U-Boot prompt used to die with
+
+```
+rst:0x7 (HP_SYS_HP_WDT_RESET)
+```
+
+and the reference boot log then showed the next SPL boot reading `0x8d28`
+everywhere, i.e. the controller stuck mid-transaction. That is the same
+"healthy/corrupt boots" alternation seen in rounds 63-65. The ROM arms TIMG
+MWDT0 **flashboot mode** (`TIMG_WDT_CONFIG0.wdt_flashboot_mod_en`, bit 14,
+default 1) on every flash boot; per the TRM it is independent of `wdt_en` and
+keeps resetting the SoC. The old `psram_watchdogs_off()` (and U-Boot's
+`hw_watchdog_init()`, which was never called at all) only cleared `wdt_en`.
+
+`board_init()` now runs `p4_watchdogs_off()` in both the SPL and U-Boot proper:
+RWDT (en + flashboot), the super watchdog, and MWDT0/MWDT1 (en, flashboot, all
+four stages, CPU reset enables) behind their write-protect keys, with
+`wdt_conf_update_en`. After that `p4load` no longer resets the board.
+
+### The AXI/cache window still does not write the part
+
+With the watchdog fixed, `p4load` runs but faults after the 3.5 MB copy
+(`mcause 0x00000005`, `mepc` inside `printf`), and the copy is not in the chip:
+write through `0x48100000`, flush with the ROM helper, then read the same
+offset through the command path still shows the previous command-path value.
+The cache read dummy was aligned to the value the captured IDF chain uses
+(`CACHE_SCTRL.RDUMMY = 25`, 26 cycles, instead of our 46) without changing the
+result, so this is not the fill timing. The command path is the only path that
+provably reaches the part; the payload load has to be reworked on top of it (or
+the MSPI2 AXI/PMS state has to be compared against a live IDF boot) before
+`p4load` can deliver a kernel.
+
+State left behind: the SPL reaches the `esp32p4>` prompt reliably with MR0/MR8
+verified and no watchdog resets; `p4load` is still not usable for the kernel.

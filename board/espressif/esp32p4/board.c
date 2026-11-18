@@ -118,8 +118,51 @@ phys_addr_t board_get_usable_ram_top(phys_size_t total_size)
 
 void p4_systimer_enable(void);
 
+/*
+ * Watchdogs the ROM leaves armed after a flash boot. RWDT and the super
+ * watchdog are cleared through their key registers; TIMG MWDT0/MWDT1 have a
+ * flashboot mode that keeps resetting the SoC even with wdt_en clear, and the
+ * ROM enables it on every flash boot (TRM ch.9 "Timer Group (TIMG)" -
+ * WDT_CONFIG0.wdt_flashboot_mod_en). A multi-megabyte PSRAM copy takes long
+ * enough to trip it, so disable it before any PSRAM work.
+ */
+#define P4_WDT_WKEY	0x50d83aa1u
+#define P4_TIMG0_BASE	0x500c2000u
+#define P4_TIMG1_BASE	0x500c3000u
+
+static void p4_mwdt_off(u32 base)
+{
+	u32 v;
+
+	writel(P4_WDT_WKEY, (void *)(base + 0x64));	/* WDT_WPROTECT */
+	v = readl((void *)(base + 0x48));
+	v &= ~(BIT(31) |			/* wdt_en */
+	       (3u << 29) | (3u << 27) | (3u << 25) | (3u << 23) |
+	       BIT(14) | BIT(13) | BIT(12));	/* flashboot, cpu resets */
+	writel(v, (void *)(base + 0x48));
+	writel(v | BIT(22), (void *)(base + 0x48));	/* conf_update */
+	writel(0, (void *)(base + 0x64));
+}
+
+void p4_watchdogs_off(void)
+{
+	void *wdt = (void *)0x50116000;
+
+	writel(P4_WDT_WKEY, wdt + 0x18);		/* RWDT WPROTECT */
+	clrbits_le32(wdt + 0x00, BIT(31) | BIT(14));
+	writel(0, wdt + 0x18);
+
+	writel(P4_WDT_WKEY, wdt + 0x20);		/* SWD_WPROTECT */
+	setbits_le32(wdt + 0x1c, BIT(30));		/* swd_disable */
+	writel(0, wdt + 0x20);
+
+	p4_mwdt_off(P4_TIMG0_BASE);
+	p4_mwdt_off(P4_TIMG1_BASE);
+}
+
 int board_init(void)
 {
+	p4_watchdogs_off();
 	p4_systimer_enable();
 	P4DBG("P4SPL:board-init\n");
 	return 0;
@@ -135,23 +178,14 @@ int board_init(void)
 void hw_watchdog_reset(void)
 {
 	void *wdt = (void *)0x50116000;
-	u32 t;
 
-	writel(0x50d83aa1, wdt + 0x18);
-	writel(1, wdt + 0x14);
+	writel(P4_WDT_WKEY, wdt + 0x18);
+	writel(1, wdt + 0x14);			/* RWDT feed */
 	writel(0, wdt + 0x18);
 
-	writel(0x50d83aa1, wdt + 0x20);
-	writel(readl(wdt + 0x1c) | (1u << 31), wdt + 0x1c);
-	writel(0, wdt + 0x20);
-
-	for (t = 0; t < 4; t++) {
-		u32 base = 0x500c2000 + t * 0x1000;
-
-		writel(0x50d83aa1, (void *)(base + 0x64));
-		writel(0x50d83aa1, (void *)(base + 0x60));
-		writel(0, (void *)(base + 0x64));
-	}
+	/* TIMG WDT feed register accepts any value. */
+	writel(1, (void *)(P4_TIMG0_BASE + 0x60));
+	writel(1, (void *)(P4_TIMG1_BASE + 0x60));
 }
 
 
@@ -224,21 +258,7 @@ U_BOOT_CMD(p4load, 1, 1, do_p4load,
 
 void hw_watchdog_init(void)
 {
-	/*
-	 * Long operations (copying a kernel into PSRAM) cannot feed the
-	 * watchdogs from the serial poll path, so switch off the RWDT and the
-	 * super watchdog outright instead of only feeding them.
-	 */
-	void *wdt = (void *)0x50116000;
-
-	writel(0x50d83aa1, wdt + 0x18);			/* WPROTECT */
-	clrbits_le32(wdt + 0x00, BIT(31));		/* rwdt_en */
-	clrbits_le32(wdt + 0x00, BIT(14));		/* flashboot enable */
-	writel(0, wdt + 0x18);
-
-	writel(0x50d83aa1, wdt + 0x20);			/* SWD_WPROTECT */
-	setbits_le32(wdt + 0x1c, BIT(30));		/* swd_disable */
-	writel(0, wdt + 0x20);
+	p4_watchdogs_off();
 }
 #endif
 
