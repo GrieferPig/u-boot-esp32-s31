@@ -1599,3 +1599,40 @@ register file - `0x00..0x60`, `0x100..0x1b0`, `0xd0..0xe0` - and diff against ou
 chain, this time *including* the fields we have not looked at yet
 (`CACHE_SCTRL` upper bits, `AES`/`DECRYPT` control, `INT_*`, `DLL_*`). The data
 path is clearly gated by something we have not programmed.
+
+## Round 48: only four registers differ, and the data path still fails
+
+Dumped the whole MSPI2 file (`0x00..0x5c`, `0x100..0x1ac`, `0xd0..0xec`,
+`0x370..0x38c`) on both chains - the reference with Linux running and using the
+framebuffer in PSRAM - and diffed. **Only four registers differ:**
+
+| reg | ours | reference | meaning |
+|---|---|---|---|
+| 0x5008e040 | 02d7c679 | 02f7c679 | `CACHE_SCTRL`: ref also sets bit 21 (`SRAM_OCT`) |
+| 0x5008e044 | 80fc0000 | 8cfc0000 | `SRAM_CMD`: ref also sets bits 26/27 (`SDIN_HEX`/`SDOUT_HEX`) |
+| 0x5008e170 | 00d6ffc0 | 00000000 | replay artifact, not used by the reference |
+| 0x5008e1a0 | 8000b084 | 8400b18f | AC: CS setup/hold/hold-delay values |
+
+Tried setting the reference's OCT+HEX bits: **reset loop** (16 banners), so those
+bits are only valid in the state the reference reaches *after* a successful
+bring-up, not before it. Reverted.
+
+Applied the other two (`0x1a0` = 0x8400b18f, `0x170` = 0): the board still boots
+cleanly (0 banners) but the persistence probe is unchanged:
+
+```
+stale a=0xca2aca2a c=0xca2aca2a d=0xaaeaeaaa      (same on every boot)
+```
+
+So the register file is essentially identical to a working boot, yet no data
+moves. What the reference has that we have not done is the **timing/DQS
+calibration** (`mspi_timing_psram_tuning()` in IDF, `psram_timing_tune()` in the
+S31 port): it sweeps the DQS phase (`PSRAM_DQS_REG` = MSPI pin block + 0x3c,
+bits [2:1]) and the DQS-minus-data delay taps ([14:7] and [21:18]) while reading
+a reference pattern, and only after that does the bus return real data. Constant
+"junk" like `0xca2aca2a` is exactly what a mis-sampled bus looks like.
+
+Next round: port `psram_tune_pins()` + `psram_timing_tune()` from the S31 port
+against the P4's hex part (DQS register at 0x500e123c, reference pattern written
+at 0x80 in PSRAM), and use the result as the final bring-up step before the MMU
+map and the payload load.

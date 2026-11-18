@@ -716,6 +716,10 @@ static void psram_axi_config(void)
 		((u32)(P4_PSRAM_WR_DUMMY - 1) << P4_SCTRL_WDUMMY_S);
 	writel(sctrl, (void *)P4_CACHE_SCTRL);
 
+	/* CS timing + split transaction, as the reference has it. */
+	writel(0x8400b18fu, (void *)(P4_MSPI2_BASE + 0x1a0));
+	writel(0, (void *)(P4_MSPI2_BASE + 0x170));
+
 	cmd = readl((void *)P4_SRAM_CMD);
 	cmd &= ~(P4_CMD_SDIN_HEX | P4_CMD_SDOUT_HEX);
 	cmd |= BIT(18) | BIT(19) | BIT(20) | BIT(21) | P4_CMD_SDUMMY_WOUT;
