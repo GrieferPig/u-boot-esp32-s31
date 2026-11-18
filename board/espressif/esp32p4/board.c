@@ -156,7 +156,21 @@ void hw_watchdog_reset(void)
 
 void hw_watchdog_init(void)
 {
-	hw_watchdog_reset();
+	/*
+	 * Long operations (copying a kernel into PSRAM) cannot feed the
+	 * watchdogs from the serial poll path, so switch off the RWDT and the
+	 * super watchdog outright instead of only feeding them.
+	 */
+	void *wdt = (void *)0x50116000;
+
+	writel(0x50d83aa1, wdt + 0x18);			/* WPROTECT */
+	clrbits_le32(wdt + 0x00, BIT(31));		/* rwdt_en */
+	clrbits_le32(wdt + 0x00, BIT(14));		/* flashboot enable */
+	writel(0, wdt + 0x18);
+
+	writel(0x50d83aa1, wdt + 0x20);			/* SWD_WPROTECT */
+	setbits_le32(wdt + 0x1c, BIT(30));		/* swd_disable */
+	writel(0, wdt + 0x20);
 }
 #endif
 

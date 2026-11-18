@@ -669,6 +669,70 @@ static void psram_mode_reg_init(void)
 }
 
 
+
+/*
+ * Open the cache/AXI window so the MMU entries we program are actually
+ * reachable. Ported from the S31 port's psram_axi_config(), with the hex
+ * (16 data line) variant of the opcodes and dummies used by the P4 part.
+ */
+#define P4_SRAM_DWR_CMD		(P4_MSPI2_BASE + 0x4c)
+#define P4_SRAM_DRD_CMD		(P4_MSPI2_BASE + 0x48)
+#define P4_SRAM_CMD		(P4_MSPI2_BASE + 0x44)
+#define P4_CACHE_SCTRL		(P4_MSPI2_BASE + 0x40)
+#define P4_CACHE_FCTRL		(P4_MSPI2_BASE + 0x3c)
+#define P4_CTRL1		(P4_MSPI2_BASE + 0x0c)
+#define P4_DDR_AXI		(P4_MSPI2_BASE + 0xd8)
+#define P4_MMU_CONTENT		(P4_MSPI2_BASE + 0x37c)
+#define P4_MMU_INDEX		(P4_MSPI2_BASE + 0x380)
+
+#define P4_SCTRL_SADDR_4BYTE	BIT(0)
+#define P4_SCTRL_WR_DUMMY	BIT(3)
+#define P4_SCTRL_RD_DUMMY	BIT(4)
+#define P4_SCTRL_RCMD		BIT(5)
+#define P4_SCTRL_RDUMMY_S	6
+#define P4_SCTRL_ADDR_BITLEN_S	14
+#define P4_SCTRL_WCMD		BIT(20)
+#define P4_SCTRL_HEX		BIT(21)
+#define P4_SCTRL_WDUMMY_S	22
+#define P4_CMD_SDIN_HEX		BIT(26)
+#define P4_CMD_SDOUT_HEX	BIT(27)
+#define P4_CMD_SDUMMY_WOUT	BIT(23)
+
+#define P4_PSRAM_RD_DUMMY	(2 * (14 - 1))
+#define P4_PSRAM_WR_DUMMY	(2 * (7 - 1))
+
+static void psram_axi_config(void)
+{
+	u32 sctrl, cmd;
+
+	writel(0x8080u | ((16 - 1) << 28), (void *)P4_SRAM_DWR_CMD);
+	writel(0x0000u | ((16 - 1) << 28), (void *)P4_SRAM_DRD_CMD);
+
+	sctrl = P4_SCTRL_SADDR_4BYTE | P4_SCTRL_WR_DUMMY | P4_SCTRL_RD_DUMMY |
+		P4_SCTRL_RCMD |
+		((u32)(P4_PSRAM_RD_DUMMY - 1) << P4_SCTRL_RDUMMY_S) |
+		((u32)(32 - 1) << P4_SCTRL_ADDR_BITLEN_S) |
+		P4_SCTRL_WCMD |
+		((u32)(P4_PSRAM_WR_DUMMY - 1) << P4_SCTRL_WDUMMY_S);
+	writel(sctrl, (void *)P4_CACHE_SCTRL);
+
+	cmd = readl((void *)P4_SRAM_CMD);
+	cmd &= ~(P4_CMD_SDIN_HEX | P4_CMD_SDOUT_HEX);
+	cmd |= BIT(18) | BIT(19) | BIT(20) | BIT(21) | P4_CMD_SDUMMY_WOUT;
+	writel(cmd, (void *)P4_SRAM_CMD);
+
+	writel(BIT(0) | BIT(1), (void *)P4_DDR_AXI);
+
+	setbits_le32((void *)P4_CACHE_FCTRL, BIT(0));
+	clrbits_le32((void *)P4_CACHE_FCTRL, BIT(31));
+
+	setbits_le32((void *)P4_CTRL1, BIT(25) | BIT(26));
+
+	p4_spl_early_puts("axi: sctrl ");
+	p4_spl_early_hex(readl((void *)P4_CACHE_SCTRL));
+	p4_spl_early_puts("\n");
+}
+
 /* Map the PSRAM window through the MSPI2 "S" MMU (64 KiB pages). */
 static void psram_mmu_map(u32 size)
 {
@@ -684,7 +748,7 @@ static void psram_mmu_map(u32 size)
 /* Write a pattern at an address and read it back through the cache path. */
 static void psram_rw_test(void)
 {
-	static const u32 addrs[] = { 0x48001000, 0x48010000, 0x4801f000 };
+	static const u32 addrs[] = { 0x48010000, 0x48100000, 0x49000000 };
 	u32 i, val;
 
 	for (i = 0; i < ARRAY_SIZE(addrs); i++) {
@@ -714,6 +778,8 @@ int p4_spl_psram_init(void)
 	psram_probe();
 	psram_mode_reg_init();
 	psram_cache_cmds();
+	psram_axi_config();
+	psram_mmu_map(0x01000000);
 	psram_rw_test();
 	psram_mmu_report();
 

@@ -213,7 +213,7 @@ void spl_board_init(void)
 
 	p4_spl_puts("spl: psram ready\n");
 
-	if (p4_spl_flash_init(0x00800000)) {
+	if (p4_spl_flash_init(0x01000000)) {
 		p4_spl_puts("spl: flash map failed; boot stopped\n");
 		for (;;)
 			;

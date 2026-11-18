@@ -1439,3 +1439,51 @@ program.
 
 Next round: port `psram_axi_config()` to the P4 (hex instead of octal bits, the
 P4's `AP_HEX` opcodes/dummy values) and retest `0x48100000` / `0x49000000`.
+
+## Round 44: PSRAM IS ALIVE - full window read/write works
+
+Ported `psram_axi_config()` from the S31 (`psram_axi_config()`) and it is the
+last piece that was missing. With the **octal** variant of the `SRAM_CMD` bits
+(the hex variant reset the board):
+
+```
+axi: sctrl 0x02d7c679
+ rw 0x48010000=0xa5a50000 rw 0x48100000=0xa5a50001 rw 0x49000000=0xa5a50002
+mmu0 0x00000c00 mmu1 0x00000c01
+```
+
+So cached read/write now works at 1 MiB **and** 16 MiB - the whole window, not
+just the ROM-mapped 128 KiB. The sequence that works, in order:
+
+1. `psram_pads_init()` (GPIO IO-MUX) + `psram_pin_mux_init()` (the real MSPI pin
+   block at 0x500e1200),
+2. `psram_probe()`: slow bus clock, `psram_opi_dtr_mode()`, MR read (vendor 0x0d),
+3. `psram_mode_reg_init()` (MR0/MR4/MR8),
+4. `psram_cache_cmds()` (replayed post-init values),
+5. `psram_axi_config()`: `SRAM_DWR/DRD_CMD` opcodes+bitlen, `CACHE_SCTRL`
+   (4-byte addr, RD/WR cmd, RD/WR dummy, addr bitlen, mode bit),
+   `SRAM_CMD` |= oct cmd/addr/dout/din + `SDUMMY_WOUT`, `DDR_AXI` = DDR+var dummy,
+   `CACHE_FCTRL` |= AXI_REQ_EN, `CTRL1` |= RD/WR splice,
+6. `psram_mmu_map()` (256 entries), then the read/write test.
+
+Also done: the flash window was widened from 8 MiB to 16 MiB, so the device tree
+at flash 0x900000 is readable (`edfe0dd0`, size 0x113d) and the kernel header at
+0x200000 gives `image_size = 0x354c60`.
+
+### The remaining problem: bulk copies into PSRAM reset the board
+
+From the U-Boot prompt:
+
+```
+mw.l 0x48f00000 0xdeadbeef 4      -> reads back, fine
+cp.b 0x40900000 0x48f00000 0x40   -> works
+cp.b 0x40900000 0x48f00000 0x113d -> resets (rst:0x7)
+cp.b 0x40900000 0x48f00000 0x1000 -> resets
+```
+
+Watchdogs are now switched **off** in `hw_watchdog_init()` (RWDT `wdt_en` and
+`flashboot_mod_en` cleared, SWDT `swd_disable` set, keys handled), so this is a
+real fault/hang in the bulk write path, not a watchdog timeout. Next round: find
+the copy-size boundary (256 B / 512 B / 1 KiB / 2 KiB) and look at what the
+cache/AXI path needs for multi-line writes (likely `CTRL1` splice or the DDR
+write dummy/write latency in MR4).
