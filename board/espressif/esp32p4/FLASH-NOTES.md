@@ -1232,3 +1232,35 @@ lines are not routed back.
 Next round: compare the IO-MUX / pad registers that IDF touches for the PSRAM
 (`mspi_timing_ll_pin_drv_set`, `*_dqs`, the `HP_SYS_CLKRST` "PSRAM pad" fields)
 between the two chains, then re-run the probe.
+
+## Round 38: the PSRAM pads are unconfigured, and writing them blindly is unsafe
+
+Diffed the IO-MUX block (`0x500e1000..0x500e1240`) between our chain and the
+reference (IDF loader phase). **61 registers differ**, and the pattern is
+unmistakable: the reference has bit 1 set on every PSRAM pad while we leave the
+pads at their reset value.
+
+| address | ours | reference | pads |
+|---|---|---|---|
+| 0x500e1020, 0x500e1024 | 00000800 | 00001b02 | clock / cs |
+| 0x500e1028 .. 0x500e1060 | 00000800 | 00000802 | data lines |
+| 0x500e1064, 0x500e1068 | 00000c00 | 00000c02 | data lines |
+| 0x500e10a0 .. 0x500e10c4 | 00000800 | 00001802 | data lines |
+| 0x500e1204 .. 0x500e1218 | 00000000 | 00000010 | pad config |
+| 0x500e121c .. 0x500e1238 | 00000000 | 00002020 | pad config |
+| 0x500e123c | 00000000 | 00010001 | pad config |
+
+So the pads really are a missing piece. Tried writing the whole reference state in
+`psram_pads_init()` before the probe: the probe still read zeros **and** the board
+started reset-looping (16 ROM banners), so writing that range verbatim is not
+safe - some of those registers are not plain pad configuration (the `0x2020`
+patterns look like GPIO output/OE registers for other pins).
+
+Reverted; the chain is verified working again (`md 0x48000000` ->
+`00000000 01010101`, no reset).
+
+Next round: narrow the range. Start with just the IO-MUX registers
+`0x500e1020..0x500e10dc` (bit 1 = output enable plus drive strength) and leave
+`0x500e1200+` alone, then check the probe; if the chip still answers nothing, look
+at what IDF's `mspi_timing_ll_pin_drv_set(2)` actually writes instead of copying
+whole registers.
