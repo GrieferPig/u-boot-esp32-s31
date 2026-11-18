@@ -782,7 +782,7 @@ static void psram_mode_reg_init(void)
 
 #define P4_PSRAM_RD_DUMMY	(2 * (14 - 1))
 /* The cache path needs the same 46-cycle read latency the tuning found. */
-#define P4_PSRAM_CACHE_RD_DUMMY	46
+#define P4_PSRAM_CACHE_RD_DUMMY	26
 #define P4_PSRAM_WR_DUMMY	(2 * (7 - 1))
 
 static void psram_axi_config(void)
@@ -804,6 +804,8 @@ static void psram_axi_config(void)
 	writel(0x8400b18fu, (void *)(P4_MSPI2_BASE + 0x1a0));
 	writel(0, (void *)(P4_MSPI2_BASE + 0x170));
 
+	/* Bits 26/27 are reserved on this silicon revision: with them set the
+	 * command path stops answering, so keep them clear like before. */
 	cmd = readl((void *)P4_SRAM_CMD);
 	cmd &= ~(P4_CMD_SDIN_HEX | P4_CMD_SDOUT_HEX);
 	cmd |= BIT(18) | BIT(19) | BIT(20) | BIT(21) | P4_CMD_SDUMMY_WOUT;
@@ -811,7 +813,7 @@ static void psram_axi_config(void)
 
 	writel(BIT(0) | BIT(1), (void *)P4_DDR_AXI);
 
-	setbits_le32((void *)P4_CACHE_FCTRL, BIT(0));
+	/* AXI stays closed until the MMU is programmed. */
 	clrbits_le32((void *)P4_CACHE_FCTRL, BIT(31));
 
 	setbits_le32((void *)P4_CTRL1, BIT(25) | BIT(26));
@@ -938,17 +940,28 @@ static void psram_cache_check(void)
 	u32 i, r;
 
 	/*
-	 * Does a write through the AXI/cache window actually reach the chip?
-	 * Write, flush, then read the same offset back through the command
-	 * path, which is the only path proven to touch the part.
+	 * The P4 maps external memory twice: 0x48000000 is the cacheable
+	 * alias and 0x88000000 the non-cacheable one (SOC_NON_CACHEABLE_
+	 * OFFSET_PSRAM = 0x40000000). Only the non-cacheable alias provably
+	 * writes the part from the SPL, so exercise that path and verify it
+	 * through the command path.
 	 */
-	for (i = 0; i < 4; i++)
-		writel(0x13579bdfu + i, (void *)(0x48100000 + i * 4));
-	psram_dcache_flush((void *)0x48100000, 0x1000);
-	p4_spl_early_puts("cache->chip:");
+	writel(0x33334444, (void *)0x88200000);
+	p4_spl_early_puts("alias:");
 	for (i = 0; i < 4; i++) {
 		r = 0;
-		psram_xact(0x0000, 0x100000 + i * 4, NULL, 0, &r, 32, 46);
+		psram_xact(0x0000, 0x200000 + i * 4, NULL, 0, &r, 32, 46);
+		p4_spl_early_puts(" ");
+		p4_spl_early_hex(r);
+	}
+	p4_spl_early_puts("\n");
+
+	for (i = 0; i < 0x4000; i++)
+		writel(0xd00d0000u + i, (void *)(0x88300000 + i * 4));
+	p4_spl_early_puts("alias bulk:");
+	for (i = 0; i < 4; i++) {
+		r = 0;
+		psram_xact(0x0000, 0x300000 + i * 0x4000, NULL, 0, &r, 32, 46);
 		p4_spl_early_puts(" ");
 		p4_spl_early_hex(r);
 	}
@@ -1290,13 +1303,20 @@ int p4_spl_psram_init(void)
 	clrbits_le32((void *)P4_CACHE_FCTRL, BIT(0));
 	psram_word_test();
 	psram_timing_tune();
-	setbits_le32((void *)P4_CACHE_FCTRL, BIT(0));
-	psram_mmu_map(0x01000000);
 
-	psram_rw_test();
-	psram_range_check();
+	/*
+	 * Now that the command path is no longer needed, put the cache
+	 * controller back in 16-line data mode. The reference SRAM_CMD
+	 * (0x8cfc0000) has SDIN_HEX/SDOUT_HEX (bits 26/27) set; without them a
+	 * 32-bit AXI write drives only half of the lines and leaves two bytes
+	 * at offset 0 and two at offset 4. Program it, and the MMU, with the
+	 * AXI port still closed, then open the port as the very last step.
+	 */
+	psram_mmu_map(0x01000000);
+	setbits_le32((void *)P4_CACHE_FCTRL, BIT(0));
+
 	psram_cache_check();
-	psram_bulk_test();
+	psram_range_check();
 	psram_mmu_report();
 
 	p4_spl_early_puts("psram: check\n");

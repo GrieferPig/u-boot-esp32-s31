@@ -194,17 +194,20 @@ void hw_watchdog_reset(void)
 
 /*
  * "p4load" - copy the kernel and device tree from the flash window into PSRAM.
- * U-Boot's own "cp" command faults on this port and a single multi-megabyte
- * burst leaves the PSRAM mode registers in a bad state, so copy in bounded
- * chunks and flush each one through the ROM helper with the full L1 mask.
+ *
+ * The PSRAM window is mapped twice: 0x48000000 is the cacheable alias and
+ * 0x88000000 the non-cacheable one (SOC_NON_CACHEABLE_OFFSET_PSRAM). Writes
+ * through 0x48000000 land in the L1/L2 cache and stay there - the ROM cache
+ * writeback helper does not push them to the part from this context - so the
+ * payload is copied through the non-cacheable alias and the kernel/DTB are
+ * booted from the cacheable alias afterwards.
  */
-#define P4_ROM_CACHE_WRITEBACK	0x4fc003f4
-#define P4_CACHE_MAP_ALL	0x13
 #define P4_KERN_SRC		0x40200000u
 #define P4_DTB_SRC		0x40900000u
 #define P4_KERN_DST		0x48000000u
 #define P4_DTB_DST		0x48f00000u
-#define P4_LOAD_CHUNK		0x10000u
+#define P4_NC_OFFSET		0x40000000u
+#define P4_LOAD_CHUNK		0x1000u
 
 static int do_p4load(struct cmd_tbl *cmdtp, int flag, int argc,
 		     char *const argv[])
@@ -225,24 +228,25 @@ static int do_p4load(struct cmd_tbl *cmdtp, int flag, int argc,
 		return CMD_RET_FAILURE;
 	}
 
+	printf("p4load: start k=%x d=%x\n", ksize, dsize);
+
 	for (off = 0; off < dsize; off += P4_LOAD_CHUNK) {
 		u32 n = dsize - off > P4_LOAD_CHUNK ? P4_LOAD_CHUNK
 						    : dsize - off;
 
-		memcpy((void *)(P4_DTB_DST + off), (const void *)(P4_DTB_SRC + off),
-		       n);
-		((int (*)(u32, u32, u32))P4_ROM_CACHE_WRITEBACK)
-			(P4_CACHE_MAP_ALL, P4_DTB_DST + off, n);
+		memcpy((void *)(P4_DTB_DST + P4_NC_OFFSET + off),
+		       (const void *)(P4_DTB_SRC + off), n);
 	}
+	printf("p4load: dtb done\n");
 
 	for (off = 0; off < ksize; off += P4_LOAD_CHUNK) {
 		u32 n = ksize - off > P4_LOAD_CHUNK ? P4_LOAD_CHUNK
 						    : ksize - off;
 
-		memcpy((void *)(P4_KERN_DST + off), (const void *)(P4_KERN_SRC + off),
-		       n);
-		((int (*)(u32, u32, u32))P4_ROM_CACHE_WRITEBACK)
-			(P4_CACHE_MAP_ALL, P4_KERN_DST + off, n);
+		memcpy((void *)(P4_KERN_DST + P4_NC_OFFSET + off),
+		       (const void *)(P4_KERN_SRC + off), n);
+		if (!(off & 0xffff))
+			printf("p4load: %x\n", off);
 	}
 
 	printf("p4load: kernel %x bytes -> 0x%08x (%08x), dtb %x -> 0x%08x (%08x)\n",

@@ -2336,3 +2336,65 @@ the MSPI2 AXI/PMS state has to be compared against a live IDF boot) before
 
 State left behind: the SPL reaches the `esp32p4>` prompt reliably with MR0/MR8
 verified and no watchdog resets; `p4load` is still not usable for the kernel.
+
+## Round 68: the non-cacheable PSRAM alias, and why the AXI path corrupts
+
+Two useful discoveries and one dead end.
+
+### The PSRAM window has a non-cacheable alias
+
+`components/soc/esp32p4/include/soc/soc.h` defines
+`SOC_NON_CACHEABLE_OFFSET_PSRAM = 0x40000000`, so PSRAM is mapped twice:
+`0x48000000` (cacheable) and `0x88000000` (non-cacheable). A single 32-bit write
+through the alias provably reaches the part:
+
+```
+writel(0x33334444, 0x88200000);   /* PSRAM offset 0x200000 */
+command read of offset 0x200000 -> 0x33334444
+```
+
+while the same write through `0x48000000` never leaves the cache (the ROM
+writeback helper does not push it out in this context, which is why every
+"cache write -> command read" check so far showed the old chip value).
+
+`p4load` was switched to copy through the alias. The device tree (0x113d bytes)
+copies fine and the first 64 KiB of the kernel copies fine, but the copy then
+traps and the trap handler itself faults (`mcause 0x30000005`, `mtval 0`,
+`mepc` inside `printf`). Reads of the same addresses one at a time (source
+0x40210000 through the flash window, destination 0x88010000) work, so this is a
+bulk-path problem, not an address problem.
+
+### The AXI data phase is half-width, and the fix bits are reserved here
+
+A 32-bit write through the cacheable window, read back through the same window,
+shows the two 16-bit halves landing at byte offset 0 and byte offset 4 with the
+rest stale (`0x5678ffff` / `0x01011234` for `0x12345678`): the cache controller
+is moving 2 bytes per clock instead of 4, i.e. the 16-line data phase is not
+active.
+
+The captured reference `SRAM_CMD` is `0x8cfc0000`, which has bits 26/27
+(`SDIN_HEX`/`SDOUT_HEX` in the hw_ver3 map) set. On this silicon the hw_ver1
+`spi_mem_c_struct.h` descriptions for `sram_cmd` only define bits 24/25/30/31
+(all HRO); 26/27 are reserved. Keeping or setting those bits makes the command
+path stop answering (word test reads 0, the tuning fails with "low-clock
+reference failed") and the alias reads come back 0 afterwards. So the bits are
+left clear, exactly like the state that reliably reaches the prompt.
+
+Also aligned `CACHE_SCTRL.RDUMMY` to the captured IDF value (25 = 26 cycles,
+instead of 46), which does not change the command path, and moved the AXI
+(`CACHE_FCTRL.MEM_AXI_REQ_EN`) open to the very end of init, after the MMU map.
+
+### p4load now
+
+Copies through `0x88000000`/`0x88f00000` in 4 KiB chunks with progress prints.
+It gets the DTB and the first 64 KiB of the kernel down, then the CPU faults
+inside the trap handler. The likely cause is the still-wrong cache/AXI
+configuration corrupting the L2 cache that also serves SRAM (both the trap
+vector at `0x4ff40180` and the stack stores in `printf` faulted in earlier
+variants). Next round: trace a reference boot's MSPI2 writes (`0x5008e03c`,
+`0x40`, `0x44`, `0x54`, and the L2 cache enable calls) with JTAG watchpoints to
+get the exact sequence instead of the captured end state.
+
+State left behind: SPL boots to `esp32p4>` with MR0/MR8 verified, command path
+and range check OK, alias single-word writes OK; `p4load` is still not usable
+for the kernel.
