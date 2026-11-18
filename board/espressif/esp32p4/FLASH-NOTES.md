@@ -565,3 +565,51 @@ Next ideas, in order:
 3. If dlmalloc keeps failing, give the SRAM build a `malloc()` that serves from
    a bump allocator over `0x4ff90000..0x4ffbf000`; nothing in the first-stage
    path needs free().
+
+## Round 22: the U-Boot prompt is up from the SPL chain
+
+Two changes turned the corner:
+
+1. **Heap placement.** `start = 0x4ff90000` left `malloc()` returning NULL;
+   moving the heap to `0x4ff30000` - the free window between the end of the
+   in-place U-Boot image (0x4ff2c598) and the SPL BSS (0x4ff60000) - fixed it.
+2. **No autoboot.** `CONFIG_BOOTDELAY=-1` and a harmless
+   `CONFIG_BOOTCOMMAND="echo P4-SRAM-U-BOOT"`, because the previous
+   `booti 0x48000000 - 0x48f00000` command reset the board.
+
+Result (SPL chain, COM9 115200):
+
+```
+U-Boot SPL 2024.07-...
+ESP32-P4 SPL active
+...
+jump: entry 0x4ff00000 dtb 0x00000000
+
+U-Boot 2024.07-...
+
+DRAM:  768 KiB
+Core:  7 devices, 5 uclasses, devicetree: separate
+Loading Environment from nowhere... OK
+In:    serial@500ca000
+Out:   serial@500ca000
+Err:   serial@500ca000
+P4_UBOOT: M-mode bootloader active (emulator only)
+esp32p4>
+```
+
+That is the full first-stage chain: ROM -> SPL -> U-Boot proper with driver
+model, environment, serial console and an interactive prompt, all inside the
+768 KiB of SRAM (no PSRAM needed for U-Boot itself).
+
+Notes for the next round:
+
+- The board apparently resets shortly after the prompt appears (a second ROM
+  banner shows up in the capture). `CONFIG_WDT` is off, so the HP system
+  watchdog / SWDT that the ROM starts is the likely cause; feeding or disabling
+  it is the next step so the prompt stays alive.
+- The initcall tracer in `lib/initcall.c` (guarded by
+  `CONFIG_ESP32P4_SRAM_ONLY`) is still enabled and prints `.`/`<address>` per
+  initcall. It should be removed once the port is done.
+- `CONFIG_USE_BOOTCOMMAND=y` with the echo command means the prompt never tries
+  to boot anything; the real `booti` path (kernel at 0x48000000, DT at
+  0x48f00000 in PSRAM) still needs the PSRAM window and a loader step.
