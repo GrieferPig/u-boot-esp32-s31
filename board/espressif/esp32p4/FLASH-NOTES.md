@@ -332,3 +332,37 @@ before the `memcpy` in `setup_reloc` (the helper is in place as
 
 Also learned: `GD_FLG_SKIP_RELOC` is not an option on RISC-V - `board_init_f`
 must not return, so skipping relocation just falls through into SPL code.
+
+## Round 16: U-Boot runs in place and reaches board_init_r
+
+The relocation problem was the write-back cache: the copy lands in the data
+cache while the instruction fetch reads SRAM, so the relocated code is invisible
+(and `Cache_WriteBack_All` from the ROM traps in this port). Fixed by running
+U-Boot **in place** for `CONFIG_ESP32P4_SRAM_ONLY`:
+
+- `reserve_uboot()` keeps `gd->relocaddr = CONFIG_TEXT_BASE` and puts
+  `gd->start_addr_sp` at `gd->ram_top`, so `relocate_code()` finds
+  `dest == _start`, skips the copy, sets `t6 = 0`, clears the real BSS and jumps
+  to `board_init_r` in place.
+- `initr_malloc()` puts the heap right above the image instead of below a
+  relocated copy (`gd->relocaddr + gd->mon_len`).
+
+The trace after the hand-over now shows U-Boot's *second* init sequence running:
+
+```
+KLMN 4ff08ee0 4ff08ee4 4ff0901c 4ff0900c 4ff08ef4 4ff09028 4ff08fe6 ...
+Unhandled exception code: 939524103        <- 0x38000007: store access fault
+EPC: 4ff008f8 (memset+0x68)  RA: 4ff08ffa (initr_malloc+0x14)
+TVAL: 4fed1000
+```
+
+So `board_init_r` is reached, the global data pointer and console plumbing work
+(U-Boot prints its own exception dump now), and the current stop is
+`initr_malloc()`: the heap start is still computed below the SRAM window
+(`0x4fed1000`). The `initr_malloc()` patch above addresses that; the next run
+died inside it again, so the remaining item is the malloc/`TOTAL_MALLOC_LEN`
+arithmetic (`TOTAL_MALLOC_LEN` may be larger than `CONFIG_SYS_MALLOC_LEN`).
+
+Resolved symbols for reference: `4ff08fe6 initr_malloc`, `4ff09028
+initr_barrier`, `4ff0901c initr_reloc_global_data`, `4ff0900c initr_caches`,
+`4ff09012 event_init`.
