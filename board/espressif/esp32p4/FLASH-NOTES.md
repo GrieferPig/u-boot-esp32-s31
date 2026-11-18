@@ -1527,3 +1527,38 @@ resets with `rst:0x7`), so two things still need fixing:
 
 After that, `booti 0x48000000 - 0x48f00000` from the prompt should finally start
 Linux with the kernel and DT already resident in PSRAM.
+
+## Round 46: PSRAM writes are not reaching the chip
+
+Progress on the payload path:
+
+* the FDT `totalsize` is big endian: `dtb[1]` must be byte-swapped
+  (`0x3d110000` -> `0x0000113d`), same for the other FDT header fields,
+* the sizes are now sane (`kern 0x00354c60`, `dtb 0x0000113d`) and the
+  word-at-a-time copy completes the whole 3.5 MB (14 progress dots).
+
+But the verification fails:
+
+```
+src         0x0000a045 0xedfe0dd0      (flash, correct)
+after copy  0x00000000 0x04000000      (PSRAM)
+```
+
+So the copy "runs" and the data does not land. Re-checking the earlier
+"PSRAM works" evidence: every test we ran was **write followed immediately by
+read of the same address** (`rw 0x48100000=...`, `bulk 0x4000=ok`, `mw.l` +
+`md.l`). All of those can be satisfied by the write buffer / cache without the
+data ever reaching the chip. Reading back *different* addresses after a copy is
+the first test that actually proves the write path, and it fails.
+
+Conclusion: **reads work, writes are dropped**. The write path to fix:
+
+* `SRAM_DWR_CMD` opcode/bit length (currently 0x8080 = sync write, 16 bit),
+* `MR4` write latency (we set 1; the AP hex part wants 1..2 depending on clock),
+* the write dummy length (`P4_PSRAM_WR_DUMMY` = 2*(7-1) = 12 bits),
+* `CACHE_SCTRL` write command enable + `SDUMMY_WOUT` in `SRAM_CMD`,
+* possibly `DDR_AXI` write-data swap.
+
+Next round: read a known PSRAM location that the *previous* boot wrote (e.g. write
+a pattern, power-cycle, read it back) to confirm the write path, then fix the
+write configuration - that is the last piece before `booti`.

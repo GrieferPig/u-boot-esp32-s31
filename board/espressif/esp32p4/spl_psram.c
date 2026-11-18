@@ -745,10 +745,22 @@ void p4_spl_psram_load_payload(void)
 	u32 *kern = (u32 *)0x40200000;		/* flash 0x200000 */
 	u32 *dtb = (u32 *)0x40900000;		/* flash 0x900000 */
 	u32 ksize = kern[4];			/* arm64 image_size at 0x10 */
-	u32 dsize = dtb[1];			/* fdt totalsize at 0x04 */
+	u32 dsize = swab32(dtb[1]);		/* fdt totalsize at 0x04, big endian */
 
 	if (kern[0] == 0x0addbad0u || dtb[0] != 0xedfe0dd0u) {
 		p4_spl_early_puts("payload: flash window unreadable\n");
+		return;
+	}
+
+	p4_spl_early_puts("payload: kern ");
+	p4_spl_early_hex(ksize);
+	p4_spl_early_puts(" dtb ");
+	p4_spl_early_hex(dsize);
+	p4_spl_early_puts("\n");
+
+	if (ksize < 0x100000u || ksize > 0x01000000u || dsize < 0x100u ||
+	    dsize > 0x10000u) {
+		p4_spl_early_puts("payload: implausible sizes, skipped\n");
 		return;
 	}
 
@@ -765,48 +777,40 @@ void p4_spl_psram_load_payload(void)
 		writel(0, wdt + 0x20);
 
 		/*
-		 * Flash read and PSRAM write in the same memcpy hang the chip,
-		 * so bounce through a small SRAM buffer instead.
+		 * Word-at-a-time copy: this is the primitive that was verified to
+		 * work (writel/readl pairs), and memcpy through a bounce buffer did
+		 * not land the data.
 		 */
 		{
-			static u8 bounce[0x1000];
-			const u8 *src;
-			u8 *dst;
-			u32 total = dsize + ksize;
-			u32 done = 0;
+			u32 off;
 
-			while (done < total) {
-				u32 n = total - done;
-
-				if (n > sizeof(bounce))
-					n = sizeof(bounce);
-				if (done < dsize) {
-					src = (const u8 *)dtb + done;
-					dst = (u8 *)0x48f00000 + done;
-					if (n > dsize - done)
-						n = dsize - done;
-				} else {
-					src = (const u8 *)kern + (done - dsize);
-					dst = (u8 *)0x48000000 + (done - dsize);
-					if (n > ksize - (done - dsize))
-						n = ksize - (done - dsize);
-				}
-				memcpy(bounce, src, n);
-				memcpy(dst, bounce, n);
-				done += n;
-				if (!(done & 0xffff))
+			for (off = 0; off < dsize; off += 4)
+				writel(readl((u32 *)((u32)dtb + off)),
+				       (u32 *)(0x48f00000 + off));
+			for (off = 0; off < ksize; off += 4) {
+				writel(readl((u32 *)((u32)kern + off)),
+				       (u32 *)(0x48200000 + off));
+				if (!(off & 0x3ffff)) {
 					p4_spl_early_puts(".");
+					writel(0x50d83aa1, wdt + 0x18);
+					writel(1, wdt + 0x14);
+					writel(0, wdt + 0x18);
+				}
 			}
-			(void)off;
 		}
 	}
 
+	p4_spl_early_puts("src ");
+	p4_spl_early_hex(readl((void *)0x40200000));
+	p4_spl_early_puts(" ");
+	p4_spl_early_hex(readl((void *)0x40900000));
+	p4_spl_early_puts("\n");
 	p4_spl_early_puts("payload: kernel ");
 	p4_spl_early_hex(ksize);
 	p4_spl_early_puts(" dtb ");
 	p4_spl_early_hex(dsize);
 	p4_spl_early_puts(" kern[0] ");
-	p4_spl_early_hex(readl((void *)0x48000000));
+	p4_spl_early_hex(readl((void *)0x48200000));
 	p4_spl_early_puts(" dtb[0] ");
 	p4_spl_early_hex(readl((void *)0x48f00000));
 	p4_spl_early_puts("\n");
