@@ -239,7 +239,7 @@ static int initr_malloc(void)
 	 * (0x4ff40000 upwards) is free once the hand-over is done, so the heap
 	 * lives there instead of below a relocated copy.
 	 */
-	start = 0x4ff90000;
+	start = 0x4ff30000;
 #else
 	start = gd->relocaddr - TOTAL_MALLOC_LEN;
 #endif
