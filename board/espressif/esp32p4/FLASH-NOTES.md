@@ -169,3 +169,58 @@ window) or at `0x48000000` (only 896 KiB) until the real mapping path is found.
    dump `SPI_MEM_S_` registers that could gate the table (`MISC`, `CTRL`,
    `AXI_*`) and check whether the table is only writable while the cache is
    configured the way `cache_hal_init()` leaves it (caches on, L2 mapped).
+
+## Round 12 findings: JTAG works, and the trap is decoded
+
+### JTAG
+
+`C:\Espressif\tools\openocd-esp32\v0.12.0-esp32-20260703\openocd-esp32\bin\openocd.exe`
+with `-f board/esp32p4-builtin.cfg` finds both taps on the built-in USB-JTAG and
+halts both harts (telnet on 4444, gdb on 3333). WSL cannot see the USB device, so
+OpenOCD must run on Windows.
+
+### The U-Boot trap
+
+Halt just after the hand-over, then read the trap CSRs:
+
+```
+PC     0x48000242    Halt cause (2) Illegal Instruction
+mcause 0x30000002
+mepc   0x48000240
+mtval  0x0000bad0    <- the fetched instruction word
+```
+
+`0x0addbad0` is this SoC's bus-error filler. Memory reads at `0x48000230`
+return `0addbad0 00000000 0addbad0 00000000` (exactly one 32-byte cache line),
+while the payload file has zeros there: the payload simply is not in PSRAM.
+
+### Why the copy loses data
+
+Per-chunk checksums (sum of the destination words) compared against checksums
+computed from `u-boot.bin` on the host:
+
+| run | result |
+|---|---|
+| plain copy | chunks 0..8 match, chunk 9 differs |
+| + `Cache_WriteBack_All(3)` | chunk 7 differs |
+| + per-chunk `Cache_Sync_Addr` | chunk 8 differs |
+
+The failing chunk moves between runs, so part of the payload is lost from the
+write-back path (the copy never reaches PSRAM for those lines) or is filled with
+the bus-error pattern.
+
+### Cache map bits (from `rom/cache.h`)
+
+```
+CACHE_MAP_L1_ICACHE_0 BIT(0)   CACHE_MAP_L1_DCACHE BIT(4)
+CACHE_MAP_L1_ICACHE_1 BIT(1)   CACHE_MAP_L2_CACHE  BIT(5)
+```
+
+Passing `3` to `Cache_WriteBack_All`/`Cache_Invalidate_All` only touches the two
+icaches - the data cache and L2 need `0x33`. That mistake is fixed, but the
+corruption persists, so something else keeps dirty lines from reaching PSRAM.
+
+Next: test PSRAM stability on its own (fill 128 KiB with a counter pattern, sync,
+sum, compare) to decide whether this is a cache-flush problem or marginal PSRAM
+access, then either sync per chunk with the right map (`0x30`) and a verified
+`Cache_Sync_Addr` signature, or copy with the data cache off.
