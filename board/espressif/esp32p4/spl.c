@@ -143,9 +143,39 @@ void harts_early_init(void)
 	p4_spl_puts("P4SPL:wdt-off\n");
 }
 
+static void p4_dump_block(const char *name, u32 base, int first, int last)
+{
+	int off;
+	char buf[16];
+
+	p4_spl_puts(name);
+	for (off = first; off <= last; off += 4) {
+		u32 v = readl((void *)(uintptr_t)(base + off));
+		int i;
+
+		buf[0] = ' ';
+		for (i = 0; i < 8; i++)
+			buf[1 + i] = "0123456789abcdef"[(v >> (28 - 4 * i)) & 0xf];
+		buf[9] = 0;
+		p4_spl_puts(buf);
+	}
+	p4_spl_puts("\n");
+}
+
+static void p4_psram_dump(void)
+{
+	p4_spl_puts("SPLD clkrst");
+	p4_dump_block("", 0x500e6000, 0x00, 0x40);
+	p4_dump_block("SPLD pmu", 0x50115000, 0x1c0, 0x220);
+	p4_dump_block("SPLD mspi2", 0x5008e000, 0x00, 0x60);
+	p4_dump_block("SPLD mspi3", 0x5008f000, 0x00, 0x60);
+	p4_dump_block("SPLD mspi3t", 0x5008f000, 0x50, 0x70);
+}
+
 void spl_board_init(void)
 {
 	p4_spl_puts("ESP32-P4 SPL active\n");
+	p4_psram_dump();
 
 	if (p4_spl_psram_init()) {
 		p4_spl_puts("spl: psram_init not ported yet; boot stopped\n");
