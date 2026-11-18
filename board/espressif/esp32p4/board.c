@@ -124,8 +124,54 @@ int board_init(void)
 	return 0;
 }
 
+
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+/*
+ * The ROM arms watchdogs before the SPL runs. The SPL disarms them, but the
+ * HP-system watchdog keeps resetting the board while U-Boot idles at the
+ * prompt, so disarm and feed every watchdog we know about again here.
+ */
+
+
+static void p4_wdt_off(void)
+{
+	void *wdt = (void *)0x50116000;		/* LP_WDT / RWDT */
+	u32 t;
+
+	writel(0x50d83aa1, wdt + 0x08);		/* WPROTECT */
+	writel(0, wdt + 0x04);			/* CONFIG1 */
+	writel(0, wdt + 0x00);			/* CONFIG0 */
+	writel(0x50d83aa1, wdt + 0x0c);		/* FEED */
+	writel(0, wdt + 0x08);
+
+	/*
+	 * Super watchdog (SWDT): the ROM arms it and only the ROM can disable it,
+	 * but IDF's bootloader switches on its auto-feed, which is what keeps the
+	 * board alive while U-Boot idles at the prompt (LP_WDT_SWD_AUTO_FEED_EN,
+	 * SWD_CONFIG bit 18, behind the SWD write-protect key).
+	 */
+	writel(0x50d83aa1, wdt + 0x20);		/* SWD_WPROTECT */
+	writel(readl(wdt + 0x1c) | (1u << 18), wdt + 0x1c);
+	writel(0, wdt + 0x20);
+
+	for (t = 0; t < 2; t++) {		/* TIMG0/1 MWDT */
+		u32 base = 0x500c2000 + t * 0x1000;
+
+		writel(0x50d83aa1, (void *)(base + 0x64));
+		writel(readl((void *)(base + 0x48)) & ~(1u << 31),
+		       (void *)(base + 0x48));
+		writel(0, (void *)(base + 0x40));	/* alarm */
+		writel(0x50d83aa1, (void *)(base + 0x60));
+		writel(0, (void *)(base + 0x64));
+	}
+}
+#endif
+
 int board_late_init(void)
 {
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+	p4_wdt_off();
+#endif
 #ifdef CONFIG_ESP32P4_HW_IDF_HANDOFF
 	puts("P4_UBOOT: IDF hardware handoff (experimental)\n");
 #else
