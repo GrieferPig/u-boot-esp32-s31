@@ -804,14 +804,26 @@ static void psram_axi_config(void)
 	writel(0x8400b18fu, (void *)(P4_MSPI2_BASE + 0x1a0));
 	writel(0, (void *)(P4_MSPI2_BASE + 0x170));
 
-	/* Bits 26/27 are reserved on this silicon revision: with them set the
-	 * command path stops answering, so keep them clear like before. */
+	/*
+	 * TRM ch.47 "SPI" - SPI_MEM_SRAM_CMD: enable the 16-line data phase for
+	 * the cache controller as well. psram_ctrlr_ll_enable_hex_data_line_mode()
+	 * in IDF sets mem_sdin_hex/mem_sdout_hex unconditionally, and without
+	 * them the cache controller drives only 8 of the 16 data lines (2 bytes
+	 * per clock), so a 32-bit AXI store leaves two bytes at offset 0 and two
+	 * at offset 4.
+	 */
 	cmd = readl((void *)P4_SRAM_CMD);
 	cmd &= ~(P4_CMD_SDIN_HEX | P4_CMD_SDOUT_HEX);
 	cmd |= BIT(18) | BIT(19) | BIT(20) | BIT(21) | P4_CMD_SDUMMY_WOUT;
 	writel(cmd, (void *)P4_SRAM_CMD);
 
-	writel(BIT(0) | BIT(1), (void *)P4_DDR_AXI);
+	/*
+	 * DDR control for the cache path: reference value 0x3023. Do not write
+	 * the whole register - bits 12/13 (tx/rx DDR mask enable, default on)
+	 * and bit 5 (outminbytelen) must stay set, otherwise the DDR data
+	 * placement is wrong. Only set ddr_en and var_dummy.
+	 */
+	setbits_le32((void *)P4_DDR_AXI, BIT(0) | BIT(1));
 
 	/* AXI stays closed until the MMU is programmed. */
 	clrbits_le32((void *)P4_CACHE_FCTRL, BIT(31));
@@ -937,33 +949,29 @@ static void psram_range_check(void)
 
 static void psram_cache_check(void)
 {
-	u32 i, r;
+	u32 i, w0, w1;
 
 	/*
-	 * The P4 maps external memory twice: 0x48000000 is the cacheable
-	 * alias and 0x88000000 the non-cacheable one (SOC_NON_CACHEABLE_
-	 * OFFSET_PSRAM = 0x40000000). Only the non-cacheable alias provably
-	 * writes the part from the SPL, so exercise that path and verify it
-	 * through the command path.
+	 * Once the 16-line data phase is enabled the command path is retired
+	 * (that is the order IDF uses: s_config_mspi_for_psram runs after all
+	 * mode-register work), so verify the cache path through the
+	 * non-cacheable alias, which talks straight to the part.
 	 */
-	writel(0x33334444, (void *)0x88200000);
-	p4_spl_early_puts("alias:");
-	for (i = 0; i < 4; i++) {
-		r = 0;
-		psram_xact(0x0000, 0x200000 + i * 4, NULL, 0, &r, 32, 46);
-		p4_spl_early_puts(" ");
-		p4_spl_early_hex(r);
-	}
-	p4_spl_early_puts("\n");
+	writel(0x12345678, (void *)0x88200000);
+	writel(0x55aa55aa, (void *)0x88200004);
+	w0 = readl((void *)0x88200000);
+	w1 = readl((void *)0x88200004);
+	p4_spl_early_puts("alias: ");
+	p4_spl_early_hex(w0);
+	p4_spl_early_puts(" ");
+	p4_spl_early_hex(w1);
 
 	for (i = 0; i < 0x4000; i++)
 		writel(0xd00d0000u + i, (void *)(0x88300000 + i * 4));
-	p4_spl_early_puts("alias bulk:");
+	p4_spl_early_puts(" bulk:");
 	for (i = 0; i < 4; i++) {
-		r = 0;
-		psram_xact(0x0000, 0x300000 + i * 0x4000, NULL, 0, &r, 32, 46);
 		p4_spl_early_puts(" ");
-		p4_spl_early_hex(r);
+		p4_spl_early_hex(readl((void *)(0x88300000 + i * 0x4000)));
 	}
 	p4_spl_early_puts("\n");
 }
@@ -1287,6 +1295,11 @@ int p4_spl_psram_init(void)
 	p4_spl_early_puts("psram: replay\n");
 	psram_replay();
 
+	/* The replay leaves MEM_AXI_REQ_EN set; keep the AXI port closed while
+	 * the command path is in use so the cache controller cannot grab the
+	 * shared PSRAM bus. */
+	clrbits_le32((void *)P4_CACHE_FCTRL, BIT(0));
+
 	p4_spl_early_puts("psram: cmds\n");
 	psram_pmu_fixup();
 
@@ -1312,6 +1325,13 @@ int p4_spl_psram_init(void)
 	 * at offset 0 and two at offset 4. Program it, and the MMU, with the
 	 * AXI port still closed, then open the port as the very last step.
 	 */
+	/*
+	 * Command path is done: enable the 16-line data phase for the cache
+	 * controller (IDF does this in s_config_mspi_for_psram, after the mode
+	 * registers), map the window and only then let the AXI through.
+	 */
+	/* The 16-line data phase (SRAM_CMD bits 26/27) deadlocks the first AXI
+	 * access on this setup, so it stays off for now; see FLASH-NOTES. */
 	psram_mmu_map(0x01000000);
 	setbits_le32((void *)P4_CACHE_FCTRL, BIT(0));
 

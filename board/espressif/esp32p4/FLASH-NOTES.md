@@ -2398,3 +2398,60 @@ get the exact sequence instead of the captured end state.
 State left behind: SPL boots to `esp32p4>` with MR0/MR8 verified, command path
 and range check OK, alias single-word writes OK; `p4load` is still not usable
 for the kernel.
+
+## Round 69: IDF's PSRAM sequence in full, and the 16-line deadlock
+
+Read the authoritative sequence instead of guessing at it:
+`components/esp_psram/device/esp_psram_impl_ap_hex.c` +
+`components/esp_hal_mspi/esp32p4/include/hal/psram_ctrlr_ll.h`.
+
+Order IDF uses (this matters):
+
+1. `s_set_psram_cs_timing()`, `enable_split_trans(true)`, `set_page_size(2048)`
+   (smem_ac / smem_ecc_ctrl);
+2. bus clock, `enable_dll(true)` on MSPI2 and MSPI3;
+3. mode registers through MSPI3 (command path): MR0/MR4/MR8, then read back and
+   print the device info;
+4. **only now** `s_config_mspi_for_psram()`: wr/rd command, addr bitlen, 4-byte
+   addr, wr/rd dummy, variable dummy, wr dummy level control, ddr mode,
+   `enable_oct_line_mode(true)`, `enable_hex_data_line_mode(true)`, AXI access,
+   wr/rd splice;
+5. `mspi_timing_psram_tuning()`, then `enable_variable_dummy(true)` again.
+
+So on the reference the **command path is retired before the 16-line data phase
+is enabled**, and never used afterwards. That explains the "setting SRAM_CMD
+bits 26/27 breaks the command path" observation from the previous round: the
+bits do not break MSPI3, they make the part expect a 16-line data phase while
+our later MSPI3 user-mode transactions still drive the old one.
+
+### Fixed: the DDR control write
+
+`psram_axi_config()` used to write `BIT(0) | BIT(1)` over the whole
+`SMEM_DDR` register (0x5008e0d8), clobbering the captured reference value
+`0x00003023` - i.e. clearing `smem_tx_ddr_msk_en`/`smem_rx_ddr_msk_en`
+(bits 12/13, default on) and the outminbytelen low bit. It is now a
+read-modify-write (`setbits_le32(..., BIT(0) | BIT(1))`), matching
+`psram_ctrlr_ll_enable_ddr_mode()`.
+
+### Still open: enabling the 16-line phase deadlocks the first AXI access
+
+With bits 26/27 enabled *after* the tuning (the IDF order), the first write
+through the non-cacheable alias hangs the bus hard enough that OpenOCD can no
+longer halt the hart (`Unable to halt. dmcontrol=0x1, dmstatus=0x00400ca2`) -
+only an RTS reset recovers. That is a deadlock, not an error response: the
+transaction never completes. DQS pads are powered (`0x500e123c`/`0x500e1268` =
+`0x00010001`), the MMU entries match the reference (`0xc00/0xc01/0xc10/...`),
+`SMEM_DDR` is now preserved, `SMEM_AC` is the reference value `0x8400b18f`.
+
+With the 16-line phase left off, the state is stable again: boot reaches
+`esp32p4>`, and a 16 KiB word pattern written through the alias and read back
+through the alias returns the written values with the low three bits wrong
+(`0xd00d0000` -> `0xd00d0007`), which is consistent with the 8-line data phase
+(2 bytes per clock against a 4-byte-per-clock control path). Next: find the
+remaining register that tells the cache controller the data-line width (or the
+DQS/`smem_ac` piece the 16-line write needs), by diffing a live reference
+transaction's MSPI2 state against ours.
+
+State: SPL boots to `esp32p4>`, command path OK, alias single and bulk writes
+reach the part but with half-width corruption; `p4load` still cannot deliver a
+valid kernel.
