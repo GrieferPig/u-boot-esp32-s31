@@ -1812,3 +1812,39 @@ full-speed read dummy needs the same treatment - sweep it against the same
 reference (the slow clock is MPLL/20, so the full-speed value is expected around
 23-25, possibly with the same 4-cycle window) before the phase/tap sweep can do
 its job.
+
+## Round 54: the tuning runs end to end and passes
+
+Two things were needed after round 53:
+
+* the **full-speed read dummy is the same 46 cycles** as the slow clock (round 53
+  guessed 25 from the reference's `CACHE_SCTRL` value, which is what made the
+  4-phase sweep report `none`),
+* the bus clock can go straight to the **fastest divider 1**.
+
+With dummy 46 the tuning completes:
+
+```
+tune: reference ok
+tune: fastest div 0x1
+tune: phase 0x0 delay 0xf margin 0x1f
+tune: ok
+```
+
+`margin 0x1f` means all 31 delay taps passed - the widest possible window - and
+the final write-verify at phase 0 / tap 15 passes as well. **The direct command
+path to the PSRAM is now fully working and calibrated** (write 128 bytes,
+read back, exact match, at full clock).
+
+The **cache/AXI path is still not right**: with `CACHE_SCTRL` read latency set to
+the tuned 46 cycles the board keeps booting, but the persistence probe still shows
+no data reaching the chip through `writel`
+
+```
+stale a=0xabaaabaa b=0x00000000 c=0xabaaabaa d=0xaaaaaaea   (same every boot)
+```
+
+So the remaining work is the AXI/cache side: sweep the `CACHE_SCTRL` read latency
+and the AXI write parameters the same way the command path was swept (write a
+pattern with `writel`, read it back with `readl`, and check persistence across a
+reboot), then the MMU map, payload load and `booti`.

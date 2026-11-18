@@ -709,6 +709,8 @@ static void psram_mode_reg_init(void)
 #define P4_CMD_SDUMMY_WOUT	BIT(23)
 
 #define P4_PSRAM_RD_DUMMY	(2 * (14 - 1))
+/* The cache path needs the same 46-cycle read latency the tuning found. */
+#define P4_PSRAM_CACHE_RD_DUMMY	46
 #define P4_PSRAM_WR_DUMMY	(2 * (7 - 1))
 
 static void psram_axi_config(void)
@@ -720,7 +722,7 @@ static void psram_axi_config(void)
 
 	sctrl = P4_SCTRL_SADDR_4BYTE | P4_SCTRL_WR_DUMMY | P4_SCTRL_RD_DUMMY |
 		P4_SCTRL_RCMD |
-		((u32)(P4_PSRAM_RD_DUMMY - 1) << P4_SCTRL_RDUMMY_S) |
+		((u32)(P4_PSRAM_CACHE_RD_DUMMY - 1) << P4_SCTRL_RDUMMY_S) |
 		((u32)(32 - 1) << P4_SCTRL_ADDR_BITLEN_S) |
 		P4_SCTRL_WCMD |
 		((u32)(P4_PSRAM_WR_DUMMY - 1) << P4_SCTRL_WDUMMY_S);
@@ -1018,8 +1020,30 @@ static int psram_timing_tune(void)
 	}
 	p4_spl_early_puts("tune: reference ok");
 
-	writel(0x00010001u, (void *)(P4_MSPI2_BASE + 0x14));
-	psram_tune_dummy = 25;
+	{
+		u32 d, best_div = 0;
+
+		psram_tune_verbose = 0;
+		psram_tune_dummy = 46;
+		for (d = 1; d <= 12; d++) {
+			writel((d << 16) | (d << 8) | d,
+			       (void *)(P4_MSPI2_BASE + 0x14));
+			if (psram_tune_read(reference)) {
+				best_div = d;
+				break;
+			}
+		}
+		psram_tune_verbose = 1;
+		p4_spl_early_puts("tune: fastest div ");
+		p4_spl_early_hex(best_div);
+		p4_spl_early_puts("\n");
+		if (!best_div) {
+			p4_spl_early_puts("tune: no working clock\n");
+			return -1;
+		}
+		writel((best_div << 16) | (best_div << 8) | best_div,
+		       (void *)(P4_MSPI2_BASE + 0x14));
+	}
 	for (phase = 0; phase < 4; phase++) {
 		psram_tune_pins(phase, 15);
 		if (psram_tune_read(reference)) {
