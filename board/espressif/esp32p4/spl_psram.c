@@ -976,6 +976,32 @@ static void psram_range_check(void)
 
 
 
+/*
+ * TRM ch.9 "System and Memory" - HP L2MEM and L2 cache share the same 768 KB
+ * and the split is configurable (Config 0: 256/512, 1: 512/256, 2: 640/128,
+ * 3: 768/0 KB). Our chain runs with the whole block as L2 RAM, so every PSRAM
+ * access is a single AXI transaction; in 16-line DDR a 32-bit access is one
+ * clock and the controller never completes it. Enable the 128 KB cache split
+ * (the SPL, U-Boot and its stack all live below 0x4ff90000) so the CPU issues
+ * cache-line fills instead.
+ */
+#define P4_ROM_CACHE_SET_L2_MODE	0x4fc003d4u
+#define P4_ROM_CACHE_ENABLE_L2		0x4fc00504u
+
+
+static void psram_enable_l2_cache(void)
+{
+	void (*set_mode)(u32 size, u32 ways, u32 line) =
+		(void (*)(u32, u32, u32))P4_ROM_CACHE_SET_L2_MODE;
+	void (*enable)(u32 autoload) =
+		(void (*)(u32))P4_ROM_CACHE_ENABLE_L2;
+
+	set_mode(9 /* CACHE_SIZE_128K */, 8, 3 /* CACHE_LINE_SIZE_64B */);
+	enable(0);
+
+	p4_spl_early_puts("l2: enabled\n");
+}
+
 static void psram_cache_check(void)
 {
 	u32 i;
@@ -1359,6 +1385,7 @@ int p4_spl_psram_init(void)
 
 	setbits_le32((void *)P4_SRAM_CMD, P4_CMD_SDIN_HEX | P4_CMD_SDOUT_HEX);
 	psram_mmu_map(0x01000000);
+	psram_enable_l2_cache();
 	setbits_le32((void *)P4_CACHE_FCTRL, BIT(0));
 
 	psram_cache_check();

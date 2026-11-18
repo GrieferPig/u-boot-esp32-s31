@@ -2518,3 +2518,50 @@ path. That calibration is the next piece to port.
 
 Until then the SPL keeps the 16-line profile (correct data width) and skips
 `psram_check()`, which would issue single-word window accesses and hang.
+
+## Round 71: the L2MEM split, and the hang is always a read
+
+TRM ch.9 "System and Memory" (9.3.2, HP L2MEM): the 768 KB L2MEM is split
+between L2 RAM and L2 cache, one of four configurations - Config 0: 256/512,
+1: 512/256, 2: 640/128, 3: 768/0 KB. This chain runs entirely out of L2MEM (SPL
+at 0x4ff40000, U-Boot at 0x4ff00000, stack near 0x4ff90000), i.e. Config 3,
+so there is **no L2 cache at all** and every PSRAM access is a raw AXI
+transaction.
+
+Enabled the 128 KB split with the ROM API (TRM ch.2 lists the PMA CSRs, the
+cache split itself is programmed by the ROM helpers):
+
+```
+Cache_Set_L2_Cache_Mode(9 /*128K*/, 8, 3 /*64B*/);   /* 0x4fc003d4 */
+Cache_Enable_L2_Cache(0);                            /* 0x4fc00504 */
+```
+
+The chain still reaches `esp32p4>` with `l2: enabled`, so 128 KB is safe for
+the current layout (the SPL, U-Boot and its stack all stay below the cache
+region).
+
+Dumped the 16 PMA entries (TRM ch.2.10.2, CSRs `0xBC0+n`/`0xBD0+n`): every
+entry reads back `cfg=0x08000000 addr=0`, i.e. address-type OFF / inactive, so
+cacheability of the PSRAM window is not coming from a PMA entry.
+
+### The hang is always in the read direction
+
+Putting the observations together with write-allocate semantics:
+
+| access | result |
+| --- | --- |
+| 64-byte (full line) burst write through the alias | completes |
+| single 32-bit write through the alias | hangs |
+| any read (alias, or `md` of the cacheable window) | hangs |
+
+A full-line write needs no fill and completes; a single word write misses and
+issues a line fill, i.e. a read; every read hangs. So the blocker is the
+**PSRAM read transaction** in 16-line DDR mode, not the write path.
+
+The chip-side configuration matches IDF's 200 MHz profile (MR0 `0x8d30`,
+MR4 `0x12b`, MR8 `0x4b`), the controller registers match the reference
+register-for-register, DQS pads are powered, and the L2 cache is now enabled -
+yet the read never completes and the bus has to be reset. Next: compare the
+read transaction itself against the reference (e.g. freeze the reference in a
+PSRAM read with a watchpoint and dump the MSPI2 transaction state, or try the
+`smem_ac`/`outminbytelen` fields that govern the read data phase).
