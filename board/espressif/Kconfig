@@ -4,8 +4,15 @@ config TARGET_ESP32S31
     bool "ESP32-S31"
     default y
 
+config TARGET_ESP32P4
+    bool "ESP32-P4"
+
 if TARGET_ESP32S31
 source "board/espressif/esp32s31/Kconfig"
+endif
+
+if TARGET_ESP32P4
+source "board/espressif/esp32p4/Kconfig"
 endif
 
 endif

@@ -1,0 +1,86 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * ESP32-P4 device tree (M-mode U-Boot, no OpenSBI).
+ *
+ * U-Boot proper runs from PSRAM at CONFIG_TEXT_BASE; the kernel image and its
+ * device tree are placed in PSRAM by the firmware before this stage starts.
+ */
+
+/dts-v1/;
+
+/ {
+	#address-cells = <1>;
+	#size-cells = <1>;
+	model = "Espressif ESP32-P4";
+	compatible = "espressif,esp32p4";
+
+	aliases {
+		serial0 = &uart0;
+	};
+
+	chosen {
+		bootargs = "earlycon=esp32p4uart,mmio32,0x500ca000 console=tty0 console=ttyS0,115200 clk_ignore_unused";
+		stdout-path = "serial0:115200n8";
+	};
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		timebase-frequency = <16000000>;
+		bootph-all;
+
+		cpu0: cpu@0 {
+			compatible = "riscv";
+			device_type = "cpu";
+			reg = <0>;
+			riscv,isa = "rv32imac_zicsr_zifencei";
+			bootph-all;
+		};
+
+		cpu1: cpu@1 {
+			compatible = "riscv";
+			device_type = "cpu";
+			reg = <1>;
+			riscv,isa = "rv32imac_zicsr_zifencei";
+			bootph-all;
+		};
+	};
+
+	xtal_40m: xtal_40m {
+		bootph-all;
+		compatible = "fixed-clock";
+		clock-frequency = <40000000>;
+		#clock-cells = <0>;
+	};
+
+	soc {
+		bootph-all;
+		#address-cells = <1>;
+		#size-cells = <1>;
+		compatible = "simple-bus";
+		ranges;
+
+		uart0: serial@500ca000 {
+			bootph-all;
+			compatible = "esp,uart0";
+			reg = <0x500ca000 0x1000>;
+			reg-io-width = <4>;
+			reg-shift = <2>;
+			clocks = <&xtal_40m>;
+		};
+
+		systimer: timer@500e2000 {
+			bootph-all;
+			compatible = "espressif,esp32p4-systimer";
+			reg = <0x500e2000 0x1000>;
+			clock-frequency = <16000000>;
+		};
+	};
+
+	/* 16 MiB kernel window inside PSRAM; U-Boot proper lives at its top. */
+	memory@48000000 {
+		bootph-all;
+		device_type = "memory";
+		reg = <0x48000000 0x01000000>;
+	};
+};

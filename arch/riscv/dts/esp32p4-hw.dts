@@ -1,0 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0+
+#include "esp32p4.dts"
+
+/ {
+	model = "Espressif ESP32-P4 v1.3 IDF hardware handoff";
+	cpus {
+		cpu@0 {
+			clock-frequency = <360000000>;
+		};
+	};
+};

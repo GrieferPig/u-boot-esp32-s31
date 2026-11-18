@@ -1,0 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * ESP32-P4 U-Boot device tree additions.
+ *
+ * The firmware images are assembled outside binman (the SPL is wrapped by
+ * esptool into an ESP bootable image and U-Boot proper is flashed raw), so the
+ * node only exists to satisfy the build.
+ */
+
+/ {
+	binman: binman {
+	};
+};

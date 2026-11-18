@@ -21,7 +21,11 @@
 #include <linux/compiler.h>
 #include <serial.h>
 #include <linux/err.h>
+#if defined(CONFIG_TARGET_ESP32P4)
+#include <asm/arch-esp32p4/soc/uart_reg.h>
+#else
 #include <asm/arch-esp32s31/soc/uart_reg.h>
+#endif
 
 DECLARE_GLOBAL_DATA_PTR;
 
