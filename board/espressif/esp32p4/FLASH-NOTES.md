@@ -2843,3 +2843,54 @@ Where that leaves the objective: command-path register and array reads work
 (this is what the SPL uses for bring-up), the cache configuration matches the
 proven reference, and the PSRAM init is self-healing. Only "boot Linux from the
 U-Boot prompt" remains, and it needs working reads through the memory window.
+
+## Round 79: the PSRAM read path works - the CPU cannot use it
+
+Tested the memory window with the debugger instead of the CPU, which separates
+the MSPI2/PSRAM hardware from the CPU-side memory system.
+
+On the running **reference** chain (Linux), halting and reading through the
+debug module's system bus:
+
+```
+0x48000000: 0000a045 00010000 00000000 00000000     <- cached window
+0x88000000: 0000a045 00010000 00000000 00000000     <- direct window
+```
+
+Both aliases return the same real PSRAM contents (the kernel image header).
+So the MSPI2 controller, the pads, the PSRAM mode registers and the 16-line
+data phase are all correct - the hardware read path works.
+
+On **this port's** chain, the same debugger read fails outright:
+
+```
+mdw 0x48200000 4
+[esp32p4.hp.cpu0] Failed to read memory (addr=0x48200000)
+```
+
+That is a bus error on the same address that the reference reads happily, and
+it reproduces at 0x48000000 as well.
+
+Checked the CPU-side configuration that governs the window:
+
+| item | this port | reference |
+| --- | --- | --- |
+| MMU entries written | 256 (0..0xff), 16 MB | 512 (0..0x1ff), 32 MB |
+| MMU content | `page \| 0xC00` | `page \| 0xC00` |
+| MMU power/page-size (0x384/0x388) | `0x13200004` / `0xf` | same |
+| HP cache clock config (0x500E6020) | `0x8` (all cache clocks off) | `0x8` |
+| PMA (CSR 0xBC0+): all 16 entries | `A=0` OFF, attribute bit27=1 | same class |
+| MSPI2 0x000-0x1ff | matched in round 70/71 | - |
+
+Per TRM ch.2 Register 2.118, `pma_cfg` bit27 is the cacheability attribute
+(0 = cacheable, 1 = non-cacheable) and bits 1:0 the address type (0 = OFF), so
+every PMA entry is inactive here and ESP-IDF never programs the PMA either
+(only the `CSR_PMACFG0` constant exists in `components/riscv`).
+
+Conclusion: the controller side is proven good, so the remaining defect is
+between the CPU and MSPI2, in the cache subsystem that the TRM says fronts the
+0x4800_0000 window ("accessed by HP CPU via cache"), whose clocks are off in
+both chains. Next step is to read the MSPI2 error/status registers after a
+failed window access and to compare the CPU-side cache configuration registers
+(L1/L2 cache control, CLKRST cache bus clocks) between a reference boot and
+this chain - both are TRM ch.9 §9.3.3.2 / ch.12 territory.
