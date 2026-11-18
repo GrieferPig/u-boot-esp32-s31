@@ -1013,16 +1013,11 @@ static void psram_enable_l2_cache(void)
 	p4_spl_early_puts("l2: enabled\n");
 }
 
+
 static void psram_cache_check(void)
 {
 	u32 i;
 
-	/*
-	 * In 16-line DDR mode the alias tolerates only multi-word bursts: a
-	 * single 32-bit read or write is one clock and hangs the controller.
-	 * Write a 64-byte burst here; it is read back from the prompt through
-	 * the cacheable window (which moves whole cache lines).
-	 */
 	for (i = 0; i < 16; i++)
 		writel(0xa5a50000u + i, (void *)(0x88200000 + i * 4));
 

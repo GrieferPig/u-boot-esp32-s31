@@ -2650,3 +2650,47 @@ invalidate, burst write through the alias, boots to `esp32p4>`.
 
 Remaining question is narrow now: why does the MSPI2 read shift in all ones
 when the chip is driving data for the same address on MSPI3?
+
+## Round 74: the cache-path read returns garbage, not the part's data
+
+Two cleaned-up experiments with the command path as the reference reader.
+
+### 1. Read-dummy sweep (8-line mode, so a bad dummy cannot hang)
+
+Markers `0xdead0000 | i` written by the command path at `0x1000 + i*64`, then
+each slot read once through the cacheable window with a different
+`CACHE_SCTRL.RDUMMY`:
+
+```
+dummy 0 -> 0xffff4b4b   dummy 1 -> 0xffff7555   dummy 2 -> 0xffff5755
+dummy 3 -> 0xffff5555   dummy 4 -> 0xffff5555   dummy 5 -> 0xffff5555
+dummy 6 -> 0xffff5555   dummy 7..31 -> 0xffffffff
+```
+
+The captured value changes with the address and with small dummies, so the
+read transaction does reach *something*, but it never returns the markers, and
+from dummy 5 on the data phase is missed entirely (all ones).
+
+### 2. Window vs command read of the same addresses
+
+```
+win: 0xffff4b4b 0xffff7555 0xffffaaaa
+cmd: 0x11111111 0x22222222 0x33333333
+```
+
+Same boot: the command path reads back exactly the markers the SPL wrote
+(`0x11111111/0x22222222/0x33333333` at 0x1000/0x2000/0x3000), while the cacheable
+window returns address-dependent garbage whose upper half is always `0xffff`.
+
+Also tried every plausible read opcode in `SRAM_DRD_CMD` (`0x0000`, `0x2020`,
+`0x4040`, `0xa0a0`): with the configured dummy (26 bits) all four return
+`0xffffffff`, i.e. the command value does not change the outcome.
+
+Conclusion: the MSPI2 read path in this configuration clocks in the wrong bytes
+regardless of the read opcode. Since every steady-state register matches a
+working reference boot, the difference has to be in how the transaction is
+sequenced/sampled - most likely the read-data capture timing that IDF's
+`mspi_timing_psram_tuning()` computes on the real hardware, which this port
+does not implement. Porting that tuning (DIN dummy sweep + DQS phase + delay
+line) is the next real step; register archaeology against the end state has
+been exhausted.
