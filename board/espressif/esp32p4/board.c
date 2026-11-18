@@ -133,6 +133,8 @@ int board_init(void)
  */
 
 
+
+
 static void p4_wdt_off(void)
 {
 	void *wdt = (void *)0x50116000;		/* LP_WDT / RWDT */
@@ -151,7 +153,11 @@ static void p4_wdt_off(void)
 	 * SWD_CONFIG bit 18, behind the SWD write-protect key).
 	 */
 	writel(0x50d83aa1, wdt + 0x20);		/* SWD_WPROTECT */
-	writel(readl(wdt + 0x1c) | (1u << 18), wdt + 0x1c);
+	/*
+	 * The reference (IDF) chain leaves SWD_CONFIG at 0x40000000: the super
+	 * watchdog disabled (bit 30) rather than merely auto-fed.
+	 */
+	writel(readl(wdt + 0x1c) | (1u << 30), wdt + 0x1c);
 	writel(0, wdt + 0x20);
 
 	for (t = 0; t < 2; t++) {		/* TIMG0/1 MWDT */

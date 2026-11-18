@@ -646,3 +646,43 @@ dump the PMU/HP_SYS blocks (0x50115000, 0x500e6000) and the remaining timer
 groups for an enabled watchdog, and compare against an IDF boot where the
 prompt stays alive. `esp32p4>` itself is reproducible, which is the important
 part - the reset is the last obstacle to an idle prompt.
+
+## Round 24: watchdog state matches the working chain, resets remain
+
+`reset_reasons.h` for the P4 maps the reason the ROM prints:
+
+```
+RESET_REASON_CORE_MWDT      = 0x07   <- what we see ("HP WDT resets system")
+RESET_REASON_CORE_RWDT      = 0x09
+RESET_REASON_SYS_RWDT       = 0x10
+RESET_REASON_SYS_SUPER_WDT  = 0x12   <- also reported by OpenOCD sometimes
+```
+
+JTAG comparison of our chain against the working IDF chain (same addresses):
+
+| register | IDF chain | our chain |
+|---|---|---|
+| `LP_WDT+0x00` CONFIG0 (wdt_en bit31) | 0 | 0 |
+| `LP_WDT+0x04` CONFIG1 | 0x956a0 | 0 |
+| `LP_WDT+0x1c` SWD_CONFIG | 0x40000000 (disabled) | 0x40000000 (disabled) |
+| `TIMG0+0x48` | 0 | 0 |
+| `TIMG1+0x48` | 0 | 0 |
+| `TIMG(+0x3000*2)+0x48` | 0 | 0 |
+| `TIMG(+0x3000*3)+0x48` | 0x000000c7 (EN=0) | 0 |
+
+So no watchdog is enabled on our chain either, and feeding all of them
+(RWDT feed, SWD feed, and the four TIMG WDT feed keys) from the console poll
+path did not stop the resets - that experiment was removed again.
+`board.c: p4_wdt_off()` now disables the SWDT exactly like the IDF chain
+(`SWD_CONFIG |= BIT(30)` behind the SWD key) instead of only auto-feeding.
+
+Useful discovery while trying an A/B test: **the reference chain does not flash
+a U-Boot image separately.** `uartflash.ps1` writes only 0x2000 (IDF
+bootloader), 0x8000 (table), 0x10000 (the hardware loader app), 0x200000
+(kernel), 0x900000 (DT) and 0xa00000 (metadata); U-Boot is embedded inside
+`esp32p4_linux_hardware_loader.bin`. Flash offset 0x100000 is not used by the
+reference chain.
+
+Next: bisect the reset - instrument `main_loop()`/`cli_loop()` (does the CLI
+return?) and compare the SPL's PMU/clock hand-off against the IDF loader's,
+since the register state of every watchdog already matches.
