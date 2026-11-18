@@ -91,6 +91,38 @@ typedef void (*rom_cmd_config_fn)(int spi_num, rom_spi_cmd_t *conf);
 typedef void (*rom_cmd_start_fn)(int spi_num, u8 *rx_buf, u16 rx_len,
 				 u8 cs_mask, bool is_write_erase);
 
+/*
+ * TRM references for this file (ESP32-P4 Technical Reference Manual v1.0).
+ * Every register block touched here is listed with the chapter that defines
+ * it, so a reviewer can check the code against the manual:
+ *
+ *   ch.9  System and Memory        HP L2MEM / L2 cache split, PSRAM window,
+ *                                  memory map of the MSPI address ranges
+ *   ch.11 GPIO Matrix and IO MUX   pad configuration and pin mux
+ *   ch.12 Reset and Clock          MPLL, PSRAM clock source and dividers,
+ *                                  HP_SYS_CLKRST (cache clocks and resets)
+ *   ch.18 Timer Group (TIMG)       MWDT0/MWDT1 flashboot mode
+ *   ch.19 Watchdog Timers (WDT)    RWDT / super watchdog key registers
+ *   ch.21 Permission Control (PMS) PMS entries covering the MSPI regions
+ *   ch.22 System Registers (SYSREG) Register 22.15 HP_SYSTEM_HP_CACHE_CLK_CONFIG
+ *                                  (0x0020), 22.16 CACHE_RESET_CONFIG (0x0024),
+ *                                  L2MEM/L2ROM clock force-on (0x0060/0x0040)
+ *   ch.47 SPI Controller (SPI)     SPI (MSPI) command/user/clock registers
+ *
+ * NOT COVERED BY THE TRM. A full-text search of the manual finds no definition
+ * for the memory-mapped MSPI cache path, so the values below come from the
+ * ESP-IDF P4 sources (components/hal/esp32p4/include/hal/psram_ctrlr_ll.h,
+ * components/esp_psram/device/esp_psram_impl_ap_hex.c) and from register dumps
+ * of a working ESP-IDF boot - never from the TRM:
+ *   - CACHE_SCTRL (0x40), SRAM_CMD (0x44), SRAM_DRD_CMD (0x48),
+ *     SRAM_DWR_CMD (0x4c), SMEM_DDR (0xd8);
+ *   - MMU item index/content (0x380/0x37c) and the MMU power/page-size
+ *     registers (0x384);
+ *   - the MSPI IOMUX pin block at 0x500E1200.
+ * The only "SPI_MEM" registers the manual describes are the XTS_AES plaintext
+ * registers in ch.35, which are unrelated.
+ */
+
 /* AP hex PSRAM commands and timings. */
 #define PSRAM_REG_READ		0x4040
 #define PSRAM_REG_WRITE		0xc0c0
@@ -127,6 +159,8 @@ static void regi2c_write(u8 block, u8 reg, u8 data)
 		;
 }
 
+/* TRM ch.12 "Reset and Clock": MPLL configuration, PSRAM clock source and
+ * core clock enable, dual-MSPI reset release. */
 static void psram_clock_init(void)
 {
 	u32 val;
@@ -174,6 +208,8 @@ static void psram_clock_init(void)
  * unset, so cached writes never reach the device: reads work, writes vanish.
  * These are the values a fully initialised ESP-IDF boot has in MSPI2.
  */
+/* TRM ch.47 "SPI Controller (SPI)" covers the SPI peripheral; these
+ * cache-path registers are not documented there (see the file header). */
 static void psram_cache_cmds(void)
 {
 	writel(0x40000001u, (void *)0x5008e03c);	/* CACHE_FCTRL */
@@ -497,6 +533,9 @@ static void psram_controller_reset(void)
 	udelay(200);
 }
 
+/* TRM ch.11 "GPIO Matrix and IO MUX": drive strength and pad enables for
+ * the MSPI pins. (The MSPI-specific IOMUX block itself is not described in
+ * the manual - see the file header.) */
 static void psram_pads_init(void)
 {
 	u32 i;
@@ -1003,32 +1042,15 @@ static void psram_range_check(void)
  * (the SPL, U-Boot and its stack all live below 0x4ff90000) so the CPU issues
  * cache-line fills instead.
  */
-#define P4_ROM_CACHE_SET_L2_MODE	0x4fc003d4u
-#define P4_ROM_CACHE_INVALIDATE_ALL	0x4fc00404u
-#define P4_ROM_CACHE_ENABLE_L2		0x4fc00504u
-#define P4_CACHE_MAP_L2			BIT(5)
-
-
-static void psram_enable_l2_cache(void)
-{
-	void (*set_mode)(u32 size, u32 ways, u32 line) =
-		(void (*)(u32, u32, u32))P4_ROM_CACHE_SET_L2_MODE;
-	void (*invalidate_all)(u32 map) = (void (*)(u32))P4_ROM_CACHE_INVALIDATE_ALL;
-	void (*enable)(u32 autoload) =
-		(void (*)(u32))P4_ROM_CACHE_ENABLE_L2;
-
-	/*
-	 * cache_hal_init_l2_cache() invalidates the L2 after programming the
-	 * split; without it the cache wakes up with whatever tags the power-on
-	 * state left behind and reads come back as 0xffffffff without ever
-	 * touching the part.
-	 */
-	set_mode(10 /* CACHE_SIZE_256K */, 8, 3 /* CACHE_LINE_SIZE_64B */);
-	invalidate_all(P4_CACHE_MAP_L2);
-	enable(0);
-
-	p4_spl_early_puts("l2: enabled\n");
-}
+/*
+ * TRM ch.22 System Registers (SYSREG), Register 22.15
+ * HP_SYSTEM_HP_CACHE_CLK_CONFIG_REG (0x500E6020): the HP L1/L2 cache clocks
+ * are off in the proven reference chain (readback 0x8 - every cache clock
+ * field is 0), so its PSRAM window is uncached and each access is a direct
+ * MSPI2 AXI transaction. Keep this port on the same page: do not carve the L2
+ * out as cache and do not assume a cache between the CPU and the PSRAM.
+ * (The ROM cache helpers silently do nothing while those clocks are off.)
+ */
 
 
 static void psram_cache_check(void)
@@ -1316,6 +1338,8 @@ static int psram_timing_tune(void)
 }
 
 /* Map the PSRAM window through the MSPI2 "S" MMU (64 KiB pages). */
+/* TRM ch.9 "System and Memory": the MMU maps the PSRAM window. The item
+ * registers are not in the manual (see the file header). */
 static void psram_mmu_map(u32 size)
 {
 	u32 entries = size >> 16;
@@ -1418,7 +1442,6 @@ int p4_spl_psram_init(void)
 
 	setbits_le32((void *)P4_SRAM_CMD, P4_CMD_SDIN_HEX | P4_CMD_SDOUT_HEX);
 	psram_mmu_map(0x01000000);
-	psram_enable_l2_cache();
 	setbits_le32((void *)P4_CACHE_FCTRL, BIT(0));
 
 	psram_cache_check();

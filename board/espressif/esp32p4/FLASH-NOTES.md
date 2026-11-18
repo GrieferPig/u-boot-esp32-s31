@@ -2777,3 +2777,45 @@ Those four are the concrete next steps to port; items 1 and 4 are the ones
 never attempted on the P4. The P4's cache clock lives in the HP_SYSTEM block
 (`HP_SYSTEM_L2_CACHE_CLK_ON`), not in HP_SYS_CLKRST as on the S31, so item 4
 needs the P4 register located first.
+
+## Round 77: TRM audit, and the L2 carve-out removed on TRM evidence
+
+AGENTS.md §4 requires the TRM to be checked before writing code, with chapter
+and field citations in the code. The audit showed this port was not doing that:
+`spl_psram.c` had 119 register writes and 3 TRM citations, `board.c` cited
+"ch.9 Timer Group (TIMG)" - Timer Group is ch.18, and the watchdog key
+registers are ch.19. Fixed:
+
+* `spl_psram.c` now opens with a block-by-block TRM reference map (ch.9, 11,
+  12, 18, 19, 21, 22, 47), and the clock/pads/MMU/cache functions each carry
+  the chapter they implement.
+* `board.c` now cites ch.18 for `TIMG_WDT_CONFIG0_REG.wdt_flashboot_mod_en` and
+  ch.19 for the RWDT/SWD keys.
+* The file header records, explicitly, what the TRM does **not** cover: a
+  full-text search finds no definition for CACHE_SCTRL, SRAM_CMD,
+  SRAM_DRD/DWR_CMD, SMEM_DDR, the MMU item registers or the MSPI IOMUX block.
+  ch.47 documents the SPI peripheral itself and the only "SPI_MEM" registers in
+  the manual are the ch.35 XTS_AES plaintext ones. Those values legitimately
+  come from IDF source plus register dumps of a working boot, and the code now
+  says so instead of implying TRM support.
+
+### TRM ch.22 changed a decision
+
+Register 22.15 `HP_SYSTEM_HP_CACHE_CLK_CONFIG_REG` (0x0020): "Writing 1 to
+respective fields enables the clock for respective cache", fields
+`L2_CACHE_CLK_ON`/`L1_D_CACHE_CLK_ON`/`L1_I1`/`L1_I0`. The working reference
+reads **0x00000008** at 0x500E6020 - every HP cache clock field is 0, so its
+PSRAM window is uncached and each access is a direct MSPI2 AXI transaction.
+That also explains why enabling vs not enabling the L2 cache made no difference
+in round 75: the ROM cache helpers are inert while those clocks are gated.
+
+So the L2 carve-out is gone: the SPL no longer programmes a 256 KB L2 cache and
+the 768 KB of L2MEM stays available as RAM (which also keeps U-Boot's stack at
+0x4FF90370 clear of a cache carve-out). Boot verified: `mode: mr0 0x00008d28
+mr4 0x000080df mr8 0x0000054b`, `lat: mr0 0x00008d28 mr4 0x0000014b`, prompt
+reached, with no `l2:` line because there is no L2 cache enable anymore.
+
+Remaining TRM-backed work: if the caches are ever wanted, ch.12
+`HP_SYS_CLKRST_RST_EN_L2_CACHE` / the `L1CACHE_*_CPU_CLK_EN` bus clocks and
+ch.22 Register 22.15/22.16 must be programmed in the documented order (release
+reset, enable clocks, then the ROM helpers), which this port does not do.

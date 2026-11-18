@@ -122,8 +122,10 @@ void p4_systimer_enable(void);
  * Watchdogs the ROM leaves armed after a flash boot. RWDT and the super
  * watchdog are cleared through their key registers; TIMG MWDT0/MWDT1 have a
  * flashboot mode that keeps resetting the SoC even with wdt_en clear, and the
- * ROM enables it on every flash boot (TRM ch.9 "Timer Group (TIMG)" -
- * WDT_CONFIG0.wdt_flashboot_mod_en). A multi-megabyte PSRAM copy takes long
+ * ROM enables it on every flash boot (TRM ch.18 "Timer Group (TIMG)" -
+ * TIMG_WDT_CONFIG0_REG.wdt_flashboot_mod_en; the RWDT/SWD key registers
+ * used below are TRM ch.19 "Watchdog Timers (WDT)").
+ * A multi-megabyte PSRAM copy takes long
  * enough to trip it, so disable it before any PSRAM work.
  */
 #define P4_WDT_WKEY	0x50d83aa1u
