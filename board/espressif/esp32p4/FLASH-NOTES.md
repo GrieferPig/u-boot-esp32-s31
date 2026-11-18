@@ -1636,3 +1636,37 @@ Next round: port `psram_tune_pins()` + `psram_timing_tune()` from the S31 port
 against the P4's hex part (DQS register at 0x500e123c, reference pattern written
 at 0x80 in PSRAM), and use the result as the final bring-up step before the MMU
 map and the payload load.
+
+## Round 49: DQS calibration ported, but the reference write does not verify
+
+Ported the S31's calibration to the P4 in full (`psram_tune_pins`,
+`psram_tune_read`, `psram_timing_tune`):
+
+* DQS phase/delay written to the MSPI pin block: `DQS_0` at 0x500e123c and
+  `DQS_1` at 0x500e1268, phase bits [2:1], delay bits [14:7] and [21:18],
+* data-pin delay (bits [7:4]) on the 16 data pins 0x500e121c..0x500e125c plus CS
+  (0x500e1260) and CK (0x500e1264),
+* a 32-word xorshift reference written at PSRAM 0x80 with `SYNC_WRITE` (512 bits)
+  at the slow command clock, read back with `SYNC_READ`,
+* the 4-phase sweep and the 31-tap x 20-trial sweep with the widest-window
+  midpoint selection, then a write-verify at the selected point.
+
+It stops at the first step:
+
+```
+tune: low-clock reference failed
+```
+
+The reference pattern written through `psram_xact()` (the direct command path, not
+the cache) does not read back, even at the slow clock. That is consistent with
+everything else: **the write path is dead**, both through the cache and through
+the command engine, while reads return constant junk.
+
+So the ordering has to be: get *any* write to land first (a single 16-bit mode
+register write is the smallest possible test - MR0 is writable and reads back, and
+we already program it, so check whether that read-back is genuine by writing a
+different latency value and reading it again), then the calibration, then the MMU
+map.
+
+The code for the calibration is in place and can be re-enabled with one line once
+a write verifies.

@@ -859,6 +859,152 @@ static void psram_bulk_test(void)
 
 }
 
+
+/*
+ * DQS timing calibration, ported from the S31 port (psram_tune_pins /
+ * psram_tune_read / psram_timing_tune). The PSRAM pins live in the mux block
+ * at 0x500e1200: DQS_0 at +0x3c, the 16 data pins at +0x1c..+0x5c, CS at
+ * +0x60, CK at +0x64 and DQS_1 at +0x68.
+ */
+#define P4_PSRAM_PIN_BASE	0x500e1200u
+#define P4_PSRAM_DQS		(P4_PSRAM_PIN_BASE + 0x3c)
+#define P4_PSRAM_DQS1		(P4_PSRAM_PIN_BASE + 0x68)
+#define P4_DQS_PHASE_MASK	(3u << 1)
+#define P4_DQS_DELAY_MASK	((15u << 7) | (15u << 18))
+#define P4_PIN_DELAY_MASK	(15u << 4)
+#define P4_TUNE_ADDR		0x80u
+#define P4_TUNE_WORDS		32u
+#define P4_TUNE_RD_DUMMY	(P4_PSRAM_RD_DUMMY)
+#define P4_TUNE_WR_DUMMY	(P4_PSRAM_WR_DUMMY)
+
+static void psram_tune_pins(u32 phase, u32 tap)
+{
+	u32 dqs = tap < 15 ? 15 - tap : 0;
+	u32 data = tap > 15 ? tap - 15 : 0;
+	u32 i;
+
+	clrsetbits_le32((void *)P4_PSRAM_DQS,
+			P4_DQS_PHASE_MASK | P4_DQS_DELAY_MASK,
+			(phase << 1) | (dqs << 7) | (dqs << 18));
+	clrsetbits_le32((void *)P4_PSRAM_DQS1,
+			P4_DQS_PHASE_MASK | P4_DQS_DELAY_MASK,
+			(phase << 1) | (dqs << 7) | (dqs << 18));
+
+	for (i = 0; i < 16; i++)
+		clrsetbits_le32((void *)(P4_PSRAM_PIN_BASE + 0x1c + i * 4),
+				P4_PIN_DELAY_MASK, data << 4);
+	/* CS and CK */
+	clrsetbits_le32((void *)(P4_PSRAM_PIN_BASE + 0x60), P4_PIN_DELAY_MASK,
+			data << 4);
+	clrsetbits_le32((void *)(P4_PSRAM_PIN_BASE + 0x64), P4_PIN_DELAY_MASK,
+			data << 4);
+}
+
+static int psram_tune_read(const u32 *reference)
+{
+	u32 readback[16];
+	u32 offset, i;
+
+	for (offset = 0; offset < P4_TUNE_WORDS; offset += 16) {
+		psram_xact(0x0000, P4_TUNE_ADDR + offset * 4, NULL, 0, readback,
+			   512, P4_TUNE_RD_DUMMY);
+		for (i = 0; i < 16; i++)
+			if (readback[i] != reference[offset + i])
+				return 0;
+	}
+
+	return 1;
+}
+
+static int psram_timing_tune(void)
+{
+	u32 reference[P4_TUNE_WORDS];
+	u32 pattern = 0x6d2b79f5;
+	u32 phase, selected = 4, tap, trial, run = 0, best = 0, end = 0;
+	u32 i;
+
+	/* Reference write/read at the slow command clock, as the S31 does. */
+	writel(0x00130913u, (void *)(P4_MSPI2_BASE + 0x14));
+	psram_tune_pins(0, 15);
+	for (i = 0; i < P4_TUNE_WORDS; i++) {
+		pattern ^= pattern << 13;
+		pattern ^= pattern >> 17;
+		pattern ^= pattern << 5;
+		reference[i] = pattern;
+	}
+	for (i = 0; i < P4_TUNE_WORDS; i += 16)
+		psram_xact(0x8080, P4_TUNE_ADDR + i * 4, reference + i, 512,
+			   NULL, 0, P4_TUNE_WR_DUMMY);
+	if (!psram_tune_read(reference)) {
+		p4_spl_early_puts("tune: low-clock reference failed\n");
+		return -1;
+	}
+	p4_spl_early_puts("tune: reference ok");
+
+	writel(0x00010001u, (void *)(P4_MSPI2_BASE + 0x14));
+	for (phase = 0; phase < 4; phase++) {
+		psram_tune_pins(phase, 15);
+		if (psram_tune_read(reference)) {
+			run++;
+			if (run > best) {
+				best = run;
+				selected = phase - run + 1;
+			}
+		} else {
+			run = 0;
+		}
+	}
+	p4_spl_early_puts(" phase ");
+	p4_spl_early_hex(selected);
+	if (selected == 4) {
+		p4_spl_early_puts(" none\n");
+		return -1;
+	}
+
+	run = 0;
+	best = 0;
+	for (tap = 0; tap < 31; tap++) {
+		psram_tune_pins(selected, tap);
+		for (trial = 0; trial < 20; trial++)
+			if (!psram_tune_read(reference))
+				break;
+		if (trial == 20) {
+			run++;
+			if (run > best) {
+				best = run;
+				end = tap;
+			}
+		} else {
+			run = 0;
+		}
+	}
+	p4_spl_early_puts(" delay ");
+	p4_spl_early_hex(best ? end - best / 2 : 0);
+	p4_spl_early_puts(" margin ");
+	p4_spl_early_hex(best);
+	p4_spl_early_puts("\n");
+	if (best < 3)
+		return -1;
+
+	tap = end - best / 2;
+	psram_tune_pins(selected, tap);
+	if (!psram_tune_read(reference))
+		return -1;
+
+	for (i = 0; i < P4_TUNE_WORDS; i++)
+		reference[i] = ~reference[i];
+	for (i = 0; i < P4_TUNE_WORDS; i += 16)
+		psram_xact(0x8080, P4_TUNE_ADDR + i * 4, reference + i, 512,
+			   NULL, 0, P4_TUNE_WR_DUMMY);
+	if (!psram_tune_read(reference)) {
+		p4_spl_early_puts("tune: write verify failed\n");
+		return -1;
+	}
+	p4_spl_early_puts("tune: ok\n");
+
+	return 0;
+}
+
 /* Map the PSRAM window through the MSPI2 "S" MMU (64 KiB pages). */
 static void psram_mmu_map(u32 size)
 {
@@ -905,6 +1051,7 @@ int p4_spl_psram_init(void)
 	psram_mode_reg_init();
 	psram_cache_cmds();
 	psram_axi_config();
+	psram_timing_tune();
 	psram_mmu_map(0x01000000);
 	psram_rw_test();
 	psram_bulk_test();
