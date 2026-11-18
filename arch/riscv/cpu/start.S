@@ -151,7 +151,16 @@ call_harts_early_init:
 	 */
 	la	t0, hart_lottery
 	li	t1, 1
+#if CONFIG_IS_ENABLED(SMP)
 	amoswap.w s2, t1, 0(t0)
+#else
+	/*
+	 * Single hart: avoid the atomic access. On the ESP32-P4 U-Boot runs from
+	 * PSRAM (or SRAM), where AMO operations are not necessarily supported.
+	 */
+	lw	s2, 0(t0)
+	sw	t1, 0(t0)
+#endif
 	bnez	s2, wait_for_gd_init
 #else
 	/*

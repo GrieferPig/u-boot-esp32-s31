@@ -82,7 +82,22 @@ int p4_spl_load_uboot(void)
 				p4_spl_puts("nor read failed\n");
 				return -1;
 			}
+			/*
+			 * The copy runs through the write-back data cache, so push each
+			 * chunk out to PSRAM right away. mask 0x30 = L1 dcache | L2.
+			 */
+			((int (*)(u32, u32, u32))0x4fc003e0)(0x30,
+					P4_UBOOT_LOAD_ADDR + done, chunk);
 			t1 = timer_read_counter();
+			{
+				u32 k, sum = 0;
+
+				for (k = 0; k < chunk / 4; k++)
+					sum += readl((void *)(P4_UBOOT_LOAD_ADDR +
+							      done + k * 4));
+				p4_spl_puts(" ");
+				p4_spl_early_hex(sum);
+			}
 			done += chunk;
 			p4_spl_puts(" [");
 			p4_spl_early_hex(t1 - t0);
@@ -110,6 +125,19 @@ void p4_spl_enter_uboot(u32 dtb)
 	typedef void (*uboot_entry_fn)(u32 hartid, u32 fdt);
 
 	uboot_entry_fn entry = (uboot_entry_fn)P4_UBOOT_LOAD_ADDR;
+
+	/*
+	 * Flush the caches before handing over: the payload was written through
+	 * the store path while the cache still held no-memory lines for that
+	 * region, so the first instruction fetch would return garbage.
+	 */
+	/*
+	 * The payload was written through the write-back data cache, so it has to
+	 * be flushed to PSRAM before the hand-over. The map argument is a bit mask:
+	 * L1 icache 0/1 = bits 0/1, L1 dcache = bit 4, L2 = bit 5.
+	 */
+	((int (*)(u32))0x4fc00414)(0x33);	/* Cache_WriteBack_All */
+	((int (*)(u32))0x4fc00404)(0x33);	/* Cache_Invalidate_All */
 
 	p4_spl_puts("jump: entry ");
 	p4_spl_early_hex(P4_UBOOT_LOAD_ADDR);
