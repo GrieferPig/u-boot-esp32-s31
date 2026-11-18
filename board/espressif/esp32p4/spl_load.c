@@ -20,6 +20,8 @@ unsigned long notrace timer_read_counter(void);
 #define P4_UBOOT_MAX_SIZE	0x00200000ul	/* 2 MB partition */
 
 
+
+
 int p4_spl_load_uboot(void)
 {
 	u32 size = P4_UBOOT_SIZE;
@@ -36,23 +38,6 @@ int p4_spl_load_uboot(void)
 	p4_spl_puts(" len ");
 	p4_spl_early_hex(size);
 	p4_spl_puts("\n");
-
-	/* Compare the cache block with a working boot. */
-	{
-		u32 off;
-
-		p4_spl_puts("P4C blk");
-		for (off = 0; off <= 0x60; off += 4) {
-			p4_spl_puts(" ");
-			p4_spl_early_hex(off);
-			p4_spl_puts("=");
-			p4_spl_early_hex(readl((void *)(0x3ff10000 + off)));
-		}
-		p4_spl_puts("\nP4C mmu384 ");
-		p4_spl_early_hex(readl((void *)0x5008e384));
-		p4_spl_early_hex(readl((void *)0x5008f384));
-		p4_spl_puts("\n");
-	}
 
 	/* Verify that the flash MMU entries really hold what we wrote. */
 	{

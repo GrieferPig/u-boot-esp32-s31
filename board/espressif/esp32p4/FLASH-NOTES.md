@@ -130,3 +130,42 @@ confirming PSRAM and the flash read.
 Next: clear the PSRAM MMU table (write 0 to every entry, as IDF's
 `mmu_hal_unmap_all` does) *before* mapping all 512 pages, and probe the window
 one 64 KiB page at a time to measure its real size.
+
+## Round 9 findings: the PSRAM window is only partly mapped
+
+Measured with a page-by-page write/read walk from the SPL:
+
+```
+0x48000000 .. 0x480d0000  usable   (14 pages = 896 KiB)
+0x480e0000                faults
+0x48c00000                usable   (the IDF payload area)
+```
+
+So the ROM maps a small low window plus the payload area, and nothing else.
+
+The PSRAM MMU registers behave like a staging/latch pair, not like a directly
+readable table:
+
+| Context | Reading entry 0x00 / 0xc0 |
+|---|---|
+| working ESP-IDF boot | `0x00000c00` / `0x00000cc0` (linear, as IDF wrote them) |
+| SPL | `0x000001a0` / `0x00001299` and different on every boot |
+
+Writing entries from the SPL therefore only changes that latch: after mapping
+pages 14..255 (or 0..511, or both PSRAM controller instances) the CPU still
+cannot touch `0x480e0000`. Trying to remap a page in the working boot also left
+the data unchanged, which fits the same explanation.
+
+Consequence: the payload cannot be placed at `0x48c00000` (beyond its 64 KiB
+window) or at `0x48000000` (only 896 KiB) until the real mapping path is found.
+
+### Options for the next round
+
+1. Put U-Boot into the 896 KiB window: rebuild with `TEXT_BASE = 0x48000000`
+   and `board_get_usable_ram_top() = 0x480e0000`, load 160 KiB there and jump.
+   U-Boot fits; the kernel does not, so the chain would stop at the U-Boot
+   prompt (still a real SPL -> U-Boot hand-off).
+2. Find the actual mapping path: compare the SPL against the bootloader, e.g.
+   dump `SPI_MEM_S_` registers that could gate the table (`MISC`, `CTRL`,
+   `AXI_*`) and check whether the table is only writable while the cache is
+   configured the way `cache_hal_init()` leaves it (caches on, L2 mapped).

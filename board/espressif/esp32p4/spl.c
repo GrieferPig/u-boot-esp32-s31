@@ -220,12 +220,12 @@ void spl_board_init(void)
 	}
 
 	/*
-	 * The flash read works, but the PSRAM window is still limited: writes
-	 * beyond ~1 MiB from 0x48c00000 fault, so the payload cannot be placed
-	 * there yet. Program the PSRAM MMU the way IDF does before enabling the
-	 * load again.
+	 * Flash reads and the low PSRAM window work; extending the PSRAM MMU map
+	 * from the SPL does not take effect yet, so the payload cannot be placed
+	 * at 0x48c00000. Park here until the window is solved, then load and
+	 * jump.
 	 */
-	p4_spl_puts("spl: flash read ready; psram window limited\n");
+	p4_spl_puts("spl: flash read ready; psram map pending\n");
 	for (;;)
 		;
 }

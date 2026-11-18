@@ -34,6 +34,14 @@ void p4_spl_early_hex(u32 v);
 #define P4_MMU_ENTRY_COUNT	1024u
 #define P4_MMU_FLASH_VALID	BIT(12)
 
+/* PSRAM side of the MMU (MSPI2). */
+#define P4_PSRAM_MSPI_BASE	0x5008e000ul
+#define P4_MMU_S_ITEM_CONTENT	(P4_PSRAM_MSPI_BASE + 0x37c)
+#define P4_MMU_S_ITEM_INDEX	(P4_PSRAM_MSPI_BASE + 0x380)
+#define P4_MMU_S_POWER_CTRL	(P4_PSRAM_MSPI_BASE + 0x384)
+#define P4_MMU_PSRAM_VALID	BIT(11)
+#define P4_MMU_ACCESS_PSRAM	BIT(10)
+
 /* Mask ROM helpers (P4 addresses). */
 #define ROM_CACHE_INIT		0x4fc003dcu
 #define ROM_CACHE_INVALIDATE_ALL	0x4fc00404u
