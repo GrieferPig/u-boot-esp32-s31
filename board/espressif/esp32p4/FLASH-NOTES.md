@@ -1330,3 +1330,31 @@ Next round: port the S31's `psram_ctrlr_init()` (and `psram_mspi_clock_init`,
 replaying MSPI3 registers, since the replay may leave the controller in a state
 that only supports the cache path. The S31 file is the blueprint and it is
 already in this tree, so this is now a porting exercise rather than research.
+
+## Round 41: slow clock and MSPI3 timing config both ruled out
+
+From the S31 port's `psram_ctrlr_init()`:
+
+* its register transactions run at `MPLL/20` (~20 MHz), not full speed - our
+  replay leaves `CLOCK` at divider 1, so `psram_probe()` now sets
+  `0x00130913` (N=19, H=9, L=19) on both MSPI2 and MSPI3 for the probe and
+  restores `0x00010001` afterwards. **Result: still zeros.**
+* the S31 also has to configure *both* the SMEM (cache) and MEM (command)
+  controllers in lockstep or its ROM helper hangs, which suggested the P4's
+  `0x100..0x1a0` block for MSPI3 (timing calibration / page size / AC) might be
+  missing. Dumped it: on **our chain it reads all zero**, so the block was
+  copied from MSPI2 into MSPI3 and retested - **still zeros**.
+  Then dumped the same range on the reference chain: it is **all zero there too**,
+  so those registers are not used by the command path and the copy was removed
+  again.
+
+So the P4's MSPI3 command path is configured, clocked, and its transactions
+complete, yet the chip returns nothing. Remaining difference to chase: the
+S31/IDF sequence configures *DLL* (`SMEM_S_TIMING_CALI`/`TIMING_CALI` bit 5) and
+the CS setup/hold/hold-delay in the AC register (`P4_MSPI3_BASE + 0x1a0`) before
+any transaction; we replay those values from a post-init state instead of
+programming them, and the reference dump above shows our `/0x1a0` block reads 0.
+
+Next round: dump `0x5008e1a0`/`0x5008f1a0` (AC: CS setup/hold/delay, split-trans)
+on both chains and program MSPI3's AC + timing-cali + DLL explicitly the way the
+S31 does, then retry the MR read.

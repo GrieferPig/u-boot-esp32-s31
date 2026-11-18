@@ -391,7 +391,11 @@ static void psram_mmu_report(void)
 	writel(1, (void *)(P4_MSPI2_BASE + 0x380));
 	p4_spl_early_puts(" mmu1 ");
 	p4_spl_early_hex(readl((void *)(P4_MSPI2_BASE + 0x37c)));
-	p4_spl_early_puts("\n");
+	p4_spl_early_puts(" slow-clk ok\n");
+
+	/* Back to the full-speed clock for the cache path. */
+	writel(0x00010001u, (void *)(P4_MSPI3_BASE + 0x14));
+	writel(0x00010001u, (void *)(P4_MSPI2_BASE + 0x14));
 }
 
 
@@ -577,6 +581,14 @@ static void psram_probe(void)
 	u32 i, val;
 
 	p4_spl_early_puts("psram probe:");
+	/*
+	 * Command-mode transactions must run at a slow bus clock: the S31 port
+	 * uses MPLL/20 (~20 MHz) for its register accesses, and the replay
+	 * leaves CLOCK at divider 1 (full speed), where the dummy window is far
+	 * too short for a register read.
+	 */
+	writel(0x00130913u, (void *)(P4_MSPI3_BASE + 0x14));
+	writel(0x00130913u, (void *)(P4_MSPI2_BASE + 0x14));
 	psram_opi_dtr_mode();
 	for (i = 0; i < ARRAY_SIZE(dummies); i++) {
 		val = psram_read_reg(0, dummies[i]);
