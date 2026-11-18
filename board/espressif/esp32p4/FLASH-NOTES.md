@@ -686,3 +686,39 @@ reference chain.
 Next: bisect the reset - instrument `main_loop()`/`cli_loop()` (does the CLI
 return?) and compare the SPL's PMU/clock hand-off against the IDF loader's,
 since the register state of every watchdog already matches.
+
+## Round 25: the reset was a watchdog, and the prompt is now stable
+
+Two things cracked it.
+
+**1. The build pipeline had been silently failing since 05:36.** Adding
+`p4_wdt_off()` gave `board.c:143: implicit declaration of function 'writel'`
+(missing `#include <asm/io.h>`), `build_sep.sh` failed, but `stage_sram.sh`
+piped the build through `tail -1`, so the failure was swallowed and the script
+copied the **stale** `u-boot.bin` from 05:36. Rounds 23 and 24 therefore tested
+the same binary over and over, which is why every watchdog change looked
+ineffective. Fix: include added, and `stage_sram.sh` now runs the build
+unpiped with `set -eo pipefail`, so a failed build aborts staging.
+
+**2. Feeding the watchdogs does fix the reset.** With a heartbeat in
+`esp_serial_pending()` (a `.` every 20000 polls) the dots ran right up to the
+reset, proving the CPU was alive and polling - so it was a watchdog, not a
+hang. Wiring `p4_wdt_feed()` (RWDT feed, SWDT feed, and the feed key of all four
+TIMG MWDTs) into that same poll path every 2000 polls gives:
+
+```
+entering cli
+esp32p4> ..........................................   (22 s, no reset)
+```
+
+- 22 s capture: **0 ROM banners, 1 prompt, 1040 heartbeat dots**.
+- Without the feed: a reset roughly every second.
+
+So the idle prompt is stable now. Follow-ups:
+
+- the feed currently lives in `drivers/serial/serial_esp.c` (guarded by
+  `CONFIG_ESP32P4_SRAM_ONLY`); the idiomatic place is
+  `CONFIG_HW_WATCHDOG` + `hw_watchdog_reset()` called from `WATCHDOG_RESET()`,
+- the heartbeat print should be removed once the port is finished,
+- the real objective now is loading the DT and kernel and running `booti`,
+  which needs a PSRAM window beyond the ~128 KiB the SPL can map today.
