@@ -1704,3 +1704,42 @@ the SPL (it is 605 lines and self-contained apart from a handful of
 `s_init_psram_mode_reg()`, `s_check_psram_connected()`, `mspi_timing_psram_tuning()`
 and the final AXI setup are the code that is known to work on this exact silicon,
 and it removes the remaining guesswork about data-line mode and dummy cycles.
+
+## Round 51: PSRAM array access works - the read dummy was wrong
+
+The read dummy was the whole problem. Writing a repeating pattern and reading
+it back with a **sweep of the `USER1` dummy-cycle field** (`psram_xact` passes
+cycles, not bits):
+
+```
+d26=0xffffffff/0xaaaaaaaa   d34=0xffffffff/0xaaaaaaaa
+d42=0xaaaaffff/0xaaaaaaaa   d50=0xaaaaaaaa/0xaaaaaaaa   <- aligned
+d58=0xaaaaaaaa/0xaaaaaaaa   d66=0xffffffff/0xaaaaaaaa
+```
+
+So the data phase needs **50 cycles of dummy** at the slow command clock
+(MPLL/20), i.e. roughly double the 25-26 the reference has at full speed - the
+chip's latency is constant in *time*, so the cycle count scales with the clock.
+With `dummy = 50`:
+
+```
+pattern read 0xaaaaaaaa/0xaaaaaaaa      (write verified through the array!)
+```
+
+This also means the writes were landing all along; only the read sampling was
+off, which is why everything looked like "writes dropped, reads synthetic".
+
+Wired in:
+
+* `psram_tune_read()` uses 50 cycles at the slow clock and switches to 25 after
+  the bus clock goes to full speed,
+* the word/pattern test reads use 50.
+
+Remaining in the tune: `tune: low-clock reference failed` still appears even
+though the 4-word pattern verifies, so the 32-word reference comparison needs the
+first mismatching word printed - the 128-byte reference spans two 16-word
+command transactions and one of them is probably sampled differently.
+
+Next round: print the first mismatching word in `psram_tune_read()`, fix the
+chunking, and then let the tuning pick the final phase/tap; after that the MMU
+map, the payload load and `booti`.

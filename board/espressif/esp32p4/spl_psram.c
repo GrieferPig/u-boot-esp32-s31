@@ -530,6 +530,9 @@ static void psram_opi_dtr_mode(void)
 	setbits_le32((void *)P4_MSPI_S_DDR, P4_FMEM_DDR_EN);
 }
 
+/* Bytes per clock cycle in the data phase (DDR: 4 for 16 lines). */
+static u32 psram_dbyte = 1;
+
 static int psram_xact(u16 cmd, u32 addr, u32 *tx, u32 tx_bits,
 		      u32 *rx, u32 rx_bits, u32 dummy)
 {
@@ -546,7 +549,7 @@ static int psram_xact(u16 cmd, u32 addr, u32 *tx, u32 tx_bits,
 	user = ((32 - 1) << P4_USR_ADDR_BITLEN_S);
 	if (dummy)
 		user |= (dummy - 1) & 0x3f;
-	writel(user, (void *)P4_MSPI_S_USER1);
+	writel(user | (psram_dbyte << 6), (void *)P4_MSPI_S_USER1);
 
 	writel(addr, (void *)P4_MSPI_S_ADDR);
 	setbits_le32((void *)P4_MSPI_S_CACHE_FCTRL, P4_CACHE_USR_ADDR_4BYTE);
@@ -900,6 +903,9 @@ static void psram_tune_pins(u32 phase, u32 tap)
 			data << 4);
 }
 
+/* Read dummy in cycles depends on the clock: 50 at MPLL/20, 25 at full speed. */
+static u32 psram_tune_dummy = 50;
+
 static int psram_tune_read(const u32 *reference)
 {
 	u32 readback[16];
@@ -907,7 +913,7 @@ static int psram_tune_read(const u32 *reference)
 
 	for (offset = 0; offset < P4_TUNE_WORDS; offset += 16) {
 		psram_xact(0x0000, P4_TUNE_ADDR + offset * 4, NULL, 0, readback,
-			   512, P4_TUNE_RD_DUMMY);
+			   512, psram_tune_dummy);
 		for (i = 0; i < 16; i++)
 			if (readback[i] != reference[offset + i])
 				return 0;
@@ -925,10 +931,34 @@ static void psram_word_test(void)
 {
 	u32 w = 0x1234abcd, r = 0, r2 = 0;
 
+	{
+		u32 pat[4] = { 0xaaaaaaaa, 0xaaaaaaaa, 0xaaaaaaaa,
+			       0xaaaaaaaa };
+		u32 rb[4];
+
+		psram_xact(0x8080, 0x80, pat, 128, NULL, 0,
+			   P4_PSRAM_WR_DUMMY);
+		{
+			static const u32 dummies[] = { 50 };
+
+			for (w = 0; w < ARRAY_SIZE(dummies); w++) {
+				psram_xact(0x0000, 0x80, NULL, 0, rb, 128,
+					   dummies[w]);
+				p4_spl_early_puts(" d");
+				p4_spl_early_hex(dummies[w]);
+				p4_spl_early_puts("=");
+				p4_spl_early_hex(rb[0]);
+				p4_spl_early_puts("/");
+				p4_spl_early_hex(rb[1]);
+			}
+			p4_spl_early_puts("\n");
+		}
+	}
+
 	psram_xact(0x8080, 0x80, &w, 32, NULL, 0, P4_PSRAM_WR_DUMMY);
-	psram_xact(0x0000, 0x80, NULL, 0, &r, 32, P4_PSRAM_RD_DUMMY);
-	psram_xact(0xa0a0, 0x84, &w, 32, NULL, 0, P4_PSRAM_WR_DUMMY);
-	psram_xact(0x2020, 0x84, NULL, 0, &r2, 32, P4_PSRAM_RD_DUMMY);
+	psram_xact(0x0000, 0x80, NULL, 0, &r, 32, 50);
+	psram_xact(0x8080, 0x84, &w, 32, NULL, 0, P4_PSRAM_WR_DUMMY);
+	psram_xact(0x0000, 0x84, NULL, 0, &r2, 32, 50);
 
 	p4_spl_early_puts("wordtest wrote ");
 	p4_spl_early_hex(w);
@@ -965,6 +995,7 @@ static int psram_timing_tune(void)
 	p4_spl_early_puts("tune: reference ok");
 
 	writel(0x00010001u, (void *)(P4_MSPI2_BASE + 0x14));
+	psram_tune_dummy = 25;
 	for (phase = 0; phase < 4; phase++) {
 		psram_tune_pins(phase, 15);
 		if (psram_tune_read(reference)) {
