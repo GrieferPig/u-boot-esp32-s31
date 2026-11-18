@@ -613,3 +613,36 @@ Notes for the next round:
 - `CONFIG_USE_BOOTCOMMAND=y` with the echo command means the prompt never tries
   to boot anything; the real `booti` path (kernel at 0x48000000, DT at
   0x48f00000 in PSRAM) still needs the PSRAM window and a loader step.
+
+## Round 23: the board still resets ~0.3 s after the prompt
+
+The SPL->U-Boot chain reaches `esp32p4>` reliably, but the board then resets
+about every 0.6 s (22 ROM banners and 20 prompts in a 14 s capture). Findings:
+
+- Watchdog register map confirmed from IDF
+  (`components/soc/esp32p4/register/hw_ver3/soc/lp_wdt_*`):
+  `LP_WDT @0x50116000`, CONFIG0 `0x00` (`wdt_en` bit 31, `flashboot_mod_en`
+  bit 14), CONFIG1..4 `0x04..0x10`, FEED `0x14`, WPROTECT `0x18`,
+  SWD_CONFIG `0x1c` (`swd_auto_feed_en` bit 18, `swd_feed` bit 31,
+  `swd_disable` bit 30), SWD_WPROTECT `0x20`; key `0x50d83aa1`.
+- The SPL already uses the right offsets and key, and JTAG confirmed
+  `CONFIG0 == 0` (RWDT off) and both TIMG MWDTs off (`0x500c2048`,
+  `0x500c3048` are 0).
+- IDF's own recipe for the super watchdog is auto-feed, not disable:
+  `bootloader_esp32p4.c: bootloader_super_wdt_auto_feed()` = write key to
+  SWD_WPROTECT, `REG_SET_BIT(SWD_CONFIG, SWD_AUTO_FEED_EN)`, clear the key.
+  Implemented in `board.c: p4_wdt_off()` (called from `board_late_init`) - the
+  resets continue.
+- Feeding both RWDT and SWDT from the serial polling path did not help either
+  (that hook was removed again).
+- Halting the CPU with JTAG for 7 s produced no "hart unexpectedly reset",
+  which suggests the reset is watchdog-driven (watchdogs pause under debug)
+  rather than a software `reset_cpu()` (`reset_cpu()` would print
+  "resetting ...", and that never appears after the prompt).
+
+So there is a watchdog we have not located yet - OpenOCD reports both
+"Reset cause (18) Super Watchdog" and "(7) HP WDT resets system". Next round:
+dump the PMU/HP_SYS blocks (0x50115000, 0x500e6000) and the remaining timer
+groups for an enabled watchdog, and compare against an IDF boot where the
+prompt stays alive. `esp32p4>` itself is reproducible, which is the important
+part - the reset is the last obstacle to an idle prompt.
