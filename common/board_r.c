@@ -69,6 +69,22 @@
 
 DECLARE_GLOBAL_DATA_PTR;
 
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+#include <asm/io.h>
+#include <asm/io.h>
+static void p4_putc_wait(char c)
+{
+	/* UART0: wait until the TX FIFO has room, otherwise characters drop. */
+	while (((readl((void *)0x500ca01c) >> 16) & 0x7f) > 100)
+		;
+	writel((u32)c, (void *)0x500ca000);
+}
+static void p4_tick(char c) { p4_putc_wait(c); }
+#else
+#define p4_tick(c) do { } while (0)
+#endif
+
+
 
 
 
@@ -210,13 +226,16 @@ static int initr_malloc(void)
 	 * (0x4ff40000 upwards) is free once the hand-over is done, so the heap
 	 * lives there instead of below a relocated copy.
 	 */
-	start = 0x4ff40000;
+	start = 0x4ff90000;
 #else
 	start = gd->relocaddr - TOTAL_MALLOC_LEN;
 #endif
+	p4_tick('1');
 	gd_set_malloc_start(start);
+	p4_tick('2');
 	mem_malloc_init((ulong)map_sysmem(start, TOTAL_MALLOC_LEN),
 			TOTAL_MALLOC_LEN);
+	p4_tick('3');
 	return 0;
 }
 
