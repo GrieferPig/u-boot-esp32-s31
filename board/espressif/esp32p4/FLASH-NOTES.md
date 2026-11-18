@@ -366,3 +366,37 @@ arithmetic (`TOTAL_MALLOC_LEN` may be larger than `CONFIG_SYS_MALLOC_LEN`).
 Resolved symbols for reference: `4ff08fe6 initr_malloc`, `4ff09028
 initr_barrier`, `4ff0901c initr_reloc_global_data`, `4ff0900c initr_caches`,
 `4ff09012 event_init`.
+
+## Round 17: state of the SRAM chain
+
+The SPL -> U-Boot hand-over is stable and reproducible with the tracing removed:
+
+```
+jump: entry 0x4ff00000 dtb 0x00000000
+
+U-Boot 2024.07-... (Nov 18 2026)
+
+DRAM:  768 KiB
+```
+
+U-Boot continues into `board_init_r` and runs `init_sequence_r` up to
+`initr_malloc`. Measurements taken with temporary prints:
+
+- `TOTAL_MALLOC_LEN = 0x2f000` (192 KiB), not just `CONFIG_SYS_MALLOC_LEN`.
+- The heap is now placed at `0x4ff40000`, the SRAM the SPL used and that is
+  free after the hand-over (`start = 0x4ff40000` in `initr_malloc` for
+  `CONFIG_ESP32P4_SRAM_ONLY`); it ends at `0x4ff6f000`, well inside SRAM.
+- The `DRAM:  768 KiB` line and the tracing showed that everything before
+  `initr_malloc` succeeds, including `initr_reloc_global_data`, `initr_caches`
+  and `event_init`.
+
+Still to solve: after `initr_malloc` the board resets without an exception dump,
+i.e. the next steps (DM/console init, `initr_of_live`, `initr_env`) fail before
+the console is up. Note `u-boot.bin` already contains the device tree
+(`u-boot-dtb.bin` and `u-boot.bin` are byte-identical), so the appended DT at
+`_end` is intact.
+
+Ideas for the next round: trace `init_sequence_r` the same way we traced
+`init_sequence_f` (the tracer is easy to re-add in `lib/initcall.c`), and check
+DM init specifically - `initr_dm` needs the DT to probe the UART, and a failure
+there would explain the silence.
