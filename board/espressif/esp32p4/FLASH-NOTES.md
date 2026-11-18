@@ -765,3 +765,35 @@ copy flash 0x900000 -> PSRAM 0x48f00000   (DT)
 copy flash 0x200000 -> PSRAM 0x48000000   (kernel)
 booti 0x48000000 - 0x48f00000
 ```
+
+## Round 27: PSRAM MMU programming from the SPL resets the board
+
+Tried extending the PSRAM window from the SPL: added `p4_spl_psram_map()` in
+`spl_nor.c` (same ITEM/INDEX protocol as flash, on the MSPI2 "S" view) and
+called it right after `p4_spl_psram_init()`:
+
+- S-side page size set to 64 KiB in `0x5008e384`,
+- 256 entries cleared, then `i | SOC_MMU_PSRAM_VALID | SOC_MMU_ACCESS_PSRAM`,
+- `ROM_CACHE_INVALIDATE_ALL(CACHE_MAP_L1_ALL)` afterwards.
+
+The SPL printed `spl: psram mapped`, but U-Boot never came up again: the board
+reset-looped (18 ROM banners) and the prompt never appeared. Reverting the
+change restored the working state immediately (0 banners, prompt, and
+`md 0x48000000` still reads the SPL's pattern).
+
+Checked against IDF afterwards:
+
+- `mmu_ll.h` for the P4 uses `SPI_MEM_S_MMU_ITEM_INDEX/CONTENT_REG` =
+  `DR_REG_PSRAM_MSPI0_BASE + 0x380/0x37c`, and
+  `DR_REG_PSRAM_MSPI0_BASE = DR_REG_HPPERIPH0_BASE + 0x8E000` = **0x5008e000**,
+  so the register base we used was right.
+- `mmu_hal_init()` calls `ROM_Boot_Cache_Init()` (only when
+  `ESP_ROM_RAM_APP_NEEDS_MMU_INIT`), `mmu_ll_set_page_size(0, ...)` for the
+  **flash** MMU first, then `mmu_hal_unmap_all()` which unmaps both MMUs, and
+  only later maps PSRAM through `mmu_hal_map_region()` after the PSRAM cache
+  has been initialised.
+
+So the next attempt should follow that order: set the page size through MMU id 0
+(flash), unmap both tables, and only map the PSRAM window after the PSRAM cache
+is up (that is, after the MSPI2 cache config written by `psram: cmds`), and
+re-check the S-side `MMU_POWER_CTRL` semantics before the first entry write.
