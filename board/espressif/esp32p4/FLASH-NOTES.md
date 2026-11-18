@@ -1070,3 +1070,76 @@ chain and loading Linux out of flash into PSRAM.
 State left behind: the board restored to the reference chain, our chain builds
 and boots to the prompt (clkrst 0x38 no longer written, U-Boot writes the 256
 PSRAM MMU entries, no test reads that hang the board).
+
+## Round 35: the P4 PSRAM is HEX (16-bit) and needs real transactions
+
+Studied IDF's driver
+(`components/esp_psram/device/esp_psram_impl_ap_hex.c`, 605 lines) - the P4's
+in-package PSRAM is **hex (16 data line) DDR PSRAM**, not quad/oct like the older
+chips. That is why replaying captured register values could never work: the chip
+needs its **mode registers written over the bus**, and nothing we do touches them.
+
+The good news: the transactions are issued through **ROM functions**, so we do
+not have to implement the SPI engine:
+
+```
+esp_rom_spi_set_op_mode = 0x4fc00110
+esp_rom_spi_cmd_config  = 0x4fc00108
+esp_rom_spi_cmd_start   = 0x4fc0010c
+```
+
+### Constants (from esp_psram_impl_ap_hex.c)
+
+```
+AP_HEX_PSRAM_SYNC_READ    0x0000    AP_HEX_PSRAM_SYNC_WRITE   0x8080
+AP_HEX_PSRAM_BURST_READ   0x2020    AP_HEX_PSRAM_BURST_WRITE  0xA0A0
+AP_HEX_PSRAM_REG_READ     0x4040    AP_HEX_PSRAM_REG_WRITE    0xC0C0
+AP_HEX_PSRAM_RD_CMD_BITLEN 16   AP_HEX_PSRAM_WR_CMD_BITLEN 16
+AP_HEX_PSRAM_ADDR_BITLEN   32
+AP_HEX_PSRAM_CS_SETUP_TIME 4    AP_HEX_PSRAM_CS_HOLD_TIME 4
+AP_HEX_PSRAM_CS_HOLD_DELAY 3    AP_HEX_PSRAM_VENDOR_ID_AP 0xD
+```
+
+Timing set (200 MHz class): `RD_DUMMY = 2*(14-1)`, `RD_REG_DUMMY = 2*(7-1)`,
+`WR_DUMMY = 2*(7-1)`, `RD_LATENCY = 4`, `WR_LATENCY = 1`, MPLL default 400 MHz.
+
+Mode register bits used: `mr0.lt = 1`, `mr0.read_latency = RD_LATENCY`,
+`mr0.drive_str = 0`, `mr4.wr_latency = WR_LATENCY`, `mr8.bl = 3`, `mr8.bt = 0`,
+`mr8.rbx = 1`, `mr8.x16 = 1` (x16 = hex mode; 8-line mode would clear it).
+
+### Sequence (`esp_psram_impl_enable`)
+
+1. MPLL acquire + set to `MPLL_DEFAULT_FREQ` (400 MHz), or reuse the MPLL our
+   SPL already starts.
+2. `PERIPH_RCC` on MSPI2: enable module clock, reset it, select MPLL as PSRAM
+   clock source (also for MSPI3).
+3. `mspi_timing_ll_pin_drv_set(2)`, `mspi_timing_ll_enable_dqs(true)`.
+4. CS setup/hold/hold-delay; `enable_split_trans(true)`; `set_page_size(2048)`.
+5. Slow bus clock: `set_bus_clock(mspi, MPLL/SPIRAM_SPEED)`; `enable_dll(true)`.
+6. **Mode register init over MSPI3** (`s_init_psram_mode_reg`): read MR0+MR1
+   (addr 0), read MR4+MR8 (addr 4), modify, write MR0 (addr 0), write MR4
+   (addr 4), read MR8 (addr 8), modify, write MR8.
+7. `s_check_psram_connected()` (reads MR and compares known bits), read MR1
+   vendor id (expect 0xD AP or 0x1A UnilC), read MR2 density (0x7 = 32 MB).
+8. `s_config_mspi_for_psram()`: wr cmd `SYNC_WRITE`, rd cmd `SYNC_READ`,
+   4-byte address, RD/WR dummy, variable dummy, DDR mode on, oct + hex line mode
+   on, AXI access + wr/rd splice on.
+9. `mspi_timing_psram_tuning()` - the timing tuning step; if that is too much to
+   port, run the bus at a low clock where the defaults hold.
+
+### Transaction shape
+
+```c
+esp_rom_spi_set_op_mode(mspi, ESP_ROM_SPIFLASH_OPI_DTR_MODE);
+esp_rom_spi_cmd_t conf = { .cmd = cmd, .cmdBitLen = cmd_bitlen,
+                           .addr = &addr, .addrBitLen = addr_bitlen,
+                           .txData = mosi, .txDataBitLen = mosi_bitlen,
+                           .rxData = miso, .rxDataBitLen = miso_bitlen,
+                           .dummyBitLen = dummy_bits };
+esp_rom_spi_cmd_config(mspi, &conf);
+esp_rom_spi_cmd_start(mspi, miso, miso_bitlen / 8, 1 << 1 /* cs1 */, false);
+```
+
+First milestone for the next round: from the SPL, read MR1 over MSPI3 and print
+the vendor id - if that returns `0xD`, we are talking to the chip and the rest of
+the init is mechanical.
