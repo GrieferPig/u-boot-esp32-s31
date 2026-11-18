@@ -721,7 +721,7 @@ static void psram_axi_config(void)
 	writel(0x0000u | ((16 - 1) << 28), (void *)P4_SRAM_DRD_CMD);
 
 	sctrl = P4_SCTRL_SADDR_4BYTE | P4_SCTRL_WR_DUMMY | P4_SCTRL_RD_DUMMY |
-		P4_SCTRL_RCMD |
+		P4_SCTRL_RCMD | P4_SCTRL_HEX |
 		((u32)(P4_PSRAM_CACHE_RD_DUMMY - 1) << P4_SCTRL_RDUMMY_S) |
 		((u32)(32 - 1) << P4_SCTRL_ADDR_BITLEN_S) |
 		P4_SCTRL_WCMD |

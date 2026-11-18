@@ -1907,3 +1907,34 @@ sequence verbatim: `esp_psram_extram_cache_enable()` plus the
 `mspi_ll_enable_bus_clock`/`mspi_ll_reset_register`/`mspi_ll_enable_psram_cache`
 calls and `Cache_Start_Dcache()` (ROM 0x4fc0...) in the order IDF performs them -
 something in that sequence is what actually connects the AXI port to the PSRAM.
+
+## Round 57: read IDF's own AXI setup, the one missing bit changes nothing
+
+Read `s_config_mspi_for_psram()` in `esp_psram_impl_ap_hex.c` and checked every
+call against our code. The only piece we did not have is
+`psram_ctrlr_ll_enable_oct_line_mode()`, which sets **`CACHE_SCTRL.SRAM_OCT`
+(bit 21)** plus `SRAM_CMD` bits 18..21 - and bit 21 is exactly the fourth
+difference the round-48 register diff found (reference `0x02f7c679`, ours
+`0x02d7c679`). Earlier attempts at that bit also set the hex bits 26/27, which is
+what caused the reset loop; setting **only** bit 21 is safe.
+
+Result with only bit 21 set: identical
+
+```
+cache: rd dummy 0x00000000
+cache: write->chip 0xaaaaeaaa chip->read 0x2b8aaaaa
+```
+
+So the AXI/cache path is still not connected to the PSRAM even with every
+documented field matching IDF's sequence and the reference's live state. The one
+structural difference left is the **MMU way**: our `p4_psram_map()` writes the
+PSRAM window through `MMU_ITEM_CONTENT`/`MMU_ITEM_INDEX` (0x37c/0x380) with
+VALID | ACCESS_PSRAM, but the AXI port may resolve `0x48xxxxxx` through a
+different MMU "way"/ID than the command path does, which would explain both
+symptoms exactly: an AXI write to a page that has no PSRAM mapping is dropped,
+and a read returns whatever that way maps instead.
+
+Next round: check the P4 MSPI2 MMU layout (`SPI_MEM_S_MMU_ITEM_*` plus the
+MMU-way select registers around 0x370..0x39c) and confirm which way the AXI port
+uses - and whether the reference has extra entries/ways configured that our
+single-entry-per-page loop does not write.
