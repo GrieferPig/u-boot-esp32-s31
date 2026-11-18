@@ -835,6 +835,24 @@ static void psram_bulk_test(void)
 		p4_spl_early_puts(n == sz / 4 ? "=ok" : "=BAD");
 	}
 	p4_spl_early_puts("\n");
+	/* Persistence probe: is the previous boot's pattern anywhere near? */
+	p4_spl_early_puts(" stale");
+	p4_spl_early_puts(" a=");
+	p4_spl_early_hex(readl((void *)0x49f00000));
+	p4_spl_early_puts(" b=");
+	p4_spl_early_hex(readl((void *)0x49effffc));
+	p4_spl_early_puts(" c=");
+	p4_spl_early_hex(readl((void *)0x49f00004));
+	p4_spl_early_puts(" d=");
+	p4_spl_early_hex(readl((void *)0x48080000));
+	p4_spl_early_puts("\n");
+
+	writel(0xcafebabe, (void *)0x49f00000);
+	writel(0xdead1234, (void *)0x48080000);
+	p4_spl_early_puts(" wrote cafebabe@49f00000 dead1234@48080000 now ");
+	p4_spl_early_hex(readl((void *)0x49f00000));
+	p4_spl_early_hex(readl((void *)0x48080000));
+
 }
 
 /* Map the PSRAM window through the MSPI2 "S" MMU (64 KiB pages). */

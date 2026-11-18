@@ -1562,3 +1562,40 @@ Conclusion: **reads work, writes are dropped**. The write path to fix:
 Next round: read a known PSRAM location that the *previous* boot wrote (e.g. write
 a pattern, power-cycle, read it back) to confirm the write path, then fix the
 write configuration - that is the last piece before `booti`.
+
+## Round 47: writes are dropped and reads look synthetic
+
+Persistence probe in the SPL: write `0xcafebabe` at `0x49f00000` and
+`0xdead1234` at `0x48080000`, then reboot and read the same addresses back
+*before* writing anything:
+
+```
+boot A: stale a=0xca2aca2a b=0x00000000 c=0xca2aca2a d=0xaaeaeaaa
+boot B: stale a=0xca2aca2a b=0x00000000 c=0xca2aca2a d=0xaaeaeaaa
+```
+
+Identical across power cycles, so:
+
+* the values written in the previous boot are **not** there -> writes never reach
+  the chip,
+* the values that *are* read are constant bit patterns (`0xca2aca2a`,
+  `0xaaeaeaaa`) unrelated to anything we wrote -> the read path is very likely
+  synthetic as well (a fixed filler), not real PSRAM content.
+
+That also explains the whole history: `md 0x48000000` returning
+`00000000 01010101 ...` was the cache serving our own writes, and every "PSRAM
+works" result was a same-address write/read pair.
+
+Verified the write-side register layout against IDF's `psram_ctrlr_ll` and it
+matches what we program (`SRAM_DWR_CMD`: value [15:0], bitlen [31:28];
+`CACHE_SCTRL`: SADDR_4BYTE 0, WR_DUMMY 3, RD_DUMMY 4, RCMD 5, RDUMMY [11:6],
+ADDR_BITLEN [19:14], WCMD 20, OCT 21, WDUMMY [27:22]; `SRAM_CMD` hex bits 26/27;
+`SMEM_DDR` DDR_EN bit0 / VAR_DUMMY bit1). So the values are right but the effect
+is not - something *else* gates the data path.
+
+Next round: with the reference chain running (Linux using the framebuffer at
+`0x49000000`, i.e. PSRAM genuinely working), dump MSPI2 again across the whole
+register file - `0x00..0x60`, `0x100..0x1b0`, `0xd0..0xe0` - and diff against our
+chain, this time *including* the fields we have not looked at yet
+(`CACHE_SCTRL` upper bits, `AES`/`DECRYPT` control, `INT_*`, `DLL_*`). The data
+path is clearly gated by something we have not programmed.
