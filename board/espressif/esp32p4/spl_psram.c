@@ -861,7 +861,26 @@ static void psram_cache_check(void)
 {
 	u32 r1 = 0, r2 = 0;
 
-	/* cache write -> flush -> is it visible through the command path? */
+	{
+		u32 d, found = 0;
+
+		for (d = 8; d <= 63; d++) {
+			u32 v = 0x11223344 + d;
+
+			clrsetbits_le32((void *)P4_CACHE_SCTRL, 0x3fu << 6, d << 6);
+			writel(v, (void *)0x48100000);
+			psram_dcache_flush((void *)0x48100000, 0x1000);
+			psram_xact(0x0000, 0x100000, NULL, 0, &r1, 32, 46);
+			if (r1 == v) {
+				found = d;
+				break;
+			}
+		}
+		p4_spl_early_puts("cache: rd dummy ");
+		p4_spl_early_hex(found);
+		p4_spl_early_puts("\n");
+	}
+
 	writel(0x11223344, (void *)0x48100000);
 	psram_dcache_flush((void *)0x48100000, 0x1000);
 	psram_xact(0x0000, 0x100000, NULL, 0, &r1, 32, 46);

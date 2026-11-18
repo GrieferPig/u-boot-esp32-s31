@@ -1875,3 +1875,35 @@ latency** (`SRAME_RDUMMY_CYCLELEN`, currently 45) and the AXI-side parameters th
 same way the command path was swept - write a pattern with `writel`, flush, and
 check it through the command path, sweeping one field at a time until the cache
 write appears in the chip.
+
+## Round 56: no cache read latency makes the cache path work
+
+Swept the `CACHE_SCTRL` read latency (`SRAME_RDUMMY_CYCLELEN`, bits [11:6]) from
+8 to 63, and for each value did `writel(pattern)` at `0x48100000`, flushed the
+data cache through the ROM helper, and read the same location back through the
+**command path** (which is known good):
+
+```
+cache: rd dummy 0x00000000
+```
+
+Not a single value propagated the write. So the cache/AXI write path is not
+gated by the read latency at all - the write side is dead independently of how
+the reads sample.
+
+Attempted to diff the HP_SYS clock/reset registers as the next step, but the
+OpenOCD dump of `0x50117000` now fails with *"Failed to read memory via system
+bus"* whenever the target is halted inside our SPL, so that comparison needs the
+value read from the target's own code (or a dump taken while the reference chain
+is running) rather than by halting our chain.
+
+### Where this leaves the cache path
+
+Everything the registers can say has been matched (the full MSPI2 file differs in
+four places, all accounted for), the command path is verified working end to end,
+and the cache path still neither writes to nor fills from the chip. The next
+approach should stop diffing registers and instead port IDF's own cache bring-up
+sequence verbatim: `esp_psram_extram_cache_enable()` plus the
+`mspi_ll_enable_bus_clock`/`mspi_ll_reset_register`/`mspi_ll_enable_psram_cache`
+calls and `Cache_Start_Dcache()` (ROM 0x4fc0...) in the order IDF performs them -
+something in that sequence is what actually connects the AXI port to the PSRAM.
