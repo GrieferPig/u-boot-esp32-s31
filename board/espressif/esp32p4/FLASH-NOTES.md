@@ -400,3 +400,39 @@ Ideas for the next round: trace `init_sequence_r` the same way we traced
 `init_sequence_f` (the tracer is easy to re-add in `lib/initcall.c`), and check
 DM init specifically - `initr_dm` needs the DT to probe the UART, and a failure
 there would explain the silence.
+
+## Round 18: U-Boot's second init sequence, traced
+
+Two lessons about tracing, both now handled in `lib/initcall.c`:
+
+- printing the address before *and* a `.` after each call separates "called" from
+  "returned";
+- the tick must watch the UART TX FIFO (`0x500ca01c`, TXFIFO count in bits
+  21:16) - a plain `writel` drops characters and made the trace look truncated.
+
+The trace (SRAM build) now reads:
+
+```
+U-Boot 2024.07-...
+DRAM:  768 KiB
+. 4ff08e1c. 4ff08aa2. 4ff089da. ... . 4ff08e70. 4ff08e74. 4ff08fb4. 4ff08fa4.
+4ff08e84. 4ff08fc0. 4ff08f76 123
+```
+
+`123` are the ticks inside `initr_malloc`, so that function's body runs to
+completion (`gd_set_malloc_start`, `mem_malloc_init(0x4ff90000, 0x2f000)`).
+
+The `.` that should follow it never appears, and the next initcall's address is
+never printed, so the stop is in `initr_malloc`'s return path / the loop right
+after it. `initr_of_live`, `initr_dm_devices`, `initr_bootstage`,
+`initr_announce` and `initr_binman` are all `li a0,0; ret` stubs in this build,
+so they cannot be the faulting code.
+
+Also confirmed this round: `CONFIG_LOG` is off (so `debug()` is a no-op),
+`CONFIG_BOOTSTAGE` is off, and `u-boot.bin == u-boot-dtb.bin` (the DT is
+appended at `_end`).
+
+Next: disassemble the current `initr_malloc` (offsets shift between builds) and
+tick just before its `ret` and inside the loop after the call; if the return
+itself is the problem, dump the stack around `gd->start_addr_sp` (0x4ff8f8b0)
+over JTAG while halted at the tick.
