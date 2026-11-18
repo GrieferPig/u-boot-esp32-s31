@@ -194,6 +194,15 @@ __weak __attribute__((aligned(4))) void harts_early_init(void)
 {
 }
 
+/*
+ * Default watchdog feed; a board with a ROM-armed watchdog overrides it. The
+ * serial driver calls it from its poll loop, which is the only regular
+ * activity U-Boot has while idling at the prompt.
+ */
+__weak void hw_watchdog_reset(void)
+{
+}
+
 #if !CONFIG_IS_ENABLED(SYSRESET)
 void reset_cpu(void)
 {

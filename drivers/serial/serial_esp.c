@@ -26,14 +26,10 @@
 #else
 #include <asm/arch-esp32s31/soc/uart_reg.h>
 #endif
-#if defined(CONFIG_ESP32P4_SRAM_ONLY)
-void p4_wdt_feed(void);
-#define P4_WDT_FEED()	do { p4_wdt_feed(); } while (0)
-#else
-#define P4_WDT_FEED()	do { } while (0)
-#endif
-
 DECLARE_GLOBAL_DATA_PTR;
+
+/* Provided by the board when CONFIG_HW_WATCHDOG is enabled. */
+void hw_watchdog_reset(void);
 
 /**
  * The UART_REG_UPDATE_REG register offset is far from the uart base
@@ -186,24 +182,13 @@ static int esp_serial_putc(struct udevice *dev, const char ch)
 }
 
 
-#if defined(CONFIG_ESP32P4_SRAM_ONLY)
-/* Heartbeat: prove that the console is still being polled. */
-static void p4_hb_tick(void)
-{
-	static u32 count;
-
-	if (++count % 2000 == 0)
-		P4_WDT_FEED();
-	if (count % 20000 == 0)
-		writel('.', (void *)0x500ca000);
-}
-#else
-#define p4_hb_tick()	do { } while (0)
-#endif
-
 static int esp_serial_pending(struct udevice *dev, bool input)
 {
-	p4_hb_tick();
+	/*
+	 * The console polls this while idling, which is the only regular
+	 * activity U-Boot has at the prompt, so feed the ROM watchdogs here.
+	 */
+	hw_watchdog_reset();
 	struct esp_uart_plat *plat = dev_get_plat(dev);
 	struct uart_esp *regs = plat->regs;
 
