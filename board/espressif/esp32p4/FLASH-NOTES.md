@@ -2224,3 +2224,34 @@ MR8 and read them back immediately, then compare with the values the part report
 on a clean boot. The suspect is the write path for MR4/MR8 - `mr4` coming back as
 `0x8d48` means bit 6 is set, i.e. a write latency of 2 instead of 1, which points
 at the value being composed wrongly or at a stray write landing in MR4.
+
+## Round 66: the mode-register reads were always bogus, and that is the root cause
+
+Instrumented `psram_mode_reg_init()`. What it showed is the key insight:
+
+* **every register read returns `0x8d28`** - the probe's six reads of MR0..MR5 all
+  come back with MR0's content, and `psram_xact()` only writes the low 16 bits of
+  the 32-bit destination, so the upper half keeps whatever was there before. The
+  register *address phase* is not taking effect for our 16-bit reads.
+* because of that, the old code's `read-modify-write` of MR4/MR8 wrote back a
+  **corrupted** value (`mr4` became `0x8d48`, i.e. wr_latency 2, and `mr8` lost its
+  x16 bit). That is exactly the corruption seen in round 65, and it explains why
+  the part sometimes came back in x8 mode with garbage data phases.
+
+Changes made:
+
+* **MR4/MR8 read-modify-write removed** - only MR0 is programmed now, and
+* **MR8 is written explicitly as `0x4b`** (`bl = 3` 16-byte burst, `bt = 0`,
+  `rbx = 1`, `x16 = 1`), because losing the x16 bit puts the part in x8 mode and
+  every 16-line data phase then returns garbage,
+* the AXI request is now **closed during the word test and tuning** and reopened
+  afterwards, since the AXI has priority on the shared MSPI.
+
+Still broken in the current state: array reads return the *last value in the read
+data register* (e.g. `0x4b` right after the MR8 write) instead of chip data, so
+`psram_word_test()` and the tuning fail. Since the register reads show the same
+symptom (address phase ignored), the next step is to fix `psram_xact()`'s address
+handling for reads - both the register path and the array path fail the same way,
+which points at a single bug in how the address is presented (register write,
+`USR` bit ordering or the `USER` address-bitlen field) rather than at the PSRAM
+timing.

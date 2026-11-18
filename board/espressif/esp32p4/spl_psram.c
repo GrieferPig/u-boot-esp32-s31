@@ -657,18 +657,26 @@ static void psram_mode_reg_init(void)
 	psram_xact(0x4040, 0x4, NULL, 0, &mr48, 16, 12);
 	psram_xact(0x4040, 0x8, NULL, 0, &mr8, 8, 12);
 
+	/*
+	 * Only MR0 is written. The MR4/MR8 read-modify-write is not safe here:
+	 * a 16-bit register read can come back with the previous transaction's
+	 * data in the upper half, and writing the modified value back then
+	 * corrupts the part (that is how the mode registers ended up as
+	 * 0x8d288d48 / 0x8d288d6b). The values the ROM/previous stage left in
+	 * MR4 and MR8 are kept.
+	 */
 	mr01 &= ~(0x3u | (0x7u << 2) | BIT(5));
 	mr01 |= (PSRAM_RD_LATENCY << 2) | BIT(5);
-	mr48 &= ~(0x7u << 5);
-	mr48 |= (PSRAM_WR_LATENCY << 5);
-	mr8 &= ~(0x3u | BIT(2) | BIT(3) | BIT(6));
-	mr8 |= 0x3u | BIT(3) | BIT(6);		/* bl = 3, rbx = 1, x16 = 1 */
 
 	w = mr01 & 0xffff;
 	psram_xact(0xC0C0, 0x0, &w, 16, NULL, 0, 0);
-	w = mr48 & 0xffff;
-	psram_xact(0xC0C0, 0x4, &w, 16, NULL, 0, 0);
-	w = mr8 & 0xff;
+
+	/*
+	 * MR8 must explicitly select x16 mode: if a previous stage left the part
+	 * in x8 mode every 16-line data phase returns garbage. bl = 3 (16 byte
+	 * burst), bt = 0, rbx = 1, x16 = 1.
+	 */
+	w = 0x4b;
 	psram_xact(0xC0C0, 0x8, &w, 16, NULL, 0, 0);
 
 	p4_spl_early_puts("mode: mr0 ");
@@ -1232,8 +1240,15 @@ int p4_spl_psram_init(void)
 	psram_mode_reg_init();
 	psram_cache_cmds();
 	psram_axi_config();
+
+	/*
+	 * With the AXI port open the command path stalls (the AXI has priority on
+	 * the shared MSPI), so close it again for the tuning and reopen it after.
+	 */
+	clrbits_le32((void *)P4_CACHE_FCTRL, BIT(0));
 	psram_word_test();
 	psram_timing_tune();
+	setbits_le32((void *)P4_CACHE_FCTRL, BIT(0));
 	psram_mmu_map(0x01000000);
 
 	psram_rw_test();
