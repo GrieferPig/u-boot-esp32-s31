@@ -1995,3 +1995,37 @@ order of operations for `s_config_mspi_for_psram()`, `s_init_psram_mode_reg()`,
 and `Cache_Start_Dcache()`. The current hand-ported version has the registers
 right but the *order* wrong somewhere, and the driver is the only reliable
 oracle left.
+
+## Round 60: two more IDF steps, both break the boot
+
+Read IDF's `esp_psram_impl_enable()` and tried the two steps it performs that we
+did not:
+
+* `psram_ctrlr_ll_enable_dll(MSPI2/3, true)` -> `SMEM_TIMING_CALI` at
+  `MSPI2 + 0x190`, bit 0. Setting it before the mode registers puts the board
+  into a reset loop (26 banners).
+* invalidating the instruction cache for the PSRAM window after writing the MMU
+  entries (the S31 port does exactly this at the end of `psram_mmu_map()`), via
+  `Cache_Invalidate_Addr(ICACHE0, 0x48000000, 0x1000000)` -> reset loop as well.
+
+Both reverted, the SPL is back at the state where it boots U-Boot and the command
+path works.
+
+### What this tells us
+
+Our sequence sits in a **local optimum**: it boots, the command path is perfect
+over the whole 16 MB, and every additional step from IDF's sequence - the DLL
+calibration, the I-cache invalidate, the clock bits, the OCT/HEX line modes -
+takes the machine down. That is the signature of an ordering problem rather than
+a missing setting: IDF performs the same writes, but in a state our sequence never
+reaches (module clock enabled and reset through `PERIPH_RCC`, DLL on, CS timing
+set, split transaction on, slow clock, *then* mode registers, *then* the AXI
+config, *then* the tuning).
+
+So the next round should start the ground-up port as planned: a new
+`spl_psram_hex.c` that follows IDF's `esp_psram_impl_enable()` step for step
+(including `psram_ctrlr_ll_enable_module_clock` / `reset_module_clock` /
+`select_clk_source`, the DLL, CS timing, split transaction, page size, the slow
+clock, mode registers through MSPI3, the connection check, then
+`s_config_mspi_for_psram()` and `mspi_timing_psram_tuning()`), rather than
+layering more writes onto the hand-rolled sequence.
