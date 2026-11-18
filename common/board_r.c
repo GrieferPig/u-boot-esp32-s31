@@ -69,6 +69,10 @@
 
 DECLARE_GLOBAL_DATA_PTR;
 
+
+
+
+
 ulong monitor_flash_len;
 
 __weak int board_flash_wp_on(void)
@@ -202,10 +206,11 @@ static int initr_malloc(void)
 	 */
 #if defined(CONFIG_ESP32P4_SRAM_ONLY)
 	/*
-	 * U-Boot runs in place at CONFIG_TEXT_BASE (no relocation), so the heap
-	 * goes right above the image instead of below a relocated copy.
+	 * U-Boot runs in place at CONFIG_TEXT_BASE and the SRAM that the SPL used
+	 * (0x4ff40000 upwards) is free once the hand-over is done, so the heap
+	 * lives there instead of below a relocated copy.
 	 */
-	start = ALIGN(gd->relocaddr + gd->mon_len, 4096);
+	start = 0x4ff40000;
 #else
 	start = gd->relocaddr - TOTAL_MALLOC_LEN;
 #endif

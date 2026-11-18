@@ -52,27 +52,7 @@
 
 DECLARE_GLOBAL_DATA_PTR;
 
-#if defined(CONFIG_ESP32P4_SRAM_ONLY)
-#include <asm/io.h>
-static void p4_reloc_report(ulong a, ulong b, ulong c)
-{
-	static const char hex[] = "0123456789abcdef";
-	ulong vals[3];
-	int v, i;
 
-	vals[0] = a;
-	vals[1] = b;
-	vals[2] = c;
-	for (v = 0; v < 3; v++) {
-		writel(' ', (void *)0x500ca000);
-		for (i = 28; i >= 0; i -= 4)
-			writel(hex[(vals[v] >> i) & 0xf], (void *)0x500ca000);
-	}
-	writel(10, (void *)0x500ca000);
-}
-#else
-#define p4_reloc_report(a, b, c) do { } while (0)
-#endif
 
 
 /*
@@ -772,7 +752,6 @@ static int setup_reloc(void)
 #endif
 	}
 
-	p4_reloc_report(gd->relocaddr, gd->start_addr_sp, gd->mon_len);
 	memcpy(gd->new_gd, (char *)gd, sizeof(gd_t));
 
 	if (gd->flags & GD_FLG_SKIP_RELOC) {
