@@ -1143,3 +1143,44 @@ esp_rom_spi_cmd_start(mspi, miso, miso_bitlen / 8, 1 << 1 /* cs1 */, false);
 First milestone for the next round: from the SPL, read MR1 over MSPI3 and print
 the vendor id - if that returns `0xD`, we are talking to the chip and the rest of
 the init is mechanical.
+
+## Round 36: the transaction scaffolding already exists, only the transport is missing
+
+`spl_psram.c` already carries the hex PSRAM groundwork from an earlier round
+(the ROM SPI helpers at lines 72-90, `psram_transaction()`,
+`psram_mode_register_init()` with the MR0/MR4/MR8 latency programming), but:
+
+* `psram_mode_register_init()` is **never called** from `p4_spl_psram_init()`,
+* `psram_transaction()` is compiled out with `#ifndef P4_PSRAM_USE_ROM_OPI`,
+  and the reason is recorded right there:
+
+```c
+/*
+ * The ROM OPI helper spins forever on the P4 when driven from the SPL
+ * (esp_rom_spi_cmd_start never returns), so the transaction path below
+ * is disabled until the user-mode sequence is implemented locally.
+ */
+```
+
+So a previous round already tried the ROM route and hit the same wall: the ROM's
+`esp_rom_spi_cmd_start` waits on a "transaction done" condition that never comes
+when the SPL calls it.
+
+Naming the real task: the SPL needs its own **user-mode SPI transaction on
+MSPI3** - write `SPI_MEM_S_CTRL`, `USER`, `USER1` (16 bit command, 32 bit
+address, dummy), `USER2`, `MISO_DLEN`/`MOSI_DLEN`, push the command word into
+`SPI_MEM_S_W0`, then poll `SPI_MEM_S_CMD.USR` until it clears, the way
+`spi_mem_ll_usr_*` does in IDF. The register block is `0x5008f000`.
+
+Orders of work for the next round:
+
+1. Read `SPI_MEM_S_CMD`/`USER`/`USER1` on the **reference** chain (IDF loader
+   phase) to see the exact clock/CS timing state the working driver leaves,
+   since our replay may not cover the MSPI3 side.
+2. Implement `psram_txn_local()` and use it to read MR0|MR1 and check for
+   vendor id 0x0d - that is the "we are talking to the chip" milestone.
+3. Then wire `psram_mode_register_init()` in, re-run `psram_check()` and see
+   whether the pattern survives at an address past 0x48000100.
+
+Everything else (clkrst gate, MMU wiring, PMU state) is already in place, so this
+is the last mechanical piece before Linux can be loaded into PSRAM.
