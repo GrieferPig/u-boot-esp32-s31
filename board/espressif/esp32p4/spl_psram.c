@@ -2,18 +2,17 @@
 /*
  * ESP32-P4 PSRAM bring-up for the SPL.
  *
- * The board carries a 32 MB in-package AP hex (16-line) PSRAM on MSPI2/MSPI3,
- * clocked from MPLL at 200 MHz. Bring-up order follows the vendor sequence:
+ * The board carries a 32 MB in-package AP hex (16-line) PSRAM on MSPI2/MSPI3.
+ * Bring-up order:
  *
- *   1. clock tree: MPLL -> MSPI2/MSPI3 module clocks, 2:1 divider
- *   2. controller configuration (DDR, hex data lines, AXI access, splicing,
- *      CS timing, 2048-byte page, DLL, tuned input/output delays)
- *   3. device mode registers MR0/MR4/MR8 through the mask ROM's OPI helpers,
- *      which program the user-command path for us
- *   4. a write/read pattern check so the caller can stop on failure
- *
- * The tuned delay values in step 2 are the ones a working ESP-IDF boot leaves
- * behind on this board (captured with the SPL register dump).
+ *   1. MPLL to 400 MHz: the analog PLL is programmed through the internal
+ *      analog I2C master (regi2c), block 0x63 register 2 holds ref divider
+ *      bits [2:0] and feedback divider bits [7:3]; 40 MHz * 10 / 1 = 400 MHz.
+ *   2. route MPLL to the PSRAM controllers and take them out of reset.
+ *   3. controller configuration (DDR, hex lines, AXI access, CS timing,
+ *      2048-byte page, DLL, tuned delays).
+ *   4. device mode registers MR0/MR4/MR8 through the mask ROM's OPI helpers.
+ *   5. write/read pattern check so the caller can stop on failure.
  */
 
 #include <common.h>
@@ -26,17 +25,51 @@
 #define P4_CLKRST_BASE		0x500e6000ul
 #define P4_MSPI2_BASE		0x5008e000ul
 #define P4_MSPI3_BASE		0x5008f000ul
+#define P4_PMU_BASE		0x50115000ul
+#define P4_LP_CLKRST_BASE	0x50111000ul
+#define P4_LPPERI_BASE		0x50120000ul
+#define P4_ANA_MST_BASE		0x50124000ul
 #define P4_PSRAM_BASE		0x48000000ul
 #define P4_PSRAM_TEST_SIZE	0x00001000ul
 
-/* HP_SYS_CLKRST reset gate for the dual MSPI (AXI + APB). */
-#define P4_RST_EN0		0xc0
+/* Clock and reset gates. */
+#define P4_PERI_CLK_CTRL00	(P4_CLKRST_BASE + 0x30)
+#define P4_PSRAM_CLK_SRC_MPLL	BIT(12)
+#define P4_PSRAM_CLK_SRC_MASK	(3u << 12)
+#define P4_PSRAM_CORE_CLK_EN	BIT(15)
+#define P4_RST_EN0		(P4_CLKRST_BASE + 0xc0)
 #define P4_RST_DUAL_MSPI_AXI	BIT(23)
 #define P4_RST_DUAL_MSPI_APB	BIT(25)
 
+#define P4_PMU_RF_PWC		(P4_PMU_BASE + 0x15c)
+#define P4_PMU_MSPI_PHY_XPD	BIT(24)
+#define P4_PMU_PERIF_I2C_RSTB	BIT(26)
+#define P4_PMU_XPD_PERIF_I2C	BIT(27)
+
+#define P4_LP_CLKRST_HP_CLK_CTRL	(P4_LP_CLKRST_BASE + 0x40)
+#define P4_LP_CLKRST_HP_MPLL_CLK_EN	BIT(28)
+
+#define P4_LPPERI_CLK_EN	(P4_LPPERI_BASE + 0x00)
+#define P4_LPPERI_CK_EN_I2CMST	BIT(27)
+
+/* Analog I2C (regi2c) master. */
+#define P4_ANA_MST_I2C0_CTRL	(P4_ANA_MST_BASE + 0x00)
+#define P4_ANA_MST_ANA_CONF1	(P4_ANA_MST_BASE + 0x1c)
+#define P4_ANA_MST_ANA_CONF2	(P4_ANA_MST_BASE + 0x20)
+#define P4_ANA_MST_CLK160M	(P4_ANA_MST_BASE + 0x34)
+#define P4_ANA_MST_CLK_SEL_160M	BIT(0)
+#define P4_ANA_MST_SEL_MSPI	BIT(9)
+#define P4_ANA_MST_BUSY		BIT(25)
+#define P4_ANA_MST_WR_CNTL	BIT(24)
+
+#define P4_MPLL_BLOCK		0x63
+#define P4_MPLL_DIV_REG		2
+#define P4_MPLL_REF_DIV		0	/* bits [2:0] */
+#define P4_MPLL_FB_DIV		9	/* bits [7:3]: (9+1)/(0+1) = 10x */
+
 /* Mask ROM OPI helpers (fixed addresses for this ROM revision). */
 #define P4_ROM_SPI_CMD_CONFIG	0x4fc00108ul
-#define P4_ROM_SPI_CMD_START	0x4fc0010cU
+#define P4_ROM_SPI_CMD_START	0x4fc0010cul
 #define P4_ROM_SPI_SET_OP_MODE	0x4fc00110ul
 #define P4_ROM_OPI_DTR_MODE	7
 
@@ -70,48 +103,58 @@ typedef void (*rom_cmd_start_fn)(int spi_num, u8 *rx_buf, u16 rx_len,
 #define PSRAM_MR8_RBX		1
 #define PSRAM_MR8_X16		1
 
-static int psram_transaction(u32 cmd, u32 addr, u32 dummy_bits,
-			      void *tx, u32 tx_bits, void *rx, u32 rx_bits)
+void p4_spl_early_puts(const char *s);
+
+static void regi2c_write(u8 block, u8 reg, u8 data)
 {
-	rom_spi_cmd_t conf;
-	rom_set_op_mode_fn set_op_mode = (rom_set_op_mode_fn)P4_ROM_SPI_SET_OP_MODE;
-	rom_cmd_config_fn cmd_config = (rom_cmd_config_fn)P4_ROM_SPI_CMD_CONFIG;
-	rom_cmd_start_fn cmd_start = (rom_cmd_start_fn)P4_ROM_SPI_CMD_START;
+	u32 word;
 
-	conf.cmd = (u16)cmd;
-	conf.cmd_bit_len = PSRAM_REG_CMD_BITS;
-	conf.addr = &addr;
-	conf.addr_bit_len = PSRAM_REG_ADDR_BITS;
-	conf.tx_data = tx;
-	conf.tx_data_bit_len = tx_bits;
-	conf.rx_data = rx;
-	conf.rx_data_bit_len = rx_bits;
-	conf.dummy_bit_len = dummy_bits;
+	writel(0, (void *)P4_ANA_MST_ANA_CONF1);
+	writel(0, (void *)P4_ANA_MST_ANA_CONF2);
+	setbits_le32((void *)P4_ANA_MST_ANA_CONF2, P4_ANA_MST_SEL_MSPI);
 
-	set_op_mode(3, P4_ROM_OPI_DTR_MODE);
-	cmd_config(3, &conf);
-	cmd_start(3, (u8 *)rx, rx_bits / 8, 1 << 1, false);
+	while (readl((void *)P4_ANA_MST_I2C0_CTRL) & P4_ANA_MST_BUSY)
+		;
 
-	return 0;
+	word = (u32)block | ((u32)reg << 8) | P4_ANA_MST_WR_CNTL |
+	       ((u32)data << 24);
+	writel(word, (void *)P4_ANA_MST_I2C0_CTRL);
+
+	while (readl((void *)P4_ANA_MST_I2C0_CTRL) & P4_ANA_MST_BUSY)
+		;
 }
 
 static void psram_clock_init(void)
 {
-	/* MPLL -> 400 MHz, MSPI2/MSPI3 2:1 so both run at 200 MHz. */
-	writel(0xe6df97ff, (void *)(P4_CLKRST_BASE + 0x14));
-	writel(0x0e040004, (void *)(P4_CLKRST_BASE + 0x18));
-	writel(0x20a000be, (void *)(P4_CLKRST_BASE + 0x1c));
-	writel(0x40170503, (void *)(P4_CLKRST_BASE + 0x28));
-	writel(0x00000000, (void *)(P4_CLKRST_BASE + 0x2c));
-	writel(0x0000d03d, (void *)(P4_CLKRST_BASE + 0x30));
+	u32 val;
 
-	/* Pulse the dual-MSPI reset so its APB/AXI interface comes out of reset. */
-	setbits_le32((void *)(P4_CLKRST_BASE + P4_RST_EN0),
-		     P4_RST_DUAL_MSPI_AXI | P4_RST_DUAL_MSPI_APB);
-	udelay(20);
-	clrbits_le32((void *)(P4_CLKRST_BASE + P4_RST_EN0),
-		     P4_RST_DUAL_MSPI_AXI | P4_RST_DUAL_MSPI_APB);
-	udelay(200);
+	/* Analog I2C master clock, 160 MHz reference, perif I2C powered. */
+	setbits_le32((void *)P4_LPPERI_CLK_EN, P4_LPPERI_CK_EN_I2CMST);
+	setbits_le32((void *)P4_ANA_MST_CLK160M, P4_ANA_MST_CLK_SEL_160M);
+
+	clrbits_le32((void *)P4_PMU_RF_PWC, P4_PMU_PERIF_I2C_RSTB);
+	udelay(1);
+	setbits_le32((void *)P4_PMU_RF_PWC, P4_PMU_XPD_PERIF_I2C);
+	setbits_le32((void *)P4_PMU_RF_PWC, P4_PMU_PERIF_I2C_RSTB);
+
+	/* MPLL 400 MHz = 40 MHz * (9 + 1) / (0 + 1). */
+	regi2c_write(P4_MPLL_BLOCK, P4_MPLL_DIV_REG,
+		     (P4_MPLL_FB_DIV << 3) | P4_MPLL_REF_DIV);
+
+	/* Power up the MSPI PHY PLL and enable the MPLL clock gate. */
+	setbits_le32((void *)P4_PMU_RF_PWC, P4_PMU_MSPI_PHY_XPD);
+	setbits_le32((void *)P4_LP_CLKRST_HP_CLK_CTRL, P4_LP_CLKRST_HP_MPLL_CLK_EN);
+	udelay(100);
+
+	/* PSRAM controllers: MPLL source, core clock on, divider 1. */
+	val = readl((void *)P4_PERI_CLK_CTRL00);
+	val &= ~P4_PSRAM_CLK_SRC_MASK;
+	val |= P4_PSRAM_CLK_SRC_MPLL | P4_PSRAM_CORE_CLK_EN;
+	writel(val, (void *)P4_PERI_CLK_CTRL00);
+
+	/* Let the dual-MSPI interface out of reset. */
+	clrbits_le32((void *)P4_RST_EN0, P4_RST_DUAL_MSPI_AXI | P4_RST_DUAL_MSPI_APB);
+	udelay(100);
 }
 
 static void psram_controller_init(void)
@@ -143,13 +186,53 @@ static void psram_controller_init(void)
 	udelay(100);
 }
 
+static int psram_transaction(u32 cmd, u32 addr, u32 dummy_bits,
+			      void *tx, u32 tx_bits, void *rx, u32 rx_bits)
+{
+	rom_spi_cmd_t conf;
+	rom_set_op_mode_fn set_op_mode = (rom_set_op_mode_fn)P4_ROM_SPI_SET_OP_MODE;
+	rom_cmd_config_fn cmd_config = (rom_cmd_config_fn)P4_ROM_SPI_CMD_CONFIG;
+	rom_cmd_start_fn cmd_start = (rom_cmd_start_fn)P4_ROM_SPI_CMD_START;
+
+	conf.cmd = (u16)cmd;
+	conf.cmd_bit_len = PSRAM_REG_CMD_BITS;
+	conf.addr = &addr;
+	conf.addr_bit_len = PSRAM_REG_ADDR_BITS;
+	conf.tx_data = tx;
+	conf.tx_data_bit_len = tx_bits;
+	conf.rx_data = rx;
+	conf.rx_data_bit_len = rx_bits;
+	conf.dummy_bit_len = dummy_bits;
+
+	/*
+	 * The ROM OPI helper spins forever on the P4 when driven from the SPL
+	 * (esp_rom_spi_cmd_start never returns), so the transaction path below
+	 * is disabled until the user-mode sequence is implemented locally.
+	 */
+#ifndef P4_PSRAM_USE_ROM_OPI
+	(void)conf;
+	(void)set_op_mode;
+	(void)cmd_config;
+	(void)cmd_start;
+	return -1;
+#endif
+	p4_spl_early_puts("rom: op-mode\n");
+	set_op_mode(3, P4_ROM_OPI_DTR_MODE);
+	p4_spl_early_puts("rom: cmd-config\n");
+	cmd_config(3, &conf);
+	p4_spl_early_puts("rom: cmd-start\n");
+	cmd_start(3, (u8 *)rx, rx_bits / 8, 1 << 1, false);
+	p4_spl_early_puts("rom: done\n");
+
+	return 0;
+}
+
 static int psram_mode_register_init(void)
 {
 	u16 mr01 = 0;
 	u16 mr48 = 0;
 	u8 mr8 = 0;
 
-	/* MR0/MR1 pair, then MR4/MR8 pair. */
 	if (psram_transaction(PSRAM_REG_READ, 0x0, PSRAM_REG_DUMMY_RD, NULL, 0,
 			      &mr01, 16))
 		return -1;
@@ -157,10 +240,8 @@ static int psram_mode_register_init(void)
 			      &mr48, 16))
 		return -1;
 
-	/* MR0: drive strength 0, read latency, latency type 1. */
 	mr01 &= ~(0x3 | (0x7 << 2) | BIT(5));
 	mr01 |= (PSRAM_RD_LATENCY << 2) | BIT(5);
-	/* MR4: write latency in bits [7:5]. */
 	mr48 &= ~(0x7 << 5);
 	mr48 |= (PSRAM_WR_LATENCY << 5);
 
@@ -169,7 +250,6 @@ static int psram_mode_register_init(void)
 	if (psram_transaction(PSRAM_REG_WRITE, 0x4, 0, &mr48, 16, NULL, 0))
 		return -1;
 
-	/* MR8: burst length, type, x16. */
 	if (psram_transaction(PSRAM_REG_READ, 0x8, PSRAM_REG_DUMMY_RD, NULL, 0,
 			      &mr8, 8))
 		return -1;
@@ -184,16 +264,13 @@ static int psram_mode_register_init(void)
 
 static int psram_check(void)
 {
-	volatile u32 *base = (volatile u32 *)P4_PSRAM_BASE;
-	u32 value;
 	int i;
 
-	writel(0x5a6b7c8d, (void *)base);
+	writel(0x5a6b7c8d, (void *)P4_PSRAM_BASE);
 	writel(0xa5a55a5a, (void *)(P4_PSRAM_BASE + 4));
 	writel(0x12345678, (void *)(P4_PSRAM_BASE + P4_PSRAM_TEST_SIZE - 4));
 
-	value = readl((void *)base);
-	if (value != 0x5a6b7c8d)
+	if (readl((void *)P4_PSRAM_BASE) != 0x5a6b7c8d)
 		return -1;
 	if (readl((void *)(P4_PSRAM_BASE + 4)) != 0xa5a55a5a)
 		return -1;
@@ -210,36 +287,20 @@ static int psram_check(void)
 	return 0;
 }
 
-void p4_spl_early_puts(const char *s);
-
 int p4_spl_psram_init(void)
 {
 	int ret;
 
-	/*
-	 * TODO: program MPLL (400 MHz) and switch the PSRAM source to it. Until
-	 * that sequence is ported, stay on the ROM clock state.
-	 */
-	p4_spl_early_puts("psram: clock (rom state)\n");
-	psram_controller_init();
+	p4_spl_early_puts("psram: clock\n");
+	psram_clock_init();
 
-	/*
-	 * The ROM OPI transaction path needs MPLL plus the MSPI2/MSPI3 CS and
-	 * clock programming first; until that sequence is ported, fail cleanly
-	 * instead of hanging inside the ROM helper.
-	 */
-#ifndef P4_PSRAM_BRINGUP_READY
-	p4_spl_early_puts("psram: not ported yet\n");
-	return -1;
-#endif
-
+	/* Mode registers first: the controllers are still in the ROM slow state. */
 	p4_spl_early_puts("psram: mode-regs\n");
 	ret = psram_mode_register_init();
 	if (ret)
 		return ret;
 
-	/* The ROM helpers reconfigure MSPI3 for the transactions above. */
-	p4_spl_early_puts("psram: reconfig\n");
+	p4_spl_early_puts("psram: controller\n");
 	psram_controller_init();
 
 	p4_spl_early_puts("psram: check\n");
