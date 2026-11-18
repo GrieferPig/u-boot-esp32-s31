@@ -486,6 +486,34 @@ static void psram_pads_init(void)
 		writel(psram_pad_state[i][1], (void *)psram_pad_state[i][0]);
 }
 
+/*
+ * The PSRAM pins live in their own mux block at 0x500e1200
+ * (DR_REG_IOMUX_MSPI_PIN_BASE = HPPERIPH1 + 0x21200) and are left at zero by
+ * our chain; the reference has drive strength 0x2020 on every PSRAM data pin
+ * and 0x00010001 on the two DQS pins. The flash pins (0x500e1204..0x500e1218)
+ * are deliberately not touched.
+ */
+static const u32 psram_pin_state[][2] = {
+	{ 0x500e121c, 0x00002020u }, { 0x500e1220, 0x00002020u },
+	{ 0x500e1224, 0x00002020u }, { 0x500e1228, 0x00002020u },
+	{ 0x500e122c, 0x00002020u }, { 0x500e1230, 0x00002020u },
+	{ 0x500e1234, 0x00002020u }, { 0x500e1238, 0x00002020u },
+	{ 0x500e123c, 0x00010001u }, { 0x500e1240, 0x00002020u },
+	{ 0x500e1244, 0x00002020u }, { 0x500e1248, 0x00002020u },
+	{ 0x500e124c, 0x00002020u }, { 0x500e1250, 0x00002020u },
+	{ 0x500e1254, 0x00002020u }, { 0x500e1258, 0x00002020u },
+	{ 0x500e125c, 0x00002020u }, { 0x500e1260, 0x00002020u },
+	{ 0x500e1264, 0x00002020u }, { 0x500e1268, 0x00010001u },
+};
+
+static void psram_pin_mux_init(void)
+{
+	u32 i;
+
+	for (i = 0; i < ARRAY_SIZE(psram_pin_state); i++)
+		writel(psram_pin_state[i][1], (void *)psram_pin_state[i][0]);
+}
+
 static void psram_opi_dtr_mode(void)
 {
 	u32 clear = P4_FCMD_OCT | P4_FCMD_QUAD | P4_FREAD_QIO | P4_FREAD_QUAD |
@@ -589,6 +617,7 @@ static void psram_probe(void)
 	 */
 	writel(0x00130913u, (void *)(P4_MSPI3_BASE + 0x14));
 	writel(0x00130913u, (void *)(P4_MSPI2_BASE + 0x14));
+	psram_pin_mux_init();
 	psram_opi_dtr_mode();
 	for (i = 0; i < ARRAY_SIZE(dummies); i++) {
 		val = psram_read_reg(0, dummies[i]);

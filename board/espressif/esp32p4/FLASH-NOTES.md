@@ -1358,3 +1358,44 @@ programming them, and the reference dump above shows our `/0x1a0` block reads 0.
 Next round: dump `0x5008e1a0`/`0x5008f1a0` (AC: CS setup/hold/delay, split-trans)
 on both chains and program MSPI3's AC + timing-cali + DLL explicitly the way the
 S31 does, then retry the MR read.
+
+## Round 42: WE ARE TALKING TO THE PSRAM CHIP
+
+The missing piece was the **dedicated MSPI pin mux block**, not the GPIO IO-MUX:
+
+```
+DR_REG_IOMUX_MSPI_PIN_BASE = DR_REG_HPPERIPH1_BASE (0x500c0000) + 0x21200
+                           = 0x500e1200
+```
+
+Reference (working) state of that block:
+
+| offset | value | pins |
+|---|---|---|
+| 0x500e1200 | 00000001 | CLK_EN0 (block clock) |
+| 0x500e1204..0x500e1218 | 00000010 | flash CS/Q/WP/HOLD/CK/D |
+| 0x500e121c..0x500e1238 | 00002020 | PSRAM D, Q, WP, HOLD, DQ4..DQ7 |
+| 0x500e123c | 00010001 | PSRAM DQS_0 |
+| 0x500e1240..0x500e1264 | 00002020 | PSRAM DQ8..DQ15 |
+| 0x500e1268 | 00010001 | PSRAM DQS_1 |
+| 0x500e1280.. | same again | second CS instance |
+
+Our chain had **all of these at zero** (the round-38 "reset loop" came from writing
+the *flash* pins in the same batch - 0x500e1204..0x500e1218 - which is why the
+write must skip them).
+
+With only the PSRAM half of the block programmed (`psram_pin_mux_init()`), the
+probe reads real data:
+
+```
+psram probe: d8=0x00008d08 d12=0x00008d08 d16=0x00008d08 d20=0x00008d08
+             d24=0x00008d08 d28=0x00008d08
+```
+
+`0x8d08` = MR0 0x08 | MR1 0x8d, and MR1 bits[4:0] = **0x0d = AP vendor id**. The
+chip answers. (Note it answers for every dummy length, so the read latency is
+tolerant at this clock.)
+
+Next round: program MR0/MR4/MR8 with the real values, configure MSPI2 for the
+cache path, and check that a pattern written at 0x48100000 and 0x49000000
+survives - then the Linux load path is finally unblocked.
