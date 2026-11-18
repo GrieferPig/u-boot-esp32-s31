@@ -712,7 +712,7 @@ static void psram_mode_reg_init(void)
 
 #define P4_PSRAM_RD_DUMMY	(2 * (14 - 1))
 /* The cache path needs the same 46-cycle read latency the tuning found. */
-#define P4_PSRAM_CACHE_RD_DUMMY	49
+#define P4_PSRAM_CACHE_RD_DUMMY	46
 #define P4_PSRAM_WR_DUMMY	(2 * (7 - 1))
 
 static void psram_axi_config(void)

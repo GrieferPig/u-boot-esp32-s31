@@ -154,6 +154,74 @@ void hw_watchdog_reset(void)
 	}
 }
 
+
+#if !defined(CONFIG_SPL)
+#include <command.h>
+
+/*
+ * "p4load" - copy the kernel and device tree from the flash window into PSRAM.
+ * U-Boot's own "cp" command faults on this port and a single multi-megabyte
+ * burst leaves the PSRAM mode registers in a bad state, so copy in bounded
+ * chunks and flush each one through the ROM helper with the full L1 mask.
+ */
+#define P4_ROM_CACHE_WRITEBACK	0x4fc003f4
+#define P4_CACHE_MAP_ALL	0x13
+#define P4_KERN_SRC		0x40200000u
+#define P4_DTB_SRC		0x40900000u
+#define P4_KERN_DST		0x48000000u
+#define P4_DTB_DST		0x48f00000u
+#define P4_LOAD_CHUNK		0x10000u
+
+static int do_p4load(struct cmd_tbl *cmdtp, int flag, int argc,
+		     char *const argv[])
+{
+	const u32 *kern = (const u32 *)P4_KERN_SRC;
+	const u32 *dtb = (const u32 *)P4_DTB_SRC;
+	u32 ksize, dsize, off;
+
+	if (dtb[0] != 0xedfe0dd0u) {
+		printf("p4load: no fdt at 0x%08x\n", P4_DTB_SRC);
+		return CMD_RET_FAILURE;
+	}
+
+	ksize = kern[4];			/* arm64 image_size at 0x10 */
+	dsize = __builtin_bswap32(dtb[1]);	/* fdt totalsize, big endian */
+	if (ksize < 0x100000u || ksize > 0x01000000u || dsize > 0x10000u) {
+		printf("p4load: implausible sizes k=%x d=%x\n", ksize, dsize);
+		return CMD_RET_FAILURE;
+	}
+
+	for (off = 0; off < dsize; off += P4_LOAD_CHUNK) {
+		u32 n = dsize - off > P4_LOAD_CHUNK ? P4_LOAD_CHUNK
+						    : dsize - off;
+
+		memcpy((void *)(P4_DTB_DST + off), (const void *)(P4_DTB_SRC + off),
+		       n);
+		((int (*)(u32, u32, u32))P4_ROM_CACHE_WRITEBACK)
+			(P4_CACHE_MAP_ALL, P4_DTB_DST + off, n);
+	}
+
+	for (off = 0; off < ksize; off += P4_LOAD_CHUNK) {
+		u32 n = ksize - off > P4_LOAD_CHUNK ? P4_LOAD_CHUNK
+						    : ksize - off;
+
+		memcpy((void *)(P4_KERN_DST + off), (const void *)(P4_KERN_SRC + off),
+		       n);
+		((int (*)(u32, u32, u32))P4_ROM_CACHE_WRITEBACK)
+			(P4_CACHE_MAP_ALL, P4_KERN_DST + off, n);
+	}
+
+	printf("p4load: kernel %x bytes -> 0x%08x (%08x), dtb %x -> 0x%08x (%08x)\n",
+	       ksize, P4_KERN_DST, readl((void *)P4_KERN_DST), dsize,
+	       P4_DTB_DST, readl((void *)P4_DTB_DST));
+	return CMD_RET_SUCCESS;
+}
+
+U_BOOT_CMD(p4load, 1, 1, do_p4load,
+	   "copy kernel and fdt from flash into psram",
+	   "");
+#endif
+
 void hw_watchdog_init(void)
 {
 	/*

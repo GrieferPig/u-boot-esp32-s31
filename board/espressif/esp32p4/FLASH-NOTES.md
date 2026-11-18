@@ -2187,3 +2187,40 @@ re-checked afterwards, or (better) do the load from U-Boot proper with a dedicat
 fully up.
 
 The U-Boot prompt state is restored (payload loading disabled in the SPL).
+
+## Round 65: p4load added; the SPL now corrupts the mode registers on every boot
+
+Added a `p4load` command to `board.c` (guarded with `#if !defined(CONFIG_SPL)`):
+it copies the kernel (size from the arm64 header at flash 0x200000) and the FDT
+(size from the big-endian header at flash 0x900000) from the flash window into
+PSRAM in 64 KiB chunks, flushing each chunk through the ROM cache helper with the
+full L1 mask, and prints the first word of each destination as a check. It
+builds and is reachable from the prompt.
+
+Chasing why the SPL's command path fails after the payload work uncovered a more
+important problem: **the SPL alternates between healthy and corrupted PSRAM mode
+registers on successive boots**:
+
+```
+healthy:  mode: mr0 0x00008d28 mr4 0x8d08a05f mr8 0x8d088d4b
+corrupt:  mode: mr0 0x00008d28 mr4 0x8d288d48 mr8 0x8d288d6b
+```
+
+and when corrupt, the command path returns stale stack values (`0x4ff43104`
+instead of chip data), so `psram_word_test()` and the tuning fail and the boot
+never reaches U-Boot. The reference chain always initialises the chip correctly
+right afterwards (`hex_psram: vendor id 0x0d ... density 0x07 (256 Mbit)`), so the
+chip itself is fine - our SPL is what leaves it in the wrong state.
+
+Two experiments ruled out:
+
+* moving `psram_axi_config()` after the tuning (to stop the AXI taking priority)
+  makes the array path fail outright - the DDR mode / variable dummy that the
+  array transfers need are set by that function, so it must stay before them,
+* the cache read latency constant (46 vs 49) has no effect on this.
+
+Next round: instrument `psram_mode_reg_init()` to print what it writes for MR4 and
+MR8 and read them back immediately, then compare with the values the part reports
+on a clean boot. The suspect is the write path for MR4/MR8 - `mr4` coming back as
+`0x8d48` means bit 6 is set, i.e. a write latency of 2 instead of 1, which points
+at the value being composed wrongly or at a stray write landing in MR4.
