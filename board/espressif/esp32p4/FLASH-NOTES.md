@@ -1399,3 +1399,43 @@ tolerant at this clock.)
 Next round: program MR0/MR4/MR8 with the real values, configure MSPI2 for the
 cache path, and check that a pattern written at 0x48100000 and 0x49000000
 survives - then the Linux load path is finally unblocked.
+
+## Round 43: mode registers programmed, PSRAM read/write works inside the ROM window
+
+Added `psram_mode_reg_init()` (MR0 lt/read latency, MR4 write latency, MR8
+bl/bt/rbx/x16 = hex mode) using the now working `psram_xact()`, plus
+`psram_rw_test()`:
+
+```
+psram probe: d8=0x00008d08 ... d28=0x00008d08     (AP vendor id 0x0d)
+mode: mr0 0x00008d28 mr4 0x8d08a05f mr8 0x8d088d4b
+ rw 0x48001000=0xa5a50000 rw 0x48010000=0xa5a50001
+```
+
+So the chip answers, the mode registers are written, and cached read/write works
+at 0x48001000 and 0x48010000 - well past the old 0x100 byte "works" limit.
+
+Beyond that it still faults:
+
+* `rw 0x48100000` (page 16) resets the board - even after the SPL writes all 256
+  MMU entries (`psram_mmu_map()`: index -> `i | BIT(11) | BIT(10)`), and even
+  when the access is made later from U-Boot, which already maps 16 MiB in
+  `board_late_init()`.
+
+So the MMU table is not what limits the window. The S31 port shows what is
+missing: its `psram_axi_config()` configures the cache/AXI path before mapping -
+
+* `SRAM_DWR_CMD` / `SRAM_DRD_CMD` = sync write/read opcode + bit length,
+* `CACHE_SCTRL` = 4-byte address + RD/WR command enables + RD/WR dummy enables
+  and cycle lengths + address bit length + octal/hex mode bit,
+* `SRAM_CMD` |= CMD/ADDR/DOUT/DIN octal bits + `SDUMMY_WOUT`,
+* `DDR_REG_AXI` = DDR enable + variable dummy,
+* `CACHE_FCTRL_SMEM` |= `AXI_REQ_EN`,
+* `CTRL1` |= read/write splice enables.
+
+Our `psram_cache_cmds()` only replays the register values a post-init IDF boot
+has, which is evidently not enough to open the AXI window for the MMU entries we
+program.
+
+Next round: port `psram_axi_config()` to the P4 (hex instead of octal bits, the
+P4's `AP_HEX` opcodes/dummy values) and retest `0x48100000` / `0x49000000`.

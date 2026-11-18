@@ -629,6 +629,75 @@ static void psram_probe(void)
 	p4_spl_early_puts("\n");
 }
 
+
+/*
+ * Mode registers: MR0 (latency/drive), MR4 (write latency) and MR8 (burst).
+ * Values follow the AP hex PSRAM defaults IDF/S31 use for the 200-250 MHz
+ * profile: lt = 1, read latency 2..4, write latency 1..2, bl = 3, rbx = 1,
+ * x16 = 1 (hex mode).
+ */
+static void psram_mode_reg_init(void)
+{
+	u32 mr01 = 0, mr48 = 0, mr8 = 0;
+	u32 w;
+
+	psram_xact(0x4040, 0x0, NULL, 0, &mr01, 16, 12);
+	psram_xact(0x4040, 0x4, NULL, 0, &mr48, 16, 12);
+	psram_xact(0x4040, 0x8, NULL, 0, &mr8, 8, 12);
+
+	mr01 &= ~(0x3u | (0x7u << 2) | BIT(5));
+	mr01 |= (PSRAM_RD_LATENCY << 2) | BIT(5);
+	mr48 &= ~(0x7u << 5);
+	mr48 |= (PSRAM_WR_LATENCY << 5);
+	mr8 &= ~(0x3u | BIT(2) | BIT(3) | BIT(6));
+	mr8 |= 0x3u | BIT(3) | BIT(6);		/* bl = 3, rbx = 1, x16 = 1 */
+
+	w = mr01 & 0xffff;
+	psram_xact(0xC0C0, 0x0, &w, 16, NULL, 0, 0);
+	w = mr48 & 0xffff;
+	psram_xact(0xC0C0, 0x4, &w, 16, NULL, 0, 0);
+	w = mr8 & 0xff;
+	psram_xact(0xC0C0, 0x8, &w, 16, NULL, 0, 0);
+
+	p4_spl_early_puts("mode: mr0 ");
+	p4_spl_early_hex(mr01);
+	p4_spl_early_puts(" mr4 ");
+	p4_spl_early_hex(mr48);
+	p4_spl_early_puts(" mr8 ");
+	p4_spl_early_hex(mr8);
+	p4_spl_early_puts("\n");
+}
+
+
+/* Map the PSRAM window through the MSPI2 "S" MMU (64 KiB pages). */
+static void psram_mmu_map(u32 size)
+{
+	u32 entries = size >> 16;
+	u32 i;
+
+	for (i = 0; i < entries; i++) {
+		writel(i, (void *)(P4_MSPI2_BASE + 0x380));
+		writel(i | BIT(11) | BIT(10), (void *)(P4_MSPI2_BASE + 0x37c));
+	}
+}
+
+/* Write a pattern at an address and read it back through the cache path. */
+static void psram_rw_test(void)
+{
+	static const u32 addrs[] = { 0x48001000, 0x48010000, 0x4801f000 };
+	u32 i, val;
+
+	for (i = 0; i < ARRAY_SIZE(addrs); i++) {
+		writel(0xa5a50000u + i, (void *)addrs[i]);
+		val = readl((void *)addrs[i]);
+		p4_spl_early_puts(" rw ");
+		p4_spl_early_hex(addrs[i]);
+		p4_spl_early_puts("=");
+		p4_spl_early_hex(val);
+	}
+	p4_spl_early_puts("\n");
+}
+
 int p4_spl_psram_init(void)
 {
 	p4_spl_early_puts("psram: clock\n");
@@ -643,7 +712,9 @@ int p4_spl_psram_init(void)
 
 	psram_pads_init();
 	psram_probe();
+	psram_mode_reg_init();
 	psram_cache_cmds();
+	psram_rw_test();
 	psram_mmu_report();
 
 	p4_spl_early_puts("psram: check\n");
