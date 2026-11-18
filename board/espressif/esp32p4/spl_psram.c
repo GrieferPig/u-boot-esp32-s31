@@ -341,6 +341,35 @@ static int psram_check(void)
  * without them the PSRAM side of the MMU never answers (reads return junk and
  * any access past the ROM-mapped pages faults).
  */
+
+/*
+ * PMU/analogue state that the reference (IDF) loader has set by the time its
+ * PSRAM init finishes. Values captured over JTAG while the IDF loader was
+ * running (halt 400 ms after reset, PC in PSRAM):
+ *
+ *   PMU 0x14 7f800000  0x18 02ec0000  0x1c 210000a0  0x20 ffffffff
+ *       0x24 08000000  0x28 a04037f0  0x80 c0800000  0x84 92800200
+ *       0x88 ffffffff  0x8c 30000000  0x90 c0640000  0x9c e8400000
+ *       0x1c0 40200180 0x1c4 97000000 0x1d0 40200180 0x1d4 86800000
+ */
+static const u32 psram_pmu_state[][2] = {
+	{ 0x014, 0x7f800000 }, { 0x018, 0x02ec0000 }, { 0x01c, 0x210000a0 },
+	{ 0x020, 0xffffffff }, { 0x024, 0x08000000 }, { 0x028, 0xa04037f0 },
+	{ 0x080, 0xc0800000 }, { 0x084, 0x92800200 }, { 0x088, 0xffffffff },
+	{ 0x08c, 0x30000000 }, { 0x090, 0xc0640000 }, { 0x09c, 0xe8400000 },
+	{ 0x1c0, 0x40200180 }, { 0x1c4, 0x97000000 },
+	{ 0x1d0, 0x40200180 }, { 0x1d4, 0x86800000 },
+};
+
+static void psram_pmu_fixup(void)
+{
+	void *pmu = (void *)P4_PMU_BASE;
+	u32 i;
+
+	for (i = 0; i < ARRAY_SIZE(psram_pmu_state); i++)
+		writel(psram_pmu_state[i][1], pmu + psram_pmu_state[i][0]);
+}
+
 static void psram_clkrst_fixup(void)
 {
 	void *c = (void *)P4_CLKRST_BASE;
@@ -375,6 +404,7 @@ int p4_spl_psram_init(void)
 	psram_replay();
 
 	p4_spl_early_puts("psram: cmds\n");
+	psram_pmu_fixup();
 	psram_cache_cmds();
 	psram_mmu_report();
 

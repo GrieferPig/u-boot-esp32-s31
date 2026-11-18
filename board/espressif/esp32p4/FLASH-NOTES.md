@@ -933,3 +933,41 @@ must be taken during the IDF **loader** phase (halt a few hundred ms after reset
 before Linux starts) so the PSRAM/analogue power state can be copied faithfully -
 `0x80..0x9c` and `0x1c0..0x1d4` look like the PSRAM PHY/LDO configuration that
 our `psram: replay` tables do not cover.
+
+## Round 31: reference state captured during the IDF loader phase
+
+Halting 400 ms after a JTAG reset (`reset`, `sleep 400`, `halt`) lands inside the
+IDF loader (PC in PSRAM, e.g. `0x48ed3b4c`), i.e. after its PSRAM init and before
+Linux. That gives the correct reference state - and it matches the Linux-time
+dump, so these really are bootloader values:
+
+```
+PMU 0x50115000
+ 0x014 7f800000   0x018 02ec0000   0x01c 210000a0   0x020 ffffffff
+ 0x024 08000000   0x028 a04037f0   0x080 c0800000   0x084 92800200
+ 0x088 ffffffff   0x08c 30000000   0x090 c0640000   0x09c e8400000
+ 0x1c0 40200180   0x1c4 97000000   0x1d0 40200180   0x1d4 86800000
+
+HP_SYS_CLKRST 0x500e6000
+ 0x000 00000001   0x004 00000000   0x008 00000001   0x00c 00010000
+ 0x010 00000000   0x014 e6dfb7ff   0x018 0e041034   0x01c 60a020be
+ 0x020 00000008   0x024 02011309   0x028 40170503   0x02c 00000101
+ 0x030 0000d03d   0x034 00000401   0x038 00000000   0x03c 000002a3
+```
+
+and the PSRAM MMU entries read cleanly there (`entry 0 = 0xc00`,
+`entry 16 = 0xc10`).
+
+`spl_psram.c` now applies all of it (`psram_clkrst_fixup()` + a
+`psram_pmu_fixup()` table) before `psram_cache_cmds()`. Result: the SPL still
+reads junk from the MMU (`mmu0 0x1a0`, `mmu1 0x1510`) and any access past the
+ROM-mapped pages still faults.
+
+So the PMU/clkrst state is necessary but not sufficient; what remains different
+must be in how the cache itself is brought up. Note our flash MMU
+`MMU_POWER_CTRL` (`0x5008c384`) reads `0x13200014` while the reference reads
+`0x13200004` - bit 4 is set only in ours, because our SPL encodes the page size
+as `2 << 3`. The reference simply has bit 2. Our flash window works regardless,
+but this is the one remaining known difference in the MMU-adjacent registers and
+should be the next thing to align (try `2 << 2`/plain `0x04` for the C-side and
+check whether the S-side MMU starts answering).
