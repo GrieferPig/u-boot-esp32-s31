@@ -1033,3 +1033,40 @@ Next: bisect which page is the last one that works (entry 1, 2, 4, 8...) by
 mapping and reading one page at a time from U-Boot, and check whether the PSRAM
 chip needs 4-byte addressing or a different mode for pages beyond the first
 ones - the MMU side is no longer the suspect.
+
+## Round 34: PSRAM never actually answered - everything was cache
+
+Bisected the accessible range from the U-Boot prompt (each miss hangs and the
+watchdog resets the board, so the log shows the last address that worked):
+
+```
+md 0x48000000 1   -> 00000000       ok
+md 0x48000080 1   -> 20202020       ok
+md 0x48000100 1   -> (hang, rst:0x7)
+md 0x4800c000 1   -> (hang)
+md 0x48010000 1   -> (hang)
+```
+
+So exactly the **first 256 bytes** are readable and everything after that hangs.
+Then it clicked: the "PSRAM works at 0x48000000" result was always the *data
+cache*. Our SPL's `psram_check()` wrote its pattern (`00000000 01010101 ...`)
+which the cache absorbed; every read afterwards was served from those same
+lines. No real PSRAM transaction has ever completed on this chain.
+
+That also explains the earlier contradictions: the hand-written MMU entries read
+back correctly (`0xc00`, `0xc10`) once clkrst 0x38 was cleared, but any new
+address still hung - the MMU is fine, the chip is not initialised.
+
+Better reference frame: the reference chain's PSRAM *does* work (Linux keeps its
+framebuffer at 0x49000000), so the difference is the chip bring-up, not the MMU.
+
+Conclusion: `psram: replay` (replaying captured register values) cannot
+initialise the PSRAM chip. The chip needs real SPI command sequences - reset,
+enter QPI, read/write the mode/latency registers - issued through the MSPI2
+"SRAM command" registers (`0x5008e044..0x54`) the way IDF's `esp_psram_impl`
+does. That is the next piece of work, and it is the last blocker between the SRAM
+chain and loading Linux out of flash into PSRAM.
+
+State left behind: the board restored to the reference chain, our chain builds
+and boots to the prompt (clkrst 0x38 no longer written, U-Boot writes the 256
+PSRAM MMU entries, no test reads that hang the board).
