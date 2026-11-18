@@ -219,6 +219,8 @@ void spl_board_init(void)
 			;
 	}
 
+	p4_spl_psram_load_payload();
+
 	if (p4_spl_load_uboot()) {
 		p4_spl_puts("spl: uboot load failed; boot stopped\n");
 		for (;;)

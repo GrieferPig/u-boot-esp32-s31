@@ -733,6 +733,106 @@ static void psram_axi_config(void)
 	p4_spl_early_puts("\n");
 }
 
+
+
+/*
+ * Load the payload into PSRAM from the flash window while we still own the
+ * machine: U-Boot's "cp" command crashes on this port, and the SPL has working
+ * bulk reads and writes.
+ */
+void p4_spl_psram_load_payload(void)
+{
+	u32 *kern = (u32 *)0x40200000;		/* flash 0x200000 */
+	u32 *dtb = (u32 *)0x40900000;		/* flash 0x900000 */
+	u32 ksize = kern[4];			/* arm64 image_size at 0x10 */
+	u32 dsize = dtb[1];			/* fdt totalsize at 0x04 */
+
+	if (kern[0] == 0x0addbad0u || dtb[0] != 0xedfe0dd0u) {
+		p4_spl_early_puts("payload: flash window unreadable\n");
+		return;
+	}
+
+	{
+		void *wdt = (void *)0x50116000;
+		u32 off;
+
+		/* Nothing feeds the RWDT while we copy, so switch it off. */
+		writel(0x50d83aa1, wdt + 0x18);
+		clrbits_le32(wdt + 0x00, BIT(31) | BIT(14));
+		writel(0, wdt + 0x18);
+		writel(0x50d83aa1, wdt + 0x20);
+		setbits_le32(wdt + 0x1c, BIT(30));
+		writel(0, wdt + 0x20);
+
+		/*
+		 * Flash read and PSRAM write in the same memcpy hang the chip,
+		 * so bounce through a small SRAM buffer instead.
+		 */
+		{
+			static u8 bounce[0x1000];
+			const u8 *src;
+			u8 *dst;
+			u32 total = dsize + ksize;
+			u32 done = 0;
+
+			while (done < total) {
+				u32 n = total - done;
+
+				if (n > sizeof(bounce))
+					n = sizeof(bounce);
+				if (done < dsize) {
+					src = (const u8 *)dtb + done;
+					dst = (u8 *)0x48f00000 + done;
+					if (n > dsize - done)
+						n = dsize - done;
+				} else {
+					src = (const u8 *)kern + (done - dsize);
+					dst = (u8 *)0x48000000 + (done - dsize);
+					if (n > ksize - (done - dsize))
+						n = ksize - (done - dsize);
+				}
+				memcpy(bounce, src, n);
+				memcpy(dst, bounce, n);
+				done += n;
+				if (!(done & 0xffff))
+					p4_spl_early_puts(".");
+			}
+			(void)off;
+		}
+	}
+
+	p4_spl_early_puts("payload: kernel ");
+	p4_spl_early_hex(ksize);
+	p4_spl_early_puts(" dtb ");
+	p4_spl_early_hex(dsize);
+	p4_spl_early_puts(" kern[0] ");
+	p4_spl_early_hex(readl((void *)0x48000000));
+	p4_spl_early_puts(" dtb[0] ");
+	p4_spl_early_hex(readl((void *)0x48f00000));
+	p4_spl_early_puts("\n");
+}
+
+/* Bulk write/read test: find the size at which PSRAM writes start to fail. */
+static void psram_bulk_test(void)
+{
+	static const u32 sizes[] = { 0x40, 0x100, 0x400, 0x1000, 0x4000 };
+	u32 i, n, sz, dst = 0x48100000;
+
+	for (i = 0; i < ARRAY_SIZE(sizes); i++) {
+		sz = sizes[i];
+		for (n = 0; n < sz / 4; n++)
+			writel(0x5a5a0000u + n, (void *)(dst + n * 4));
+		for (n = 0; n < sz / 4; n++) {
+			if (readl((void *)(dst + n * 4)) != 0x5a5a0000u + n)
+				break;
+		}
+		p4_spl_early_puts(" bulk ");
+		p4_spl_early_hex(sz);
+		p4_spl_early_puts(n == sz / 4 ? "=ok" : "=BAD");
+	}
+	p4_spl_early_puts("\n");
+}
+
 /* Map the PSRAM window through the MSPI2 "S" MMU (64 KiB pages). */
 static void psram_mmu_map(u32 size)
 {
@@ -781,6 +881,7 @@ int p4_spl_psram_init(void)
 	psram_axi_config();
 	psram_mmu_map(0x01000000);
 	psram_rw_test();
+	psram_bulk_test();
 	psram_mmu_report();
 
 	p4_spl_early_puts("psram: check\n");

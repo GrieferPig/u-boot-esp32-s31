@@ -1487,3 +1487,43 @@ real fault/hang in the bulk write path, not a watchdog timeout. Next round: find
 the copy-size boundary (256 B / 512 B / 1 KiB / 2 KiB) and look at what the
 cache/AXI path needs for multi-line writes (likely `CTRL1` splice or the DDR
 write dummy/write latency in MR4).
+
+## Round 45: bulk writes inside the SPL are fine, U-Boot's `cp` is broken
+
+Bisected the "bulk copies reset the board" problem:
+
+* **PSRAM bulk writes from the SPL are fine**: 64 B, 256 B, 1 KiB, 4 KiB and
+  16 KiB all verify (`bulk 0x40=ok ... bulk 0x4000=ok`) at `0x48100000`.
+* **`mw.l` with 0x400 words also works from U-Boot** (4 KiB written and read
+  back).
+* **`cp.b` is what breaks**, and it is a U-Boot bug, not PSRAM:
+
+```
+esp32p4> cp.b 0x40900000 0x48e00000 0x800
+Unhandled exception code: 939524097
+EPC: 00000000 RA: 00000000 TVAL: 00000000
+```
+
+`cp` jumps to address 0. Workaround: do the load from the SPL.
+
+Added `p4_spl_psram_load_payload()`, called right after the flash MMU is set up
+in `spl.c`:
+
+* kernel from flash 0x200000 (32-bit ARM64 `image_size` at +0x10),
+* device tree from flash 0x900000 (`totalsize` at +0x04),
+* copying flash -> PSRAM directly hung, so it now bounces through a 4 KiB SRAM
+  buffer.
+
+That copy *runs* (progress dots every 64 KiB, about 178 of them before the board
+resets with `rst:0x7`), so two things still need fixing:
+
+1. the size it computes looks too large for a 3.5 MB payload - print `ksize` and
+   `dsize` *before* copying,
+2. the HP watchdog still fires during the copy even though the function clears
+   RWDT `wdt_en`/`flashboot` and sets SWDT `swd_disable`; find which watchdog
+   actually produces `HP_SYS_HP_WDT_RESET` in the SPL (the SM1 `hw_watchdog_reset()`
+   feeds RWDT, SWDT and the four TIMG MWDTs - feeding all of them inside the copy
+   loop is the cheap fix).
+
+After that, `booti 0x48000000 - 0x48f00000` from the prompt should finally start
+Linux with the kernel and DT already resident in PSRAM.
