@@ -8,6 +8,7 @@
  *    that the SPL placed in PSRAM.
  */
 
+#include <asm/io.h>
 #include <init.h>
 #include <errno.h>
 #include <spl.h>
@@ -173,11 +174,34 @@ static void p4_wdt_off(void)
 }
 #endif
 
+
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+/* Feed every watchdog the ROM may have armed (RWDT, SWDT, all TIMG MWDTs). */
+void p4_wdt_feed(void)
+{
+	void *wdt = (void *)0x50116000;
+	u32 t;
+
+	writel(0x50d83aa1, wdt + 0x18);
+	writel(1, wdt + 0x14);
+	writel(0, wdt + 0x18);
+
+	writel(0x50d83aa1, wdt + 0x20);
+	writel(readl(wdt + 0x1c) | (1u << 31), wdt + 0x1c);
+	writel(0, wdt + 0x20);
+
+	for (t = 0; t < 4; t++) {
+		u32 base = 0x500c2000 + t * 0x1000;
+
+		writel(0x50d83aa1, (void *)(base + 0x64));
+		writel(0x50d83aa1, (void *)(base + 0x60));
+		writel(0, (void *)(base + 0x64));
+	}
+}
+#endif
+
 int board_late_init(void)
 {
-#if defined(CONFIG_ESP32P4_SRAM_ONLY)
-	p4_wdt_off();
-#endif
 #ifdef CONFIG_ESP32P4_HW_IDF_HANDOFF
 	puts("P4_UBOOT: IDF hardware handoff (experimental)\n");
 #else

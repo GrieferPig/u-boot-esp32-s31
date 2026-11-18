@@ -26,6 +26,12 @@
 #else
 #include <asm/arch-esp32s31/soc/uart_reg.h>
 #endif
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+void p4_wdt_feed(void);
+#define P4_WDT_FEED()	do { p4_wdt_feed(); } while (0)
+#else
+#define P4_WDT_FEED()	do { } while (0)
+#endif
 
 DECLARE_GLOBAL_DATA_PTR;
 
@@ -179,8 +185,25 @@ static int esp_serial_putc(struct udevice *dev, const char ch)
 	return rc;
 }
 
+
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+/* Heartbeat: prove that the console is still being polled. */
+static void p4_hb_tick(void)
+{
+	static u32 count;
+
+	if (++count % 2000 == 0)
+		P4_WDT_FEED();
+	if (count % 20000 == 0)
+		writel('.', (void *)0x500ca000);
+}
+#else
+#define p4_hb_tick()	do { } while (0)
+#endif
+
 static int esp_serial_pending(struct udevice *dev, bool input)
 {
+	p4_hb_tick();
 	struct esp_uart_plat *plat = dev_get_plat(dev);
 	struct uart_esp *regs = plat->regs;
 
