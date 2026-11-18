@@ -296,3 +296,39 @@ and then traps at `0x4ff93240` with `mcause 0x30000002` (illegal instruction) -
 i.e. it jumps a few hundred bytes below the relocated image into unused SRAM.
 Next: check `gd->mon_len`/`relocaddr` handling for this layout (or disable
 relocation for the SRAM build).
+
+## Round 15: where the SRAM hand-over stops
+
+`CONFIG_ESP32P4_SRAM_ONLY` now has an initcall tracer: `lib/initcall.c` writes
+the address of every entry of `init_sequence[]` to UART0 before calling it
+(only for this configuration). The boot shows U-Boot running the **whole**
+`init_sequence_f` list:
+
+```
+U-Boot 2024.07-...        banner
+ 4ff08908 ... 768 KiB     every initcall traced, DRAM reported
+ ... 4ff089da KLMN        last initcall is setup_reloc, then jump_to_copy
+```
+
+Markers placed in `arch/riscv/cpu/start.S` (`K` before `invalidate_icache_all`,
+`L` after it, `M` after `flush_dcache_all`, `N` before `jr t4`) all appear, so
+the code reaches the jump into `board_init_r` - and dies there.
+
+JTAG shows why: the relocation destination is still **empty**:
+
+```
+0x4ff93000: 00000000 00000000 ...    <- where U-Boot should have copied itself
+0x4ff00000: f1402573 84ae822a ...    <- source image, intact
+mepc 0x4ff93280  mcause 0x30000002   <- running zeros
+```
+
+So `jr t4` jumps into untouched SRAM. The copy loop in `relocate_code` either is
+skipped (`beq t0, s4`) or writes somewhere else. `relocaddr` comes from
+`ram_top - mon_len` = `0x4ffc0000 - 0x2c5e8` rounded down = `0x4ff93000`, which
+does not overlap the source, so the arithmetic looks right - the next step is a
+direct print of `gd->relocaddr`, `gd->start_addr_sp` and `gd->mon_len` right
+before the `memcpy` in `setup_reloc` (the helper is in place as
+`p4_reloc_report()`, but its output did not appear in the last run).
+
+Also learned: `GD_FLG_SKIP_RELOC` is not an option on RISC-V - `board_init_f`
+must not return, so skipping relocation just falls through into SPL code.
