@@ -460,6 +460,46 @@ static int psram_txn_local(u16 cmd, u16 cmd_bits, u32 addr, u32 addr_bits,
 	return 0;
 }
 
+/*
+ * PSRAM pad configuration: the reference boot has the output enable bit and the
+ * drive strength fields set on every PSRAM pad, our chain leaves them at the
+ * reset value. 0x500e1200+ is deliberately not touched (that range is GPIO
+ * output/OE config for other pins and writing it reset-loops the board).
+ */
+static const u32 psram_pad_state[][2] = {
+	{ 0x500e1020, 0x00001b02u }, { 0x500e1024, 0x00001b02u },
+	{ 0x500e1028, 0x00000802u }, { 0x500e102c, 0x00000802u },
+	{ 0x500e1030, 0x00000802u }, { 0x500e1034, 0x00000802u },
+	{ 0x500e1038, 0x00000802u }, { 0x500e103c, 0x00000802u },
+	{ 0x500e1040, 0x00000802u }, { 0x500e1044, 0x00000802u },
+	{ 0x500e1048, 0x00000802u }, { 0x500e104c, 0x00000802u },
+	{ 0x500e1050, 0x00000802u }, { 0x500e1054, 0x00000802u },
+	{ 0x500e1058, 0x00000802u }, { 0x500e105c, 0x00000802u },
+	{ 0x500e1060, 0x00000802u }, { 0x500e1064, 0x00000c02u },
+	{ 0x500e1068, 0x00000c02u }, { 0x500e106c, 0x00000802u },
+	{ 0x500e1070, 0x00000802u }, { 0x500e1074, 0x00000802u },
+	{ 0x500e1078, 0x00000802u }, { 0x500e107c, 0x00000802u },
+	{ 0x500e1080, 0x00000802u }, { 0x500e1084, 0x00000802u },
+	{ 0x500e1088, 0x00000802u }, { 0x500e108c, 0x00000802u },
+	{ 0x500e1090, 0x00000802u }, { 0x500e1094, 0x00000802u },
+	{ 0x500e10a0, 0x00001802u }, { 0x500e10a4, 0x00001802u },
+	{ 0x500e10a8, 0x00001802u }, { 0x500e10ac, 0x00001802u },
+	{ 0x500e10b0, 0x00001802u }, { 0x500e10b4, 0x00001802u },
+	{ 0x500e10b8, 0x00001802u }, { 0x500e10bc, 0x00001802u },
+	{ 0x500e10c0, 0x00001802u }, { 0x500e10c4, 0x00001802u },
+	{ 0x500e10c8, 0x00000802u }, { 0x500e10cc, 0x00000802u },
+	{ 0x500e10d0, 0x00000802u }, { 0x500e10d4, 0x00000802u },
+	{ 0x500e10d8, 0x00000802u }, { 0x500e10dc, 0x00000802u },
+};
+
+static void psram_pads_init(void)
+{
+	u32 i;
+
+	for (i = 0; i < ARRAY_SIZE(psram_pad_state); i++)
+		writel(psram_pad_state[i][1], (void *)psram_pad_state[i][0]);
+}
+
 /* Hex PSRAM register read: cmd 0x4040, 32 bit address, 16 bit result. */
 static int psram_read_reg(u32 reg, u32 dummy, u32 *out)
 {
@@ -468,7 +508,7 @@ static int psram_read_reg(u32 reg, u32 dummy, u32 *out)
 
 static void psram_probe(void)
 {
-	static const u32 dummies[] = { 8, 12, 16, 20, 24, 28 };
+	static const u32 dummies[] = { 4, 8, 14, 20, 26, 32, 40, 50, 60 };
 	u32 i, val = 0;
 	int ret;
 
@@ -495,6 +535,7 @@ int p4_spl_psram_init(void)
 
 	p4_spl_early_puts("psram: cmds\n");
 	psram_pmu_fixup();
+	psram_pads_init();
 	psram_probe();
 	psram_cache_cmds();
 	psram_mmu_report();

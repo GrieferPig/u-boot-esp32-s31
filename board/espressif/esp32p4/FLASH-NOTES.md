@@ -1264,3 +1264,38 @@ Next round: narrow the range. Start with just the IO-MUX registers
 `0x500e1200+` alone, then check the probe; if the chip still answers nothing, look
 at what IDF's `mspi_timing_ll_pin_drv_set(2)` actually writes instead of copying
 whole registers.
+
+## Round 39: the probe was reading the wrong register - no W/BUF buffer exists there
+
+Added only the IO-MUX part of the pad diff (`0x500e1020..0x500e10dc`) and kept
+`0x500e1200+` untouched: no more reset loop (0 banners), the chain boots, but the
+probe still returned zeros for every dummy from 4 to 60 bits.
+
+Then found the real reason the probe always read zero:
+`0x5008e040` is **`SPI_MEM_S_CACHE_SCTRL_REG`**, not a data buffer, and this
+register map has **no `W0..W15`/`BUF0..15` registers at all**:
+
+```
+0x00 CMD      0x08 CTRL    0x0c CTRL1   0x10 CTRL2   0x14 CLOCK
+0x18 USER     0x1c USER1   0x20 USER2   0x2c RD_STATUS
+0x34 MISC     0x3c CACHE_FCTRL          0x40 CACHE_SCTRL
+0x44 SRAM_CMD 0x48 SRAM_DRD_CMD         0x4c SRAM_DWR_CMD
+0x50 SRAM_CLK 0x54 FSM
+0xc0.. INT, 0xd4 DDR, 0x100+ PMS regions
+```
+
+So `psram_txn_local()` was reading the cache control register as "received data" -
+the transaction may well have been working all along, we simply never looked at
+the right place, and there is no MOSI/RX staging register to look at: the PSRAM
+controller moves payload through the cache/AXI path (or `SRAM_*`), not through a
+W buffer like the flash controller does.
+
+The `SRAM_CMD` fields are cache-line oriented (`SCLK_MODE[1:0]`,
+`SWB_MODE[9:2]`, `SDIN_DUAL`, `SDOUT_DUAL`, `SADDR_DUAL`, ...), so they are not a
+generic transaction path either.
+
+Next round: read the ESP32-P4 TRM section on the PSRAM controller user-mode /
+`SPI_MEM_S` command engine to find where the transceive data actually lands
+(and how IDF's `esp_rom_spi_cmd_config` moves it), then finish the MR read. The
+pads, clocks, MMU gate and controller config are now all in place, so this is the
+last unknown.
