@@ -49,14 +49,16 @@ int p4_spl_flash_init(u32 size)
 
 	cache_init(0);
 
+	/* Bring the caches up first, then populate the flash MMU entries. */
+	en_dcache(0);
+	en_icache0(0);
+	en_l2(0);
+	udelay(10);
+
 	for (i = 0; i < pages; i++) {
 		writel(i, (void *)MMU_ITEM_INDEX);
 		writel((i << 16) | P4_MMU_FLASH_VALID, (void *)MMU_ITEM_CONTENT);
 	}
-
-	en_icache0(0);
-	en_dcache(0);
-	en_l2(0);
 	udelay(100);
 
 	return 0;
