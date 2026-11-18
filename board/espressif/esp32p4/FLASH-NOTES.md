@@ -2819,3 +2819,27 @@ Remaining TRM-backed work: if the caches are ever wanted, ch.12
 `HP_SYS_CLKRST_RST_EN_L2_CACHE` / the `L1CACHE_*_CPU_CLK_EN` bus clocks and
 ch.22 Register 22.15/22.16 must be programmed in the documented order (release
 reset, enable clocks, then the ROM helpers), which this port does not do.
+
+## Round 78: the direct window hangs too, so the cache is not implicated
+
+TRM ch.9 §9.3.3.1 separates the two external-RAM windows: 0x4800_0000 is
+"accessed by HP CPU via cache", 0x8800_0000 "accessed directly". The SPL has
+always written its burst check through the direct alias but never read it back,
+so this round wrote sixteen words at 0x88200000 and read both windows:
+
+```
+direct:            <- read of 0x88200000 hangs here
+```
+
+No output at all - the read of the direct alias wedges the AXI path exactly
+like the cached one does. Combined with rounds 73-77 this settles the cache
+question: the HP cache is not in the failure path (it is unclocked anyway, per
+TRM ch.22 Register 22.15 and the reference's 0x8 readback). The defect is in
+the MSPI2 read transaction itself, which stalls whenever a read is issued with
+the 16-line data phase and returns 16 bits of data when the 8-line phase is
+used instead.
+
+Where that leaves the objective: command-path register and array reads work
+(this is what the SPL uses for bring-up), the cache configuration matches the
+proven reference, and the PSRAM init is self-healing. Only "boot Linux from the
+U-Boot prompt" remains, and it needs working reads through the memory window.
