@@ -797,3 +797,47 @@ So the next attempt should follow that order: set the page size through MMU id 0
 (flash), unmap both tables, and only map the PSRAM window after the PSRAM cache
 is up (that is, after the MSPI2 cache config written by `psram: cmds`), and
 re-check the S-side `MMU_POWER_CTRL` semantics before the first entry write.
+
+## Round 28: PSRAM beyond the first pages still faults
+
+Experiments from the U-Boot prompt (much faster than rebuilding the SPL):
+
+1. Single entry, done by hand:
+   `mw.l 0x5008e380 1` (index), `mw.l 0x5008e37c 0xc01` (content = page 1 |
+   PSRAM_VALID | ACCESS_PSRAM), then `mw.l 0x48010000 0xa5a5a5a5` and `md`
+   read back `a5a5a5a5`.
+2. Same for entry 16 (`content 0xc10`, address 0x48100000): **the board resets**
+   as soon as that page is touched.
+
+Checked IDF's encoder to be sure the value is right
+(`hal/esp32p4/include/hal/mmu_ll.h`, `mmu_ll_write_entry()`):
+
+```c
+mmu_val = paddr >> page_shift;
+mmu_val |= SOC_MMU_PSRAM_VALID;   /* BIT(11) */
+mmu_val |= SOC_MMU_ACCESS_PSRAM;  /* BIT(10) */
+REG_WRITE(SPI_MEM_S_MMU_ITEM_INDEX_REG, entry_id);
+REG_WRITE(SPI_MEM_S_MMU_ITEM_CONTENT_REG, mmu_val);
+```
+
+That is exactly what we write, with the same registers (`0x5008e380/0x5008e37c`),
+so the encoding is not the problem.
+
+A full mapping from U-Boot C code (`p4_psram_map(16 MiB)`, 256 entries, printed
+`PSRAM mapped 16 MiB`) also resets the board on the first access beyond the
+ROM-mapped pages, and adding `Cache_Invalidate_All(0x3f)` right after the writes
+resets even earlier - confirming again that the ROM cache-flush helpers must not
+be called from this port.
+
+The read-back of entry 1 may well have been served by the data cache, so treat
+"PSRAM works at 0x48010000" as unproven too: what is certain is that everything
+beyond the ROM-mapped ~128 KiB faults.
+
+All of this is reverted; the chain is back to the verified state (prompt alive,
+`md 0x48000000` reads `00000000 01010101`).
+
+Next idea: the PSRAM window is probably limited by the **MSPI2 cache
+configuration**, not by the MMU table - `SPI_MEM_S_CTRL/CTRL2/CACHE_SCTRL`
+(0x08/0x10/0x40 on 0x5008e000) describe the address window and the PSRAM size.
+Compare those against a working IDF boot (`psram: cmds` replayed only a subset),
+and check `SPI_MEM_S_MISC` for the "cache size" field before touching the MMU.
