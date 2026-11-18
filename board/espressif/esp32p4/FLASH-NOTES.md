@@ -475,3 +475,49 @@ Things checked this round:
 Next: check whether device model sees the DT at all (print `gd->fdt_blob` and
 the result of `initr_dm`), then either fix the bind or set
 `CONFIG_SERIAL_SEARCH_ALL` so `serial_init` can fall back to any working device.
+
+## Round 20: the driver model gets a device tree, and U-Boot prints
+
+The serial panic had one root cause: **the appended DT was being wiped by the
+BSS clear.**
+
+- `_end` is placed *before* `.bss` in `arch/riscv/cpu/u-boot.lds`, and for
+  `OF_SEPARATE` the DT is appended at `_end`, so the blob sits exactly where
+  `clear_bss` runs. Disabling `reloc_fdt` made it worse (`fdt_check_header`
+  returned `-9` = bad magic).
+- Fix: `reserve_fdt()` parks the copy at a fixed free SRAM address
+  (`0x4ff70000`, between the SPL area and the heap) and `reloc_fdt()` keeps
+  copying it there before the BSS wipe.
+
+Evidence (`D <fdt> <hdr> <ret> <serials> <offset> <size> <simplebus>`):
+
+```
+D 4ff70000 00000000 00000000 00000001 00000328 000015c3 00000002
+```
+
+- header check 0 (valid), `dm_init_and_scan` 0, **one serial device**,
+  `/soc/serial@500ca000` found at offset 0x328, `simple-bus` bound.
+
+And U-Boot now talks over its own console:
+
+```
+Core:  7 devices, 5 uclasses, devicetree: separate
+Loading Environment from nowhere... OK
+```
+
+The next stop is `jumptable_init()` (+0x30, `TVAL 0`): it stores through a NULL
+pointer, i.e. `malloc(sizeof(struct jt_funcs))` did not give a usable heap -
+the allocator is the next thing to fix (`initr_malloc` only sets the globals
+because `CONFIG_SYS_MALLOC_CLEAR_ON_INIT` and `..._DEFAULT_TO_INIT` are off).
+
+Note `himport_r: can't insert "bootm_low=..." into hash table` appears because
+there is no environment storage yet; harmless for now.
+
+Timeline of the console, for reference:
+
+```
+768 KiB                       <- DRAM line (no console, printed by puts)
+.: <initcall addresses>       <- instrumentation
+Core: 7 devices, 5 uclasses   <- first output through the DM serial driver
+Loading Environment ... OK
+```
