@@ -6007,3 +6007,30 @@ sctrl 0x02F7C679, kernel runs to /init start.
 - Mode verified list: cmd 0x4040, mode OPI_DTR, cs 1<<1, addr 32-bit all match
   IDF s_init_psram_mode_reg exactly; only the clock differed (now matched)
   and MR8 bit length (IDF reads MR8 as 8-bit, we read 16-bit).
+
+## Round 9 (2026-11-19): SMEM DLL fixed on, tune simplified to cache path
+
+- The round-8 dual MEM+SMEM sweep was vacuous: rx_trial() exercises the
+  cache path only (cached-window write, sync-engine writeback, invalidate,
+  uncached alias read), so sweeping the MEM user-path DIN/DUMMY (0x184/
+  0x180) could never move the needle, and the path/dll loop toggled the
+  SMEM DLL bit during the MEM sweep while never touching it for SMEM -
+  then cleared it on failure just before the SMEM sweep. Replaced with an
+  SMEM-only sweep (DIN 0x194, CALI 0x190) with the DLL bit forced on,
+  exactly like IDF esp_psram_impl_enable(), which enables
+  psram_ctrlr_ll_enable_dll() unconditionally on MSPI2+MSPI3 and whose
+  tuning never touches the bit.
+- Also removed the stale DLL-off comment block that contradicted the SMEM
+  enable two paragraphs below (round-7 0x180-bit-5 finding is kept: the MEM
+  TIMING_CALI DLL is a different delay line and stays off).
+- Verified: rebuilt SPL (spl.bin 31056 bytes), flashed 0x2000 (Hash of data
+  verified), booted to `esp32p4>` with `rx tune: defaults hold` and
+  `window: bad 0 of 1024`. MSPI3 stays at MPLL/4 80 MHz (IDF point).
+- Array path via MSPI3 still returns all-ones (wordtest/tune), while mode
+  regs verify (low bytes match on every read). Root-cause read of IDF
+  esp_psram_impl_ap_hex.c this round: the reference 80M tier (the `#else`
+  branch - neither 250M nor 200M) programs RD_DUMMY 18 / REG_DUMMY 8 /
+  WR_DUMMY 8 with RD_LAT 2 / WR_LAT 2 at MPLL 320/4, but this port programs
+  the 200M tier (RD 26 / WR 12, lat 4/1) while running the 80 MHz clock.
+  Switching the command path AND the cache SCTRL/final-latency to the 80M
+  tier is the next change (round 10), not more RX sweeping.

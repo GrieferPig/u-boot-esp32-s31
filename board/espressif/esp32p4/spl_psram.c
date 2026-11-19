@@ -873,7 +873,17 @@ static int psram_mode_reg_init(void)
 #define P4_RX_DIN_MODE		(P4_MSPI2_BASE + 0x184)
 #define P4_RX_DIN0_MODE_MASK	(7u << 0)
 #define P4_RX_EXTRA_DUMMY_MASK	(7u << 2)
-#define P4_RX_DLL_BIT		BIT(5)
+/*
+ * IDF psram_ctrlr_ll_enable_dll() sets SMEM_DLL_TIMING_CALI (spi_mem_s_reg.h:
+ * SMEM_TIMING_CALI_REG = MSPI0_BASE + 0x190, bit 5) - NOT the TIMING_CALI
+ * DLL bit at 0x180b5, which is a different delay line (setting it broke
+ * every RX sample point in round 7). This is the cache-path DLL.
+ */
+#define P4_SMEM_TIMING_CALI	(P4_MSPI2_BASE + 0x190)
+#define P4_SMEM_DLL_BIT		BIT(5)
+#define P4_SMEM_DIN_MODE	(P4_MSPI2_BASE + 0x194)
+#define P4_SMEM_DIN0_MODE_MASK	(7u << 0)
+#define P4_SMEM_EXTRA_DUMMY_MASK (7u << 2)
 /* Cache sync engine (real base 0x3FF10000 = IDF DR_REG_CACHE_BASE). */
 #define P4_SYNC_CTRL		0x3ff10098u
 #define P4_SYNC_MAP		0x3ff1009cu
@@ -1724,40 +1734,50 @@ static int rx_trial(void)
 	return 1;
 }
 
+/*
+ * Cache-path (SMEM) RX sample point only. rx_trial() exercises the cache
+ * path (cached-window write, sync-engine writeback, invalidate, uncached
+ * alias read), so only the SMEM registers (DIN 0x194, CALI 0x190) move the
+ * needle; the MEM user-path registers (0x184/0x180) are left alone and the
+ * SMEM DLL bit stays on, exactly like IDF (esp_psram_impl_enable() enables
+ * DLL unconditionally and its tuning never touches the bit).
+ */
 static void rx_apply(u32 din, u32 dummy)
 {
 	u32 v;
 
-	v = readl((void *)P4_RX_DIN_MODE);
-	v &= ~P4_RX_DIN0_MODE_MASK;
+	v = readl((void *)P4_SMEM_DIN_MODE);
+	v &= ~P4_SMEM_DIN0_MODE_MASK;
 	v |= din & 7u;
-	writel(v, (void *)P4_RX_DIN_MODE);
-	v = readl((void *)P4_RX_TIMING_CALI);
-	v &= ~P4_RX_EXTRA_DUMMY_MASK;
+	writel(v, (void *)P4_SMEM_DIN_MODE);
+	/* Never touch the DLL bit in the CALI reg while tuning dummy. */
+	v = readl((void *)P4_SMEM_TIMING_CALI);
+	v &= ~P4_SMEM_EXTRA_DUMMY_MASK;
 	v |= (dummy & 7u) << 2;
-	writel(v, (void *)P4_RX_TIMING_CALI);
+	v |= P4_SMEM_DLL_BIT;
+	writel(v, (void *)P4_SMEM_TIMING_CALI);
 }
 
 /*
- * Self-healing MSPI2 receive timing: sweep the RX sample point
+ * Self-healing SMEM receive timing: sweep the RX sample point
  * (DIN0_MODE) and extra dummy cycles, testing the exact path the kernel
  * needs (cached-window write, engine writeback, invalidate, uncached
  * read). Picks the middle of the longest passing run for margin, the way
- * IDF's mspi_timing_tuning picks its window; falls back to a DLL-assisted
- * pass, and never fails the boot - it reports and keeps the safest point
- * found. Runs on every boot, so voltage/temperature drift is adapted to.
+ * IDF's mspi_timing_tuning picks its window, and never fails the boot -
+ * it reports and keeps the safest point found. Runs on every boot, so
+ * voltage/temperature drift is adapted to.
  */
 static void psram_rx_tune(void)
 {
 	u32 din, dummy, best_din = 0, best_dummy = 0;
 	u32 run_start = 0, run_len = 0, best_start = 0, best_len = 0;
-	u32 dll, pass;
+	u32 pass;
 
 	/*
-	 * The replayed reference point (din 0, dummy 0) is the proven state every
-	 * stable boot in this port ran in. Only deviate from it on evidence that
-	 * it fails; an all-pass sweep has no discriminating power, so picking its
-	 * middle would change timing for no reason.
+	 * The reference point (din 0, dummy 0, DLL on) is the proven state
+	 * every stable boot in this port ran in. Only deviate from it on
+	 * evidence that it fails; an all-pass sweep has no discriminating
+	 * power, so picking its middle would change timing for no reason.
 	 */
 	rx_apply(0, 0);
 	if (rx_trial() && rx_trial()) {
@@ -1765,40 +1785,28 @@ static void psram_rx_tune(void)
 		return;
 	}
 
-	for (dll = 0; dll < 2; dll++) {
-		if (dll) {
-			setbits_le32((void *)P4_RX_TIMING_CALI,
-				     P4_RX_DLL_BIT);
-			udelay(10);
-		}
-		run_len = 0;
-		for (din = 0; din < 8; din++) {
-			for (dummy = 0; dummy < 4; dummy++) {
-				rx_apply(din, dummy);
-				pass = rx_trial() && rx_trial();
-				if (pass) {
-					if (!run_len)
-						run_start = din * 4 + dummy;
-					run_len++;
-					if (run_len > best_len) {
-						best_len = run_len;
-						best_start = run_start;
-						best_din = din;
-						best_dummy = dummy;
-					}
-				} else {
-					run_len = 0;
+	for (din = 0; din < 8; din++) {
+		for (dummy = 0; dummy < 4; dummy++) {
+			rx_apply(din, dummy);
+			pass = rx_trial() && rx_trial();
+			if (pass) {
+				if (!run_len)
+					run_start = din * 4 + dummy;
+				run_len++;
+				if (run_len > best_len) {
+					best_len = run_len;
+					best_start = run_start;
+					best_din = din;
+					best_dummy = dummy;
 				}
+			} else {
+				run_len = 0;
 			}
 		}
-		if (best_len)
-			break;
-		clrbits_le32((void *)P4_RX_TIMING_CALI, P4_RX_DLL_BIT);
 	}
 	if (best_len) {
 		u32 mid = best_start + best_len / 2;
 
-		/* Middle of the best run: maximum margin on both sides. */
 		best_din = (mid / 4) & 7u;
 		best_dummy = mid % 4;
 		rx_apply(best_din, best_dummy);
@@ -1833,15 +1841,17 @@ int p4_spl_psram_init(void)
 	psram_clock_init();
 
 	/*
-	 * IDF esp_psram_impl_enable() turns the MSPI DLL on (TIMING_CALI bit 5,
-	 * verified in spi_mem_s_reg.h) and its tuning never touches DLL, so the
-	 * reference runs DLL-on - but a blind bit-set here broke every RX sample
-	 * point (sweep went all-pass to all-fail, window check 1 bad). DLL-on
-	 * needs IDF's adaptive DQS phase tuning alongside it (our static DQS
-	 * phase/delay + DLL locks wrong; DLL-off ignores DQS entirely). Keep
-	 * DLL off until the full mspi_timing_psram_tuning port lands; the static
-	 * point is the proven working state.
+	 * IDF esp_psram_impl_enable() turns the SMEM DLL on unconditionally
+	 * right after the bus clock and before the mode registers; its tuning
+	 * never touches DLL, so the stable reference runs SMEM-DLL-on. Enable
+	 * the correct bit (SMEM_TIMING_CALI 0x190 bit 5, spi_mem_s_reg.h
+	 * SMEM_TIMING_CALI_REG); the MEM TIMING_CALI DLL bit (0x180 bit 5) is
+	 * a different delay line - setting it broke every RX sample point in
+	 * round 7 - and stays off.
 	 */
+	setbits_le32((void *)P4_SMEM_TIMING_CALI, P4_SMEM_DLL_BIT);
+	udelay(10);
+
 	p4_spl_early_puts("psram: replay\n");
 	psram_replay();
 
