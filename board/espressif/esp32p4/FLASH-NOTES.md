@@ -3950,3 +3950,49 @@ pre-copy bytes for the kernel entry; the hart's behaviour was identical.
 Next: identify the kernel revision actually flashed (build id / strings from the
 Image around the entry, or the payload directory's build logs) and read *its*
 entry code, instead of continuing to compare against a head.S that does not match.
+
+## Round 108: the matching kernel build is found; the hart executes at ~50 instructions/second
+
+**The exact build tree is `/tmp/build-p4`.** Its
+`arch/riscv/boot/Image` has sha256 `f3dd3833…09bc52`, byte-identical to the image
+staged in `/tmp/p4-payload-console` and flashed here, and it still has `vmlinux`
+and `System.map`. `System.map` places `_start` at 0x48000000, `secondary_start_sbi`
+at 0x48000040 and `_start_kernel` at 0x480000a0. So the entry can finally be read
+exactly:
+
+```
+480000a0: 30047073   csrci  mstatus,8
+480000a4: 6289       lui    t0,0x2          <- 2-byte; this is where the hart sits
+480000a6: 30728293   addi   t0,t0,775
+480000aa: 30629073   csrw   mcounteren,t0
+480000ae: 3202f073   csrci  mcountinhibit,5
+480000b2: 01701073   csrw   jvt,zero        <- CSR 0x017 is JVT
+480000b6: f14022f3   csrr   t0,mhartid
+480000ba: 0a029463   bnez   t0,esp32p4_secondary_start
+480000be: 0000100f   fence.i
+480000c2: 2a09       jal    reset_regs
+```
+
+This also supersedes the earlier CSR-based inference: `mcounteren` reading 0x7
+does **not** prove the write never happened (the field is WARL and the part may
+implement only counters 0-2), so those reads were inconclusive.
+
+**The hart is executing, but extremely slowly.** Two samples two seconds apart:
+
+```
+pc       = 0x480000A4   (unchanged)
+mcycle   -> advanced by ~2.7e9 counts
+minstret -> 0x0106b719 -> 0x0106b7e5      (~200 instructions in ~2 s)
+```
+
+~100 instructions per two seconds is ~50 instructions/second, on a 360 MHz core:
+the hart is not stalled, it is crawling, and it never reaches `0xa6`, let alone
+`0xc2`. That is the signature of an instruction-fetch path that goes out to a
+degraded/slow memory rather than a working cache - and the same kernel boots at
+full speed from the reference chain, so what differs is the memory/cache state
+this loader hands over.
+
+Next: measure where the fetch latency is coming from - read the PSRAM/MSPI2 mode
+registers and the cache configuration as U-Boot leaves them and compare against
+the reference chain's values at the same point, then fix the handoff state rather
+than the kernel.
