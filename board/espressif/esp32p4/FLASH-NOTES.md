@@ -3261,3 +3261,40 @@ it is the last one before `booti` can work from the prompt.
 
 Reverted to the working state (`window: bad 0x00000000 of 1024`, boots to
 `esp32p4>`).
+
+## Round 90: with the L2 on, PSRAM window writes are dropped - not merely dirty
+
+Added the ROM cache writeback (`Cache_WriteBack_Invalidate_All`, ROM
+0x4fc0041c, map bits from rom/cache.h: `CACHE_MAP_L1_DCACHE` BIT(4) |
+`CACHE_MAP_L2_CACHE` BIT(5)) at the end of the preload and read the
+destinations back from inside the SPL straight afterwards:
+
+```
+preload: k 0x00354c60 d 0x0000113d
+.... preload: done, dtb src 0xedfe0dd0 dst 0x19030000 kern dst 0x00000002
+```
+
+The **source** reads correctly (0xedfe0dd0) and the destinations do not, so the
+copy never lands - and because the read-back is done right after the writeback,
+the data was not sitting in the cache either. With the caches on (i.e. after
+`p4_spl_flash_init`), writes to the PSRAM window are dropped outright.
+
+Trying to bypass it by disabling the L2 for the copy (`Cache_Disable_L2_Cache`,
+ROM 0x4fc00500) kills the boot:
+
+```
+Unhandled exception code: 939524101      (load access fault)
+EPC: 4ff40ff4  TVAL: 40200010            <- the kernel header read from flash
+```
+
+So flash XIP *requires* the L2, and PSRAM window writes fail *with* the L2. That
+inversion is the remaining defect and it points at the L2's configuration of the
+two external windows (page size / MMU / cacheability attributes), not at the
+copy code: with the caches off the same window passes the 4 KB pattern test, and
+with them on every access to it misbehaves.
+
+State restored to the commit: boots to `esp32p4>`, `window: bad 0x00000000 of
+1024`. Next: compare how the working reference configures the L2 for the flash
+and PSRAM windows (the cache attributes / `HP_SYSTEM` cache config / PMA
+entries that map 0x4000_0000 and 0x4800_0000) rather than trying more copy
+placements.
