@@ -3074,3 +3074,31 @@ Tried enabling the L1 D-cache afterwards as well:
 
 Window read still stalls. State: cache clocks on at 0x500E5020, command path
 verifying (`read80 0x00000001`), boots to `esp32p4>`.
+
+## Round 85: enabling the L1 D-cache in this SPL is not viable
+
+Tried the S31 port's early-cache order (`spl_cache_mmu.c`: clock the caches,
+invalidate, enable) moved to the very top of `spl_board_init()`, before the
+PSRAM work, with the L2 left entirely as RAM:
+
+```
+void p4_spl_cache_early_init(void)  /* clocks 0x500E5020 = 0x33, invalidate L1 D,
+                                       Cache_Enable_L1_DCache(0) */
+```
+
+Result: immediate trap storm, `P4TRAP cause=0x38000002 epc=0x826bbc1e`
+(instruction access fault at a nonsense address) interleaved with
+`cause=0x30000005 epc=0x4ff40408`. So turning the L1 D-cache on in this SPL
+breaks execution regardless of when it is done - the SPL has no cache/PMA
+setup for its own L2MEM code and stack the way the IDF bootloader has.
+
+Reverted. The cache clocks (0x500E5020 bits 0/1/4/5, TRM ch.22 Reg 22.15) stay
+enabled, which matches the reference's 0x33, but no cache is enabled by this
+SPL. Steady state: command path verifying (`read80 0x00000001`), boots to
+`esp32p4>`.
+
+Note for the next attempt: the reference reaches PSRAM execution through the
+IDF bootloader, which installs the MMU/PMA and the cache long before any
+application code runs. Replicating that means the cache/MMU bring-up has to be
+the very first thing in the SPL (before the stack is used), which the current
+U-Boot SPL entry flow does not give us without restructuring it.

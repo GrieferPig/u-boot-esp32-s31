@@ -1382,6 +1382,7 @@ static void psram_cache_clocks_on(void)
 
 }
 
+
 static void psram_mmu_map(u32 size)
 {
 	u32 entries = size >> 16;
