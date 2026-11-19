@@ -3652,3 +3652,51 @@ boot it from the physical address** - a clean boot with `booti 0x48000000 -
 0x48600000` reads the header from the part. That is the state to build the final
 boot path on; the flush has to come from somewhere that does not hang (the ROM
 cache helpers are not usable from this context yet).
+
+## Round 100: the kernel runs from PSRAM and spins at 0x480000A4 with no exception
+
+Halted the target right after `p4boot` and read the machine state:
+
+```
+Target halted, PC=0x480000A4
+pc = 0x480000a4   sp = 0x4ff90450   a0 = 0x00000000   a1 = 0x48600000
+```
+
+* the PC is **inside the kernel image** (0x48000000 + 0xA4), so the jump and the
+  instruction fetch from PSRAM work - `p4boot` really does start the kernel;
+* `a0 = hartid = 0` and `a1 = 0x48600000` (our DTB) are exactly what a RISC-V
+  kernel expects;
+* `sp` is still U-Boot's stack, so the kernel has not reached its own stack
+  setup yet.
+
+Sampled the PC three times with 300 ms between halts - it never moves, so the
+kernel is in a tight loop at 0x480000A4, not making progress. Read the trap
+registers at that point:
+
+```
+mcause = 0x00000000   mepc = 0x00000000   mtval = 0x00000000
+```
+
+No exception has been taken, so this is a deliberate wait loop, not a fault
+handler. The most likely reason is that the kernel is waiting for the second
+hart: this chain only ever starts hart 0 (multi-hart bring-up is still on the
+list), while the reference's U-Boot starts both cores.
+
+Also confirmed the Image header this jump is based on:
+
+```
+88000000: 0000a045 00010000 00000000 00000000
+88000010: 00354c60 00000000 00000000 00000000   image_size = 0x354c60
+88000020: 00000002 ...  88000030: 43534952 00000056 05435352 ...
+```
+
+`text_offset = 0`, so the entry really is 0x48000000 and `p4boot`'s jump target is
+right.
+
+Note: watching COM10 is not usable for this - opening that port resets the chip
+into download mode (`boot:0x307 (DOWNLOAD(USB/UART0/SPI))`), so UART0 on COM9
+stays the only observation channel.
+
+Next: disassemble/read the loop at 0x480000A4 to confirm what it waits on, and
+if it is the second hart, implement the P4's core-1 start so both harts enter the
+kernel.
