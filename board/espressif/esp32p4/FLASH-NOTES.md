@@ -4988,3 +4988,52 @@ mode is stable but cannot write back through the cache. That is the precise cont
 the port is stuck on, and it is now stated as such rather than guessed at.
 
 State: reverted; our chain flashed (2/2 hashes), `PROMPT OK`, preload verifying.
+
+## Round 131: the window reads and writes back from the same addresses; only the write direction is inert
+
+Narrowed the failure to a single direction with four measurements.
+
+**1. Splice is not the cause.** Cleared `AW_SPLICE_EN` / `AR_SPLICE_EN`
+(`SPI_MEM_S_CTRL1` bits 26/25) for the 8-line phase: prompt still fine, preload still
+verifies, and a cached window store still never reached the part. Reverted.
+
+**2. The PSRAM MMU is identical to the reference's.** Read the entries with the indexed
+interface (`+0x380` index, `+0x37c` content, `+0x384` page size) on both chains:
+
+| entry | this port | reference |
+| --- | --- | --- |
+| 0 | 0x00000C00 | 0x00000C00 |
+| 0x0E | 0x00000C0E | 0x00000C0E |
+| 0x10 | 0x00000C10 | 0x00000C10 |
+| page size | 0x13200004 | 0x13200004 |
+
+**3. Window reads are live and correct.** At an address the port has never touched
+(0x4820_0000, 2 MiB into the kernel) the cached window and the uncached alias agree
+exactly, and they agree with the flash source the preload checks against:
+
+```
+48200000: ab764b0c 6b0ae8b6
+88200000: ab764b0c 6b0ae8b6
+48000000: 0000a045 00010000
+88000000: 0000a045 00010000
+```
+
+**4. Window writes never reach the part, even under eviction pressure.** Cleared 64 KiB
+of the part to 0xFFFFFFFF through the alias, wrote 16 KiB through the cached window, and
+the part still reads all-FF; the window shows the new value throughout.
+
+So the same address reads correctly through the cache and writes into a hole. Everything
+that could explain a bandwidth or mapping problem is verified equal to the reference (MMU
+entries, page size, MSPI2 registers except the 16-line bits, pin mux, cache block, cache
+enables, PMA entry 15). The remaining variable is the **cache attribute** driving the
+write: the region is cached and the dirty line is simply never written back, which points
+at the PMA/attribute side rather than at the controller.
+
+State: splice change reverted; our chain flashed (2/2 hashes), `PROMPT OK`, preload
+verifying.
+
+Next: stop using the ROM's cacheable attribute for the window and give the PSRAM range an
+explicit **write-through** attribute (cacheable, W bit set, `WRITETHROUGH` set, but *not*
+`NONCACHEABLE` - that is what made entry 15 experiments fail). Write-through pushes every
+store to the part instead of relying on eviction, which is exactly the direction that is
+proven broken.
