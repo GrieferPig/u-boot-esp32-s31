@@ -3419,3 +3419,44 @@ contents from the SPL and compare entry 0 against entry 240 and against the
 reference's table, then look at what the SPL's own window access at
 0x48000000..0x48000FFF returns (the boot-time pattern test passes there before
 the caches are enabled, which is the same access U-Boot later gets wrong).
+
+## Round 94: the window's cache line is stale, and per-chunk writeback does not fix it
+
+Cross-checked the two paths in U-Boot with writes in both directions:
+
+```
+esp32p4> mw.l 0x48000000 0xaaaa0001 1     (write through the cached window)
+esp32p4> md.l 0x88000000 1  -> 0000a045   (alias: the write never reached the part)
+esp32p4> mw.l 0x88000004 0xbbbb0002 1     (write through the alias)
+esp32p4> md.l 0x48000004 1  -> 00010000   (window: the preload's value, not the alias write)
+```
+
+So the window and the alias address the same memory (the window shows the
+preload's `0x00010000` at offset 4), but the window's *cached* view is stale and
+window writes do not reach the part. Within one 64-byte line the values are even
+inconsistent (`0x48000004` correct, `0x48000038` zero), which is exactly a stale
+line that was filled before the preload wrote the data.
+
+Tried making the cache and the part agree by copying through the **window** with
+`Cache_WriteBack_Addr` (ROM 0x4fc003f4) after every 4 KB chunk. Reading the
+destinations back shows the same incoherent mixture:
+
+```
+cmp 0x00000004 src 0x00010000 dst 0x00000000
+cmp 0x00000038 src 0x05435352 dst 0x05435352
+cmp 0x00100000 src 0x8742001b dst 0x02a67463
+```
+
+so the per-chunk writeback does not produce a coherent line either. Reverted to
+the committed alias-based preload (byte-exact in the part).
+
+Also checked: there is no `dcache` command in this U-Boot (`Unknown command
+'dcache'`), so the cache cannot simply be switched off at the prompt to confirm
+the hypothesis in place.
+
+Next: stop writing through the cache for this data at all and stop U-Boot from
+reading it through the cache - i.e. clear the PSRAM window's cacheability before
+the preload (PMA or the L2's region attributes) and verify with a window read
+that matches the alias. The window self-check already proves the uncached path
+is correct, so making the window uncached for U-Boot too should let `booti` see
+the RISCV magic and start the kernel.
