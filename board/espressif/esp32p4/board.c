@@ -257,6 +257,48 @@ void hw_watchdog_reset(void)
 #define P4_DTB_RUN		0x48600000u
 #define P4_KERN_ALIAS		0x88000000u
 #define P4_DTB_ALIAS		0x88600000u
+/*
+ * The kernel's SMP start (arch/riscv/kernel/cpu_ops_spinwait.c
+ * p4_prepare_secondary) requires the DTB at 0x48f00000: it checks the
+ * firmware mailbox's dtb field and dtb_early_pa against it, and the DTB's
+ * own reserved-mem names boot-dtb@48f00000. p4boot copies the SPL blob
+ * there fresh through the uncached alias at boot time, so no lifetime
+ * hazard with U-Boot's own allocations exists.
+ */
+#define P4_DTB_KERN		0x48f00000u
+#define P4_DTB_KERN_ALIAS	0x88f00000u
+/*
+ * Firmware secondary-hart mailbox, published to the kernel as
+ * /chosen espressif,cpu1-boot-mailbox. Layout and values must match both
+ * the retained IDF loader (main/handoff_contract.h: magic 0x534D5034,
+ * 28 bytes) and the kernel's p4_prepare_secondary check (magic, ready==1,
+ * release==0, status==0, entry==0x48000000, dtb==0x48f00000, revision==103;
+ * address inside [0x4FF00000, 0x4FF40000), 64-byte aligned). 0x4FF3C000 is
+ * clear of U-Boot proper (~0x4FF00000+0x27c20) and the SPL (0x4FF40000+).
+ */
+#define P4_MBOX_ADDR		0x4ff3c000u
+#define P4_MBOX_SIZE		28u
+#define P4_MBOX_MAGIC		0x534d5034u
+/* Hart1 waiter home: LP TCM RAM, selected by HPCORE1_STAT_VECTOR_SEL
+ * (LP_CLKRST+0x14 bit 31 = 0; IDF lp_clkrst_reg.h). HPCORE1_SW_RESET
+ * (same register, bit 29, WT) reboots hart1 into it. */
+#define P4_LPRAM_WAIT		0x50108000u
+#define P4_LPCLKRST_CTRL0	0x50111014u
+#define P4_RST_EN_CORE1		0x500e60c0u
+#define P4_CORE1_CLK		0x500e6014u
+#define P4_LP_RST_CAUSE		0x50111010u
+#define P4_LPMEM_FORCE		0x5011102cu
+/*
+ * IDF start_other_core path (esp_system cpu_start.c, hal cpu_utility_ll.h):
+ * hart1 boots the HP ROM at POR and parks there; IDF unstalls it, enables
+ * its clock, releases its reset, then publishes the APP entry through the
+ * ROM's appcpu boot hook (ets_set_appcpu_boot_addr, 0x4fc000a8), which the
+ * parked hart1 spins on. PMU_CPU_SW_STALL_REG field [23:16]: 0x86 stalls,
+ * 0xFF resumes; HP_SYSTEM CORESTALLED_ST bit 1 reports the stall.
+ */
+#define P4_PMU_SW_STALL		0x50115200u
+#define P4_CORE_STALLED_ST	0x500e5064u
+#define P4_ROM_APPBOOT		0x4fc000a8u
 
 /*
  * "p4wb [map]" - ROM Cache_WriteBack_All (0x4fc00414), map bits from
@@ -318,7 +360,38 @@ U_BOOT_CMD(p4wba, 3, 0, do_p4wba, "write back one range", "<addr> <size>");
 #define P4_CACHE_SYNC_SIZE	0x3ff100a4u
 #define P4_CACHE_SYNC_MAP_D_L2	0x30u
 #define P4_CACHE_SYNC_WB	0x4u
+#define P4_CACHE_SYNC_INV	0x1u
 #define P4_CACHE_SYNC_DONE	0x10u
+
+/* One sync-engine op (writeback or invalidate) over a range; 0 = done. */
+static int p4_cache_sync_op(unsigned int addr, unsigned int bytes, unsigned int op)
+{
+	unsigned int off;
+
+	for (off = 0; off < bytes; off += 0x10000) {
+		unsigned int n = bytes - off > 0x10000 ? 0x10000
+						       : bytes - off;
+		unsigned int spin = 0;
+
+		writel(P4_CACHE_SYNC_MAP_D_L2, (void *)P4_CACHE_SYNC_MAP);
+		writel(addr + off, (void *)P4_CACHE_SYNC_ADDR);
+		writel(n, (void *)P4_CACHE_SYNC_SIZE);
+		writel(op, (void *)P4_CACHE_SYNC_CTRL);
+		while (!(readl((void *)P4_CACHE_SYNC_CTRL) &
+			 P4_CACHE_SYNC_DONE)) {
+			if (++spin > 1000000)
+				return -1;
+		}
+	}
+	asm volatile("fence" ::: "memory");
+	return 0;
+}
+
+/* Invalidate a cached PSRAM range (drop possibly stale lines). */
+static int p4_cache_sync_inv(unsigned int addr, unsigned int bytes)
+{
+	return p4_cache_sync_op(addr, bytes, P4_CACHE_SYNC_INV);
+}
 
 /*
  * Retained SRAM cache-sync stub for the kernel handoff. The kernel looks for
@@ -353,60 +426,251 @@ int p4_cache_sync_stub(unsigned int start, unsigned int bytes)
 	return 0;
 }
 
-static int do_p4boot(struct cmd_tbl *cmdtp, int flag, int argc,
-		     char *const argv[])
-{
-	void (*kernel)(u32 hart, void *dtb) = (void *)P4_KERN_RUN;
+/*
+ * Hart1 firmware waiter, copied to LP RAM by p4boot and entered via
+ * HPCORE1_SW_RESET with STAT_VECTOR_SEL = LP RAM. Mirrors the retained IDF
+ * loader's secondary_wait (main/p4_hardware_loader.c): M-mode, interrupts
+ * off out of reset; open user-PSRAM PMP entry 7 exactly as IDF does
+ * (PMP_L|NAPOT|R|W|X over [0x48000000, 0x58000000): pmpaddr7 = 0x127FFFFF,
+ * the entry-7 byte of pmpcfg1 = 0x9F); report 0/1 in mailbox status; then
+ * poll release and jump to the kernel image entry, whose head selects the
+ * secondary path itself (arch/riscv/kernel/head.S esp32p4_secondary_start).
+ * Both HP harts share L1D, so the SRAM mailbox needs no cache management.
+ * Written with the assembler (never hand-encoded) and position-independent.
+ */
+__asm__(
+".pushsection .text.hart1waiter,\"ax\"\n"
+".global p4_waiter_start\n"
+"p4_waiter_start:\n"
+"	lui t0, 0x4ff3c\n"		/* mailbox 0x4ff3c000 */
+"	li t1, 1\n"
+"	sw t1, 16(t0)\n"		/* marker: entry = hartid (alive) */
+"	fence\n"
+"1:	lw t1, 0(t0)\n"		/* magic published? */
+"	li t2, 0x534d5034\n"
+"	bne t1, t2, 1b\n"
+"	lui t1, 0x12800\n"		/* pmpaddr7 = NAPOT(0x48000000, 0x4c000000) */
+"	addi t1, t1, -1\n"		/* 0x127fffff */
+"	csrw 0x3b7, t1\n"
+"	lui t1, 0x9f000\n"		/* entry7 = L|NAPOT|R|W|X */
+"	csrrs zero, 0x3a1, t1\n"
+"	csrr t1, 0x3b7\n"		/* verify PMP took */
+"	li t2, 0x127fffff\n"
+"	bne t1, t2, 2f\n"
+"	csrr t1, 0x3a1\n"
+"	srli t1, t1, 24\n"
+"	li t2, 0x9f\n"
+"	beq t1, t2, 3f\n"
+"2:	li t1, 1\n"
+"	sw t1, 12(t0)\n"		/* status = 1 (PMP failure) */
+"4:	wfi\n"
+"	j 4b\n"
+"3:	sw zero, 12(t0)\n"		/* status = 0 (PMP ok) */
+"	li t1, 1\n"
+"	sw t1, 4(t0)\n"			/* ready = 1 (IRQ-off and parked) */
+"5:	lw t1, 8(t0)\n"		/* release? */
+"	beqz t1, 5b\n"
+"	lw t1, 12(t0)\n"		/* paranoia: jump only on success */
+"	bnez t1, 4b\n"
+"	fence\n"
+"	lw t1, 16(t0)\n"		/* entry */
+"	lw a1, 20(t0)\n"		/* dtb */
+"	li a0, 1\n"
+"	jr t1\n"
+".global p4_waiter_end\n"
+"p4_waiter_end:\n"
+".popsection\n"
+);
+extern char p4_waiter_start[];
+extern char p4_waiter_end[];
 
+static int p4_check_payload(void)
+{
 	/*
 	 * The checks read through the uncached alias on purpose: the cached window
 	 * can serve a stale line, so a magic number read through it proves nothing
 	 * about what the part actually holds.
 	 */
 	if (readl((const void *)(P4_KERN_ALIAS + 0x38)) != 0x05435352u) {
-		printf("p4boot: bad RISCV Image magic at %08x\n", P4_KERN_ALIAS);
-		return CMD_RET_FAILURE;
+		printf("p4: bad RISCV Image magic at %08x\n", P4_KERN_ALIAS);
+		return -1;
 	}
 	if (readl((const void *)P4_DTB_ALIAS) != 0xedfe0dd0u) {
-		printf("p4boot: no fdt at %08x\n", P4_DTB_ALIAS);
-		return CMD_RET_FAILURE;
+		printf("p4: no fdt at %08x\n", P4_DTB_ALIAS);
+		return -1;
+	}
+	return 0;
+}
+
+/*
+ * Relocate the DTB to where the kernel demands it (0x48F00000, see the
+ * P4_DTB_KERN comment): fresh through the uncached alias, then drop any
+ * lines U-Boot may hold for the range so the libfdt edits below read
+ * the fresh copy from the part. Installs the kernel handoff (retained
+ * sync stub address, chip revision, cpu1 boot mailbox) into the copy.
+ */
+static int p4_prep_dtb(void)
+{
+	const u32 *dtb_src = (const u32 *)P4_DTB_SRC;
+	void *fdt = (void *)P4_DTB_KERN;
+	u32 dsize, newsize;
+	int chosen;
+	fdt32_t rev, entry, mbox[2];
+
+	dsize = fdt_totalsize(dtb_src);
+	if (dsize < 40 || dsize > 0x10000) {
+		printf("p4: implausible dtb size %x\n", dsize);
+		return -1;
+	}
+	memcpy((void *)(P4_DTB_KERN_ALIAS), (const void *)P4_DTB_ALIAS, dsize);
+	if (readl((const void *)P4_DTB_KERN_ALIAS) != 0xedfe0dd0u) {
+		printf("p4: dtb relocate failed\n");
+		return -1;
+	}
+	if (p4_cache_sync_inv(P4_DTB_KERN, 0x00010000)) {
+		printf("p4: dtb invalidate failed\n");
+		return -1;
 	}
 
-	printf("p4boot: kernel %08x fdt %08x, jumping\n", P4_KERN_RUN, P4_DTB_RUN);
+	newsize = fdt_totalsize(fdt) + 0x1000;
+	if (fdt_open_into(fdt, fdt, newsize)) {
+		printf("p4: fdt_open_into failed\n");
+		return -1;
+	}
+	chosen = fdt_path_offset(fdt, "/chosen");
+	if (chosen < 0) {
+		printf("p4: no /chosen in dtb\n");
+		return -1;
+	}
+	rev = cpu_to_fdt32(103);
+	entry = cpu_to_fdt32((u32)p4_cache_sync_stub);
+	mbox[0] = cpu_to_fdt32(P4_MBOX_ADDR);
+	mbox[1] = cpu_to_fdt32(P4_MBOX_SIZE);
+	if (fdt_setprop(fdt, chosen, "espressif,chip-revision",
+			&rev, 4) ||
+	    fdt_setprop(fdt, chosen, "espressif,cache-sync-entry",
+			&entry, 4) ||
+	    fdt_setprop(fdt, chosen, "espressif,cpu1-boot-mailbox",
+			mbox, 8)) {
+		printf("p4: fdt setprop failed\n");
+		return -1;
+	}
+	printf("p4: handoff stub @ %08x mbox @ %08x\n",
+	       (u32)p4_cache_sync_stub, P4_MBOX_ADDR);
+	return 0;
+}
+
+/*
+ * Publish the firmware mailbox (status = 2 = pending until the waiter
+ * proves itself), then park hart1 in the LP-RAM waiter: install,
+ * read back, select LP RAM as its reset vector, enable its CPU clock,
+ * SW-reset it, release it, then wait for it to report parked.
+ * Returns 1 when hart1 is parked (SMP on), 0 otherwise; on 0 the magic
+ * is cleared so the kernel fails the SMP validate fast instead of
+ * hanging a hart.
+ */
+static int p4_park_hart1(void)
+{
+	volatile u32 *mbox = (volatile u32 *)P4_MBOX_ADDR;
+	unsigned long wlen = (unsigned long)(p4_waiter_end -
+					     p4_waiter_start);
+	unsigned int spin = 0;
+	int alive = 0;
+	int smp = 0;
 
 	/*
-	 * Install the kernel handoff: the retained sync stub address and the
-	 * chip revision go into the DTB copy the kernel will parse. The blob
-	 * is reopened in place with 4 KB of slack (free: kernel ends at
-	 * 0x48354c60, nothing until the next use at 0x48e00000).
+	 * A waiter parked by an earlier p4park in this session is still
+	 * valid: it only polls release, which only the kernel sets. Reuse
+	 * it untouched (refilling ready/status under it would hide its
+	 * parked report forever).
+	 */
+	if (mbox[0] == P4_MBOX_MAGIC && mbox[1] == 1 && mbox[2] == 0 &&
+	    mbox[3] == 0 && mbox[4] == P4_KERN_RUN &&
+	    mbox[5] == P4_DTB_KERN && mbox[6] == 103) {
+		printf("p4: waiter already parked, reusing\n");
+		return 1;
+	}
+
+	mbox[1] = 0;			/* ready */
+	mbox[2] = 0;			/* release */
+	mbox[3] = 2;			/* status = pending */
+	mbox[4] = P4_KERN_RUN;		/* entry */
+	mbox[5] = P4_DTB_KERN;		/* dtb */
+	mbox[6] = 103;			/* revision */
+	asm volatile("fence" ::: "memory");
+	mbox[0] = P4_MBOX_MAGIC;
+	asm volatile("fence" ::: "memory");
+
+	memcpy((void *)P4_LPRAM_WAIT, p4_waiter_start, wlen);
+	if (memcmp((const void *)P4_LPRAM_WAIT, p4_waiter_start,
+		   wlen)) {
+		printf("p4: LP RAM dead, single CPU\n");
+		mbox[0] = 0;
+		return 0;
+	}
+
+	/*
+	 * Park hart1 in the waiter the IDF way: unstall it (it parks in the
+	 * HP ROM at POR), make sure its clock is on and it is out of reset,
+	 * then publish the waiter through the ROM's appcpu boot hook — the
+	 * parked hart1 spins on that hook and jumps to it. No SW reset, no
+	 * reset-vector change: the ROM owns hart1's boot.
 	 */
 	{
-		void *fdt = (void *)P4_DTB_RUN;
-		u32 newsize = fdt_totalsize(fdt) + 0x1000;
-		int chosen;
-		fdt32_t rev, entry;
+		u32 v = readl((void *)P4_PMU_SW_STALL);
+		unsigned int spin2 = 0;
 
-		if (fdt_open_into(fdt, fdt, newsize)) {
-			printf("p4boot: fdt_open_into failed\n");
-			return CMD_RET_FAILURE;
-		}
-		chosen = fdt_path_offset(fdt, "/chosen");
-		if (chosen < 0) {
-			printf("p4boot: no /chosen in dtb\n");
-			return CMD_RET_FAILURE;
-		}
-		rev = cpu_to_fdt32(103);
-		entry = cpu_to_fdt32((u32)p4_cache_sync_stub);
-		if (fdt_setprop(fdt, chosen, "espressif,chip-revision",
-				&rev, 4) ||
-		    fdt_setprop(fdt, chosen, "espressif,cache-sync-entry",
-				&entry, 4)) {
-			printf("p4boot: fdt setprop failed\n");
-			return CMD_RET_FAILURE;
-		}
-		printf("p4boot: handoff stub @ %08x\n",
-		       (u32)p4_cache_sync_stub);
+		v = (v & ~(0xffu << 16)) | (0xffu << 16);
+		writel(v, (void *)P4_PMU_SW_STALL);
+		while ((readl((void *)P4_CORE_STALLED_ST) & BIT(1)) &&
+		       spin2++ < 100000)
+			;
+		printf("p4: stall %08x clk %08x rst %08x\n",
+		       readl((void *)P4_CORE_STALLED_ST),
+		       readl((void *)P4_CORE1_CLK),
+		       readl((void *)P4_RST_EN_CORE1));
+		/* Hart1's CPU clock gates its fetch: default off. */
+		setbits_le32((void *)P4_CORE1_CLK, BIT(4));
+		clrbits_le32((void *)P4_RST_EN_CORE1, BIT(8));
+		((void (*)(u32))P4_ROM_APPBOOT)(P4_LPRAM_WAIT);
+		printf("p4: boot hook set, cause %08x\n",
+		       readl((void *)P4_LP_RST_CAUSE));
 	}
+	/*
+	 * Plain polling, like the reference loader and the kernel's
+	 * ioremap reads: no cache maintenance on the mailbox itself (an
+	 * invalidate here would drop the very lines being polled).
+	 */
+	while (mbox[1] != 1 && spin++ < 4000000) {
+		if (mbox[4] != P4_KERN_RUN)
+			alive = 1;
+	}
+	if (mbox[1] == 1 && mbox[3] == 0) {
+		smp = 1;
+		/* Restore entry: the kernel requires the Image address,
+		 * the 1 was only the waiter-alive marker. */
+		mbox[4] = P4_KERN_RUN;
+		asm volatile("fence" ::: "memory");
+		printf("p4: hart1 parked, SMP on\n");
+	} else {
+		printf("p4: waiter quiet (alive %d status %u), single CPU\n",
+		       alive, mbox[3]);
+		mbox[0] = 0;
+	}
+	return smp;
+}
+
+static int do_p4boot(struct cmd_tbl *cmdtp, int flag, int argc,
+		     char *const argv[])
+{
+	void (*kernel)(u32 hart, void *dtb) = (void *)P4_KERN_RUN;
+	int smp = 0;
+
+	if (p4_check_payload() || p4_prep_dtb())
+		return CMD_RET_FAILURE;
+
+	printf("p4boot: kernel %08x fdt %08x, jumping\n", P4_KERN_RUN, P4_DTB_KERN);
+	smp = p4_park_hart1();
 
 	/*
 	 * Push the payload (and the freshly patched DTB) to the part before
@@ -414,7 +678,7 @@ static int do_p4boot(struct cmd_tbl *cmdtp, int flag, int argc,
 	 * contents, not just dirty cache lines.
 	 */
 	if (p4_cache_sync_stub(P4_KERN_RUN, 0x00400000) ||
-	    p4_cache_sync_stub(P4_DTB_RUN, 0x00010000)) {
+	    p4_cache_sync_stub(P4_DTB_KERN, 0x00010000)) {
 		printf("p4boot: cache sync failed\n");
 		return CMD_RET_FAILURE;
 	}
@@ -423,11 +687,33 @@ static int do_p4boot(struct cmd_tbl *cmdtp, int flag, int argc,
 	asm volatile("fence.i" ::: "memory");
 	asm volatile("fence" ::: "memory");
 
-	kernel(0, (void *)P4_DTB_RUN);
+	if (!smp)
+		printf("p4boot: single CPU\n");
+	kernel(0, (void *)P4_DTB_KERN);
 	return CMD_RET_SUCCESS;
 }
 
 U_BOOT_CMD(p4boot, 1, 0, do_p4boot, "jump to the preloaded kernel", "");
+
+/*
+ * "p4park" - run the full p4boot prep (DTB relocate + handoff + mailbox +
+ * hart1 waiter) but return to the prompt instead of jumping. Lets the
+ * mailbox be watched with md while hart1 sits parked waiting for release.
+ */
+static int do_p4park(struct cmd_tbl *cmdtp, int flag, int argc,
+		     char *const argv[])
+{
+	int smp;
+
+	if (p4_check_payload() || p4_prep_dtb())
+		return CMD_RET_FAILURE;
+
+	smp = p4_park_hart1();
+	printf("p4park: parked=%d mbox live, release untouched\n", smp);
+	return CMD_RET_SUCCESS;
+}
+
+U_BOOT_CMD(p4park, 1, 0, do_p4park, "prep handoff and park hart1, no jump", "");
 
 static int do_p4sync(struct cmd_tbl *cmdtp, int flag, int argc,
 		     char *const argv[])
