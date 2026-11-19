@@ -5965,3 +5965,25 @@ sctrl 0x02F7C679, kernel runs to /init start.
   Next: read the reference RX regs (0x180-0x188) to get the true tuned point,
   and audit the CPU/clock tree (our CPU freq/voltage vs IDF 360 MHz) - both
   need a healthy serial bridge.
+
+## Round 7 (2026-11-19): DLL-on experiment reverted; sweep proved discriminating
+
+- IDF esp_psram_impl_enable() enables the MSPI DLL unconditionally
+  (psram_ctrlr_ll_enable_dll = TIMING_CALI bit 5, verified in
+  spi_mem_s_reg.h) before mode regs, and mspi_timing_psram_tuning() never
+  touches DLL - so live reference runs DLL-on. Tried the SL bit-set here.
+- Result: sweep went all-pass to ALL-FAIL at every DIN/dummy (plus window
+  check 1 bad), while cached traffic still passed (L1 hits mask the broken
+  MSPI). Reverted immediately; back to `defaults hold` + window 0 bad.
+  Lesson: DLL-on needs IDF's adaptive DQS phase tuning with it (our static
+  DQS phase + DLL locks wrong; DLL-off ignores DQS). A blind DLL bit is not
+  the fix; porting mspi_timing_psram_tuning (DQS+DIN+dummy+DQL adaptive) is.
+  Bonus: the sweep caught a real RX regression, so the infrastructure DOES
+  discriminate - the DLL-off state is genuinely uniformly good/bad to it.
+- MSPI2 is deliberately NOT replayed; 0x180+ are ROM defaults here, not
+  reference values. Pads ARE configured (stale "left at zero" comment fixed):
+  0x2020 data + 0x00010001 DQS (XPD bit0 set, matches IDF pin_drv_set(2)).
+- 8-line stays: 16-line needs the MSPI3 command path fixed first (ROM
+  OPI_HEX_DTR hangs, MSPI2 hex reads 0xffff00ff = upper lines undriven).
+  The command path (shifted reads: 0x15555557 vs 0x5555D450, MR0 0x8D08 vs
+  0x8D30 across reads) is the next root item per the round goal.

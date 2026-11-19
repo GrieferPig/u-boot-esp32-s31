@@ -600,10 +600,11 @@ static void psram_pads_init(void)
 
 /*
  * The PSRAM pins live in their own mux block at 0x500e1200
- * (DR_REG_IOMUX_MSPI_PIN_BASE = HPPERIPH1 + 0x21200) and are left at zero by
- * our chain; the reference has drive strength 0x2020 on every PSRAM data pin
- * and 0x00010001 on the two DQS pins. The flash pins (0x500e1204..0x500e1218)
- * are deliberately not touched.
+ * (DR_REG_IOMUX_MSPI_PIN_BASE = HPPERIPH1 + 0x21200). psram_pin_mux_init()
+ * programs them to the reference values (drive strength 0x2020 on every
+ * PSRAM data pin, 0x00010001 on the two DQS pins, matching IDF's
+ * mspi_timing_ll_pin_drv_set(2) + enable_dqs). The flash pins
+ * (0x500e1204..0x500e1218) are deliberately not touched.
  */
 static const u32 psram_pin_state[][2] = {
 	{ 0x500e121c, 0x00002020u }, { 0x500e1220, 0x00002020u },
@@ -1827,6 +1828,16 @@ int p4_spl_psram_init(void)
 	psram_clkrst_fixup();
 	psram_clock_init();
 
+	/*
+	 * IDF esp_psram_impl_enable() turns the MSPI DLL on (TIMING_CALI bit 5,
+	 * verified in spi_mem_s_reg.h) and its tuning never touches DLL, so the
+	 * reference runs DLL-on - but a blind bit-set here broke every RX sample
+	 * point (sweep went all-pass to all-fail, window check 1 bad). DLL-on
+	 * needs IDF's adaptive DQS phase tuning alongside it (our static DQS
+	 * phase/delay + DLL locks wrong; DLL-off ignores DQS entirely). Keep
+	 * DLL off until the full mspi_timing_psram_tuning port lands; the static
+	 * point is the proven working state.
+	 */
 	p4_spl_early_puts("psram: replay\n");
 	psram_replay();
 
