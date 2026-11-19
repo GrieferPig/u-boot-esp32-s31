@@ -129,7 +129,7 @@ typedef void (*rom_cmd_start_fn)(int spi_num, u8 *rx_buf, u16 rx_len,
 #define PSRAM_REG_CMD_BITS	16
 #define PSRAM_REG_ADDR_BITS	32
 #define PSRAM_REG_DUMMY_RD	(2 * (5 - 1))
-#define PSRAM_RD_LATENCY	2
+#define PSRAM_RD_LATENCY	4
 #define PSRAM_WR_LATENCY	2
 #define PSRAM_MR8_BL		3
 #define PSRAM_MR8_BT		0
@@ -839,8 +839,8 @@ static int psram_mode_reg_init(void)
 
 #define P4_PSRAM_RD_DUMMY	(2 * (14 - 1))
 /* The cache path needs the same 46-cycle read latency the tuning found. */
-#define P4_PSRAM_CACHE_RD_DUMMY	26
-#define P4_PSRAM_WR_DUMMY	(2 * (7 - 1))
+#define P4_PSRAM_CACHE_RD_DUMMY	18
+#define P4_PSRAM_WR_DUMMY	(2 * (5 - 1))
 
 /*
  * The command path is tuned with the slow profile (MR0 read latency 2), which
@@ -850,7 +850,7 @@ static int psram_mode_reg_init(void)
  * once the command path is retired, otherwise every cache read samples the
  * data four cycles too early and the controller waits forever.
  */
-#define P4_PSRAM_RD_LATENCY_FINAL	2
+#define P4_PSRAM_RD_LATENCY_FINAL	4
 #define P4_PSRAM_WR_LATENCY_FINAL	2
 
 static void psram_final_latency(void)

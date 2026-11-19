@@ -2958,3 +2958,55 @@ code and stack, not in the middle of PSRAM init.
 So the stall is not the pads, not the tuning, not the S controller's leftover
 state and not the cache clock gating. State left as committed: tuning on,
 burst-write check only, boots to `esp32p4>`.
+
+## Round 82: the read latency profile was wrong - array reads now verify
+
+Walked IDF's `esp_psram_impl_enable()` (`components/esp_psram/device/
+esp_psram_impl_ap_hex.c`) function by function against this port for the first
+time, and cross-checked against the reference's own boot log. Two steps looked
+missing but are already in the replay table (verified on the live reference
+first): `psram_ctrlr_ll_set_page_size(ID_2, 2048)` is `0x5008E174 = 0x000c0000`
+and `psram_ctrlr_ll_enable_dll()` is `0x5008E190 = 0x21` - our `psram_tables.h`
+already carries both values.
+
+The real mismatch was the read-latency profile. The reference's boot log on this
+board prints
+
+```
+hex_psram: Readlatency  : 0x04 (14 cycles@Fixed)
+```
+
+while this port programmed MR0 with read latency **2** (`mr0 0x8d28`), and it
+used the 200 MHz dummy profile (`RD_DUMMY 26`, `WR_DUMMY 12`) from the captured
+SCTRL. IDF's header shows the three profiles explicitly:
+
+| config | RD_DUMMY | WR_DUMMY | RD_LATENCY |
+| --- | --- | --- | --- |
+| 250M | 2*(18-1) | 2*(9-1) | 6 |
+| 200M | 2*(14-1) | 2*(7-1) | 4 |
+| else (80M/20M) | 2*(10-1) = 18 | 2*(5-1) = 8 | 2 |
+
+With the chip actually reporting latency 4, the correct pairing at this port's
+80 MHz bus is latency 4 + the 80 MHz dummies. Applied
+(`PSRAM_RD_LATENCY`/`P4_PSRAM_RD_LATENCY_FINAL` 2 -> 4, `RD_DUMMY` 26 -> 18,
+`WR_DUMMY` 12 -> 8) and the command-path array test changed from
+
+```
+wordtest wrote 0x00000001 read80 0xaaaa0000 read84 0xaaaa0000
+```
+
+to
+
+```
+wordtest wrote 0x00000001 read80 0x00000001 read84 0x00000001
+```
+
+i.e. the array read now returns the data that was written, which is the
+"array reads return real chip data" half of the objective. Register reads
+(`mode: mr0 0x00008d30 mr4 0x14b mr8 0x54b`) confirm latency 4 is programmed.
+
+Also tried MPLL 400 MHz (the 200 MHz profile's clock) with latency 4 and the
+26/12 dummies: the command path then read `0xffffffff`, so the 80 MHz bus with
+the 80 MHz dummies is the right pairing here. The window read still stalls with
+the corrected profile, so that remains open, but the command path is now
+self-consistent with IDF's own numbers for this speed.
