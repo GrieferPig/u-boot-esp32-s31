@@ -3010,3 +3010,30 @@ Also tried MPLL 400 MHz (the 200 MHz profile's clock) with latency 4 and the
 the 80 MHz dummies is the right pairing here. The window read still stalls with
 the corrected profile, so that remains open, but the command path is now
 self-consistent with IDF's own numbers for this speed.
+
+## Round 83: the 16-line read stall is independent of the dummy
+
+Repeated the RDUMMY sweep now that the chip runs at its real latency 4, this
+time in 16-line mode (the mode the reference uses). Thirty-two markers were
+written at `0x1000 + i*64` through the command path, then each 64-byte slot was
+read once with a different `CACHE_SCTRL.RDUMMY`:
+
+```
+sweep:            <- stalls on the very first sample, dummy 0
+```
+
+So in 16-line mode the window read stalls for *every* dummy value including 0 -
+the hang is not a data-phase-length problem. Combined with round 75 (8-line
+mode completes but only moves 16 bits of each word), the picture is:
+
+| data phase | window read |
+| --- | --- |
+| 16-line (SRAM_CMD bits 26/27 set, = reference 0x8cfc0000) | stalls at any dummy |
+| 8-line (bits clear) | completes, low 16 bits correct |
+
+Writes work in 16-line mode (the burst write completes and the command path
+confirms the chip holds the data), so it is specifically the read direction of
+the cache path. Per AGENTS.md §11 the next comparison is IDF's read-side LL:
+`psram_ctrlr_ll_set_rd_cmd`, `set_rd_dummy`, `enable_rd_dummy_level_control`,
+`enable_dqs`, and the DDR/splice settings, checked one at a time against the
+values this chain actually holds.
