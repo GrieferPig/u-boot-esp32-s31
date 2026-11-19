@@ -4230,3 +4230,53 @@ by-address invalidation does nothing, the remaining lever is the line itself - e
 re-create it through a path that is allowed to write (which is not the window), or
 avoid the cached window for the first instruction fetch by entering at a page whose
 lines were never populated.
+
+## Round 114: the kernel relocates itself back to 0x48000000 - the window is unavoidable
+
+Chased the alias entry to its end and found why it cannot work, plus what the
+fault actually is.
+
+**All ROM cache invalidation routes fail.** Verified the ROM addresses against
+IDF's `esp32p4.rom.ld` (`Cache_Invalidate_All = 0x4fc00404`,
+`Cache_WriteBack_All = 0x4fc00414`, by-address helpers at 0x4fc003e4/0x4fc003f4)
+and the map bits against `esp32p4/rom/cache.h` (`L1_ICACHE_0` bit0,
+`L1_ICACHE_1` bit1, `L1_DCACHE` bit4, `L2_CACHE` bit5), i.e. the calls were
+correct. Results:
+
+| call | result |
+| --- | --- |
+| `Cache_Invalidate_Addr(0x30, 0x48000000, 4 MiB)` (the ROM's own `SPI_FLASH_MMAP_INVALIDATE_CACHE_ADDR` idiom) | stale line unchanged |
+| `Cache_WriteBack_Invalidate_All` (`p4wbinv`) | hangs |
+| `Cache_Invalidate_All` (`p4inv`) | hangs |
+| streaming 256 KiB of other window memory through the cache | stale line unchanged |
+| writing the same bytes through the window | never reaches the part |
+
+**The alias entry cannot rescue the boot, by construction.** With the alias entry
+(0x88000000) plus a device-tree fixup that rewrites `/memory` to
+0x88000000..0x89000000, the kernel still dies, and the machine state says why:
+
+```
+mcause = 0x30000002   (illegal instruction)
+mepc   = 0x481B5D1E
+pc     = 0x481B5D22   (do_trap_insn_fault, traps.c:171)
+```
+
+`0x481B5D1E` is a **link address** - the kernel relocates itself to 0x4800_0000
+regardless of where it is entered, so it ends up executing from the cached window
+again. Disassembling 0x481B5D1E shows an ordinary `srli a4,a5,11`, so the illegal
+instruction is not really illegal: the fetch returned something else than what the
+kernel wrote there.
+
+That closes the loop with the write finding: the kernel copies itself to
+0x4800_0000, and **writes to the window are dropped**, so the bytes it then fetches
+are whatever was there before. The root cause is therefore the window's **write**
+path, which this port has never exercised - the SPL only ever writes PSRAM through
+the direct alias (`psram_xact`) - and every read-only workaround was doomed.
+
+Cleaned up while doing this: the temporary `p4bench`, `p4pma`, `p4wb`, `p4inv`,
+`p4wbinv` and `p4invaddr` commands were folded away; `p4boot [alias]` is now the
+only debug entry point, and it carries the `/memory` fixup used by the alias test.
+
+Next: fix the window write path. The cache + MMU + MSPI2 must be able to write back
+a line to PSRAM; nothing in this port has ever made that happen, so the write-side
+configuration of the PSRAM window is where the bug is.

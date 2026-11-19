@@ -231,126 +231,65 @@ void hw_watchdog_reset(void)
 #define P4_LOAD_CHUNK		0x1000u
 
 /*
- * "p4boot" - jump straight to the preloaded kernel.
+ * "p4boot [alias]" - jump straight to the preloaded kernel.
  *
- * booti does accept the image and relocates/fixes up the FDT, but its
- * announce_and_cleanup() then faults: the faulting instruction is a stack store
- * (`c.swsp`) with TVAL 0x94, i.e. the stack pointer is corrupted by the time the
- * handoff runs. Until that is understood, start the kernel the same way
- * boot_jump_linux() would - RISC-V kernels take (hartid, dtb) - without going
- * through that path.
+ * The kernel image and the device tree are placed in PSRAM by the SPL. Entering
+ * at 0x4800_0000 (the cached window) does not work: the hart stops on the very
+ * first compressed instruction after the 4-byte one at +0xA0, and the window
+ * serves a stale line there that no ROM cache call clears (see FLASH-NOTES).
+ * Entering through the uncached alias at 0x8800_0000 runs the kernel at full
+ * speed instead, but then the kernel's own physical address is 0x8800_0000 while
+ * /memory describes 0x4800_0000, so its address arithmetic is wrong and it dies
+ * in do_trap_insn_fault.
  *
- * Layout: kernel image at 0x8800_0000 (direct alias) and the FDT at 0x8860_0000,
- * both placed there by the SPL preload.
+ * With the "alias" argument this also rewrites /memory in the loaded device tree
+ * so it describes the region the kernel is actually running from. That is a
+ * normal bootloader fixup and it keeps the device tree on flash untouched.
  */
 #define P4_KERN_ALIAS		0x88000000u
 #define P4_DTB_ALIAS		0x88600000u
-/*
- * The kernel must execute at its physical load address: the device tree
- * describes memory as 0x4800_0000 upward, so running from the 0x8800_0000 alias
- * would put the kernel outside its own memory map.
- */
 #define P4_KERN_RUN		0x48000000u
 #define P4_DTB_RUN		0x48600000u
+#define P4_DTB_MAX		0x00010000u
 
-/*
- * "p4bench <addr> <words>" - time a run of reads.
- *
- * Executing the kernel from the PSRAM window runs at roughly 50 instructions
- * per second while this same U-Boot retires ~100M instructions/s from SRAM, so
- * the fetch path into PSRAM is what needs measuring. Reading through the window,
- * through the uncached alias and from SRAM in the same units (mcycle) shows
- * whether the slowness is the window mapping itself or the memory behind it.
- */
-static u64 p4_cycles(void)
+static void p4_fdt_set_memory(void *fdt, u32 base, u32 size)
 {
-	u32 lo, hi, hi2;
+	fdt32_t reg[2];
+	int node, err;
 
-	do {
-		asm volatile("csrr %0, mcycleh" : "=r"(hi));
-		asm volatile("csrr %0, mcycle" : "=r"(lo));
-		asm volatile("csrr %0, mcycleh" : "=r"(hi2));
-	} while (hi != hi2);
+	err = fdt_open_into(fdt, fdt, P4_DTB_MAX);
+	if (err)
+		printf("p4boot: fdt_open_into: %s\n", fdt_strerror(err));
 
-	return ((u64)hi << 32) | lo;
+	node = fdt_path_offset(fdt, "/memory");
+	if (node < 0) {
+		printf("p4boot: no /memory: %s\n", fdt_strerror(node));
+		return;
+	}
+
+	reg[0] = cpu_to_fdt32(base);
+	reg[1] = cpu_to_fdt32(size);
+	err = fdt_setprop(fdt, node, "reg", reg, sizeof(reg));
+	if (err)
+		printf("p4boot: /memory/reg: %s\n", fdt_strerror(err));
+	else
+		printf("p4boot: /memory = %08x..%08x\n", base, base + size);
 }
-
-static int do_p4bench(struct cmd_tbl *cmdtp, int flag, int argc,
-		      char *const argv[])
-{
-	ulong addr, cnt, i;
-	volatile u32 sum = 0;
-	u64 t0, t1;
-	u32 delta, per;
-
-	if (argc < 3)
-		return CMD_RET_USAGE;
-
-	addr = simple_strtoul(argv[1], NULL, 16);
-	cnt = simple_strtoul(argv[2], NULL, 16);
-
-	t0 = p4_cycles();
-	for (i = 0; i < cnt; i++)
-		sum += readl((const void *)(addr + i * 4));
-	t1 = p4_cycles();
-
-	/* 32-bit arithmetic only: a u64 division here links libgcc's __udivdi3,
-	 * which does not relocate in this configuration. */
-	delta = (u32)(t1 - t0);
-	per = cnt ? delta / (u32)cnt : 0;
-
-	printf("p4bench: %lu words @ %08lx: %u cycles, %u cycles/word (sum %08x)\n",
-	       cnt, addr, delta, per, sum);
-
-	return CMD_RET_SUCCESS;
-}
-
-U_BOOT_CMD(p4bench, 3, 0, do_p4bench, "time reads from an address",
-	   "<addr> <words>");
-
-/*
- * "p4pma" - dump the 16 PMA entries.
- *
- * The PMA decides whether the PSRAM window is cached, and the window behaves as
- * cached no matter what this port writes there. These are the registers that
- * show why: PMACFG(i) = 0xBC0 + i, PMAADDR(i) = 0xBD0 + i (IDF riscv/csr.h).
- */
-#define PMA_SHOW(n) do {						\
-		u32 c, a;						\
-									\
-		asm volatile("csrr %0, %1" : "=r"(c) : "i"(0xBC0 + (n)));	\
-		asm volatile("csrr %0, %1" : "=r"(a) : "i"(0xBD0 + (n)));	\
-		printf("pma[%2d] cfg %08x addr %08x\n", n, c, a);		\
-	} while (0)
-
-static int do_p4pma(struct cmd_tbl *cmdtp, int flag, int argc,
-		    char *const argv[])
-{
-	PMA_SHOW(0);
-	PMA_SHOW(1);
-	PMA_SHOW(2);
-	PMA_SHOW(3);
-	PMA_SHOW(4);
-	PMA_SHOW(5);
-	PMA_SHOW(6);
-	PMA_SHOW(7);
-	PMA_SHOW(8);
-	PMA_SHOW(9);
-	PMA_SHOW(10);
-	PMA_SHOW(11);
-	PMA_SHOW(12);
-	PMA_SHOW(13);
-	PMA_SHOW(14);
-	PMA_SHOW(15);
-	return CMD_RET_SUCCESS;
-}
-
-U_BOOT_CMD(p4pma, 1, 0, do_p4pma, "dump the PMA entries", "");
 
 static int do_p4boot(struct cmd_tbl *cmdtp, int flag, int argc,
 		     char *const argv[])
 {
-	void (*kernel)(u32 hart, void *dtb) = (void *)P4_KERN_RUN;
+	u32 run = P4_KERN_RUN;
+	u32 dtb_run = P4_DTB_RUN;
+	void (*kernel)(u32 hart, void *dtb);
+	bool alias = argc > 1 && !strcmp(argv[1], "alias");
+
+	if (alias) {
+		run = P4_KERN_ALIAS;
+		dtb_run = P4_DTB_ALIAS;
+	}
+
+	kernel = (void *)run;
 
 	if (readl((const void *)(P4_KERN_ALIAS + 0x38)) != 0x05435352u) {
 		printf("p4boot: bad RISCV Image magic at %08x\n", P4_KERN_ALIAS);
@@ -361,24 +300,21 @@ static int do_p4boot(struct cmd_tbl *cmdtp, int flag, int argc,
 		return CMD_RET_FAILURE;
 	}
 
-	printf("p4boot: kernel %08x fdt %08x, jumping\n", P4_KERN_RUN,
-	       P4_DTB_RUN);
+	if (alias)
+		p4_fdt_set_memory((void *)P4_DTB_ALIAS, run, 0x01000000u);
 
-	/*
-	 * The same handoff the generic RISC-V cleanup_before_linux() performs:
-	 * interrupts off and the pipeline/caches synchronised. booti reaches this
-	 * point before its own fault, so replicate it here instead of relying on
-	 * the bootm path.
-	 */
+	printf("p4boot: kernel %08x fdt %08x, jumping\n", run, dtb_run);
+
 	asm volatile("csrci mstatus, 8" ::: "memory");	/* clear MIE */
 	asm volatile("fence.i" ::: "memory");
 	asm volatile("fence" ::: "memory");
 
-	kernel(0, (void *)P4_DTB_RUN);
+	kernel(0, (void *)dtb_run);
 	return CMD_RET_SUCCESS;
 }
 
-U_BOOT_CMD(p4boot, 1, 0, do_p4boot, "jump to the preloaded kernel", "");
+U_BOOT_CMD(p4boot, 2, 0, do_p4boot, "jump to the preloaded kernel",
+	   "[alias]");
 
 static int do_p4load(struct cmd_tbl *cmdtp, int flag, int argc,
 		     char *const argv[])
