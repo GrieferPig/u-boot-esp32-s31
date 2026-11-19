@@ -305,6 +305,54 @@ static int do_p4wba(struct cmd_tbl *cmdtp, int flag, int argc,
 
 U_BOOT_CMD(p4wba, 3, 0, do_p4wba, "write back one range", "<addr> <size>");
 
+/*
+ * Cache sync engine (real base 0x3FF10000 = IDF DR_REG_CACHE_BASE, not the
+ * 0x500E5000 SYSREG block). TRM ch.9 has no register summary for these
+ * (TRM 未覆盖); offsets/fields from IDF cache_reg.h v5.4.1: SYNC_CTRL +0x98
+ * (WRITEBACK_ENA bit 2, SYNC_DONE bit 4, self-clearing), SYNC_MAP +0x9C
+ * (bit 4 L1-D, bit 5 L2), SYNC_ADDR +0xA0 (virtual address), SYNC_SIZE +0xA4.
+ */
+#define P4_CACHE_SYNC_CTRL	0x3ff10098u
+#define P4_CACHE_SYNC_MAP	0x3ff1009cu
+#define P4_CACHE_SYNC_ADDR	0x3ff100a0u
+#define P4_CACHE_SYNC_SIZE	0x3ff100a4u
+#define P4_CACHE_SYNC_MAP_D_L2	0x30u
+#define P4_CACHE_SYNC_WB	0x4u
+#define P4_CACHE_SYNC_DONE	0x10u
+
+/*
+ * Retained SRAM cache-sync stub for the kernel handoff. The kernel looks for
+ * /chosen espressif,chip-revision (= 103, this silicon) and
+ * espressif,cache-sync-entry (address of int sync(start, bytes) in the
+ * 0x4FF00000-0x4FFC0000 retained SRAM window) and panics without them
+ * ("P4 retained executable cache callback missing"). This stub lives in
+ * U-Boot's own SRAM text, so it is present whenever p4boot runs, and drives
+ * exactly the writeback sequence proven from the prompt: L1-D + L2, chunked,
+ * DONE-polled with a timeout.
+ */
+int p4_cache_sync_stub(unsigned int start, unsigned int bytes)
+{
+	unsigned int off;
+
+	for (off = 0; off < bytes; off += 0x10000) {
+		unsigned int n = bytes - off > 0x10000 ? 0x10000
+						       : bytes - off;
+		unsigned int spin = 0;
+
+		writel(P4_CACHE_SYNC_MAP_D_L2, (void *)P4_CACHE_SYNC_MAP);
+		writel(start + off, (void *)P4_CACHE_SYNC_ADDR);
+		writel(n, (void *)P4_CACHE_SYNC_SIZE);
+		writel(P4_CACHE_SYNC_WB, (void *)P4_CACHE_SYNC_CTRL);
+		while (!(readl((void *)P4_CACHE_SYNC_CTRL) &
+			 P4_CACHE_SYNC_DONE)) {
+			if (++spin > 1000000)
+				return -1;
+		}
+	}
+	asm volatile("fence" ::: "memory");
+	return 0;
+}
+
 static int do_p4boot(struct cmd_tbl *cmdtp, int flag, int argc,
 		     char *const argv[])
 {
@@ -326,6 +374,51 @@ static int do_p4boot(struct cmd_tbl *cmdtp, int flag, int argc,
 
 	printf("p4boot: kernel %08x fdt %08x, jumping\n", P4_KERN_RUN, P4_DTB_RUN);
 
+	/*
+	 * Install the kernel handoff: the retained sync stub address and the
+	 * chip revision go into the DTB copy the kernel will parse. The blob
+	 * is reopened in place with 4 KB of slack (free: kernel ends at
+	 * 0x48354c60, nothing until the next use at 0x48e00000).
+	 */
+	{
+		void *fdt = (void *)P4_DTB_RUN;
+		u32 newsize = fdt_totalsize(fdt) + 0x1000;
+		int chosen;
+		fdt32_t rev, entry;
+
+		if (fdt_open_into(fdt, fdt, newsize)) {
+			printf("p4boot: fdt_open_into failed\n");
+			return CMD_RET_FAILURE;
+		}
+		chosen = fdt_path_offset(fdt, "/chosen");
+		if (chosen < 0) {
+			printf("p4boot: no /chosen in dtb\n");
+			return CMD_RET_FAILURE;
+		}
+		rev = cpu_to_fdt32(103);
+		entry = cpu_to_fdt32((u32)p4_cache_sync_stub);
+		if (fdt_setprop(fdt, chosen, "espressif,chip-revision",
+				&rev, 4) ||
+		    fdt_setprop(fdt, chosen, "espressif,cache-sync-entry",
+				&entry, 4)) {
+			printf("p4boot: fdt setprop failed\n");
+			return CMD_RET_FAILURE;
+		}
+		printf("p4boot: handoff stub @ %08x\n",
+		       (u32)p4_cache_sync_stub);
+	}
+
+	/*
+	 * Push the payload (and the freshly patched DTB) to the part before
+	 * entering the kernel: instruction/data fetches must see device
+	 * contents, not just dirty cache lines.
+	 */
+	if (p4_cache_sync_stub(P4_KERN_RUN, 0x00400000) ||
+	    p4_cache_sync_stub(P4_DTB_RUN, 0x00010000)) {
+		printf("p4boot: cache sync failed\n");
+		return CMD_RET_FAILURE;
+	}
+
 	asm volatile("csrci mstatus, 8" ::: "memory");	/* clear MIE */
 	asm volatile("fence.i" ::: "memory");
 	asm volatile("fence" ::: "memory");
@@ -335,6 +428,28 @@ static int do_p4boot(struct cmd_tbl *cmdtp, int flag, int argc,
 }
 
 U_BOOT_CMD(p4boot, 1, 0, do_p4boot, "jump to the preloaded kernel", "");
+
+static int do_p4sync(struct cmd_tbl *cmdtp, int flag, int argc,
+		     char *const argv[])
+{
+	ulong addr, size;
+
+	if (argc < 3)
+		return CMD_RET_USAGE;
+
+	addr = simple_strtoul(argv[1], NULL, 16);
+	size = simple_strtoul(argv[2], NULL, 16);
+
+	if (p4_cache_sync_stub((unsigned int)addr, (unsigned int)size)) {
+		printf("p4sync: writeback failed\n");
+		return CMD_RET_FAILURE;
+	}
+	printf("p4sync: writeback %08lx size %lx ok\n", addr, size);
+	return CMD_RET_SUCCESS;
+}
+
+U_BOOT_CMD(p4sync, 3, 0, do_p4sync, "write back one range (retained stub)",
+	   "<addr> <size>");
 
 static int do_p4load(struct cmd_tbl *cmdtp, int flag, int argc,
 		     char *const argv[])

@@ -37,6 +37,14 @@
 #define P4_PERI_CLK_CTRL00	(P4_CLKRST_BASE + 0x30)
 #define P4_PSRAM_CLK_SRC_MPLL	BIT(12)
 #define P4_PSRAM_CLK_SRC_MASK	(3u << 12)
+#define P4_PSRAM_CLK_DIV_MASK	(0xffu << 16)
+/*
+ * PSRAM divider for the reference operating point: MPLL 320 MHz / 4 =
+ * 80 MHz (IDF CONFIG_SPIRAM_SPEED_80M, the reference build's speed).
+ * TRM ch.12 Reset and Clock, HP_SYS_CLKRST_PERI_CLK_CTRL00:
+ * PSRAM_CLK_SRC_SEL [13:12], PSRAM_CORE_CLK_DIV_NUM [23:16].
+ */
+#define P4_PSRAM_CLK_DIV_80M	(3u << 16)
 #define P4_PSRAM_CORE_CLK_EN	BIT(15)
 #define P4_RST_EN0		(P4_CLKRST_BASE + 0xc0)
 #define P4_RST_DUAL_MSPI_AXI	BIT(23)
@@ -197,10 +205,20 @@ static void psram_clock_init(void)
 	setbits_le32((void *)P4_LP_CLKRST_HP_CLK_CTRL, P4_LP_CLKRST_HP_MPLL_CLK_EN);
 	udelay(100);
 
-	/* PSRAM controllers: MPLL source, core clock on, divider 1. */
+	/*
+	 * PSRAM controllers: MPLL source, core clock on, divider /4 = 80 MHz.
+	 * Divider 1 (320 MHz) overclocks the part far past the point the
+	 * mode-register latencies and controller dummies are programmed for:
+	 * reads mostly work but lines come back wrong under load (kernel
+	 * illegal-instruction oops on correct device bytes, initramfs
+	 * "broken padding"), while the flash misfetch, the failing wordtest
+	 * and the failed low-clock tune all point at the same marginality.
+	 */
 	val = readl((void *)P4_PERI_CLK_CTRL00);
 	val &= ~P4_PSRAM_CLK_SRC_MASK;
-	val |= P4_PSRAM_CLK_SRC_MPLL | P4_PSRAM_CORE_CLK_EN;
+	val &= ~P4_PSRAM_CLK_DIV_MASK;
+	val |= P4_PSRAM_CLK_SRC_MPLL | P4_PSRAM_CORE_CLK_EN |
+		P4_PSRAM_CLK_DIV_80M;
 	writel(val, (void *)P4_PERI_CLK_CTRL00);
 
 	/* Let the dual-MSPI interface out of reset. */
@@ -1026,7 +1044,11 @@ void p4_spl_psram_load_payload(void)
 	psram_watchdogs_off();
 
 	/* The cache path works now, so a plain copy is enough. */
-	memcpy((void *)0x48e00000, dtb, dsize);
+	/* DTB destination: P4_DTB_RUN, the same address p4boot hands to the
+	 * kernel. (A stale 0x48600000 copy from an earlier p4load used to mask
+	 * this; a clean boot needs the SPL copy itself to be where p4boot
+	 * looks.) */
+	memcpy((void *)0x48600000, dtb, dsize);
 	memcpy((void *)0x48000000, kern, ksize);
 
 	/* Confirm through the command path that the data really is in the chip. */
@@ -1044,7 +1066,7 @@ void p4_spl_psram_load_payload(void)
 	p4_spl_early_puts(" size ");
 	p4_spl_early_hex(ksize);
 	p4_spl_early_puts(" dtb ");
-	p4_spl_early_hex(readl((void *)0x48e00000));
+	p4_spl_early_hex(readl((void *)0x48600000));
 	p4_spl_early_puts(" size ");
 	p4_spl_early_hex(dsize);
 	p4_spl_early_puts("\n");
@@ -1714,6 +1736,24 @@ int p4_spl_psram_init(void)
 	 * from the prompt through the cacheable window instead.
 	 */
 	p4_spl_early_puts("psram: check skipped (hex mode)\n");
+
+	/*
+	 * Release hart1 (AP CPU) from reset last of all. TRM ch.12 Reset and
+	 * Clock, HP_SYS_CLKRST_HP_RST_EN0 (0x500E60C0): RST_EN_CORE1_GLOBAL
+	 * (bit 8, default 1) holds hart1 in reset out of power-on; IDF's
+	 * bootloader releases it for the app. Hart1 boots from the static HP
+	 * ROM vector (LP_CLKRST STAT_VECTOR_SEL default 1 = 0x4FC00000) and
+	 * parks in the ROM. With it held, hart1's CLIC window (0x208xxxxx)
+	 * faults, which kills the kernel's timer affinity setup
+	 * (p4_configure_slot store to 0x20811044). Releasing it here gives
+	 * its ROM boot the whole U-Boot boot to settle before anything
+	 * (p4boot/Linux) needs the second hart's window: releasing it from
+	 * the prompt and jumping within seconds was observed to corrupt
+	 * U-Boot's stack via the still-active ROM boot (store fault with
+	 * TVAL = 0xC), while a settled release is stable.
+	 */
+	clrbits_le32((void *)0x500e60c0u, BIT(8));
+	p4_spl_early_puts("psram: hart1 released\n");
 
 	return 0;
 }

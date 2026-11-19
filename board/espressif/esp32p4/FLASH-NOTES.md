@@ -5805,3 +5805,61 @@ Three buried mistakes surfaced and one got fixed, end to end.
 State: our SPL flashed (hash verified), `PROMPT OK`, `mode: mr8 0x300b`
 stable across final_latency, `lat: mr8 0x300b`, `axi: sctrl 0x02f7c679`,
 preload cmp lines all pass, `window: bad 0 of 1024`.
+
+## Round 150: kernel handoff stub, hart1/CLIC, 80 MHz - Linux reaches /init
+
+p4boot now enters Linux from the SPL preload alone, with a retained SRAM
+cache-sync stub, and the kernel runs to userspace (/init starts).
+
+1. **Kernel handoff callback.** The kernel panicked
+   ("P4 retained executable cache callback missing") because it expects
+   /chosen espressif,chip-revision (= 103) and espressif,cache-sync-entry
+   (a retained-SRAM `int sync(start, bytes)`), per the contract already
+   documented in ub/hw_handoff.c. Fix, all in board.c: a 64 KB-chunked
+   writeback stub driving the real 0x3FF10000 engine (the proven register
+   sequence), p4boot installs both DTB properties (fdt_open_into in place
+   with 4 KB slack) and writes the kernel + DTB back before jumping.
+   Stub lands at 0x4ff00b1c, inside the handoff window. The handoff panic
+   is gone; `esp32p4_cache_sync_for_exec` runs during alternatives patching.
+2. **CLIC was gated by hart1's reset.** The kernel died in timer_probe
+   (store to 0x20811044 faulted; U-Boot md there faulted with TVAL the
+   same). 0x2000_0000-0x2FFF_FFFF is the hart-relative CLIC (TRM ch.2),
+   0x208xxxxx is hart1's window, and RST_EN_CORE1_GLOBAL (HP_SYS_CLKRST
+   +0xC0 bit 8, default 1 - TRM ch.12) holds hart1 in reset, so its window
+   faults. Not the CLIC clocks (0x500E6014 = 0xE6DF97FF, both on). Fix:
+   the SPL releases hart1 last (clrbits BIT(8)); hart1 boots the static HP
+   ROM vector and parks there (stable prompt, CLIC reads 0x1FC00000).
+   Releasing from the prompt and rushing p4boot within seconds once
+   corrupted U-Boot's stack (store TVAL=0xC) via the still-active ROM boot;
+   SPL-time release gives it the whole boot to settle.
+3. **80 MHz PSRAM (was 320 MHz).** PERI_CLK_CTRL00 read 0xD03D: PSRAM SRC
+   MPLL, DIV 0. With MPLL 320 MHz that clocks the part at 320 MHz while the
+   mode-register latencies and controller dummies target <= 200 MHz -
+   reads mostly work but lines come back wrong under load. Fix: DIV 3
+   (MPLL/4 = 80 MHz = IDF CONFIG_SPIRAM_SPEED_80M, the reference speed;
+   TRM ch.12 HP_SYS_CLKRST_PERI_CLK_CTRL00). At 320 MHz the kernel died
+   with illegal-insn on device-correct text and initramfs "broken
+   padding"; at 80 MHz it passes uart_probe, unpacks initramfs
+   ("Freeing unused kernel image", "Run /init") and starts /init, which
+   then faults on a userspace fetch (signal 11 at 0x48b800de) - a new,
+   later failure, still under investigation (remaining marginal fills vs
+   userspace mapping/flush; still nondeterministic across boots).
+4. **p4load post-copy trap is cosmetic.** p4load completes (3.5 MB, magic
+   verified in the part) then prints the EPC=0 trap deterministically,
+   with and without hart1 released - but the CLI survives (the earlier
+   "board dead" reading was a serial-port artifact) and p4boot works
+   after it. Likely hart1's ROM mailbox stub reacting to the rewritten
+   PSRAM; harmless to the boot path, noted for later.
+5. **Tools/observations.** New `p4sync <addr> <size>` prompt command
+   exposes the retained WB stub (device-vs-flash crc bisecting: the
+   corrupt lines found so far trace to flaky *flash* fills, e.g. 0x4038FBD8
+   read 0x92 then 0xD2 across an invalidate - the PSRAM copy was correct).
+   `cmp.b` between the flash and alias windows finds the first bad byte in
+   one shot. The DRAM "effective 17.1493172222 MiB" print glitch is a
+   cosmetic uninit read in dram_init, same binary prints "16.8" other
+   boots. Serial goes deaf to commands (echo ok, no exec) after long warm
+   sessions; an RTS reset recovers it.
+
+State: SPL (dtb -> 0x48600000, hart1 release, DIV 80 MHz) + proper (stub,
+fdt patch, WB, p4sync) flashed (hashes verified), `PROMPT OK`, mr8 0x0B,
+sctrl 0x02F7C679, kernel runs to /init start.
