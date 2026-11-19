@@ -3575,3 +3575,44 @@ Next: find why the console/gd state is bad at that exact point - the two
 candidates are the device-model teardown that `announce_and_cleanup()` performs
 (`board_quiesce_devices`, `dm_remove_devices_flags(DM_REMOVE_ACTIVE_ALL)`) and a
 corrupted `gd`; the `0x94` offset should identify which structure is being read.
+
+## Round 98: PSRAM is executable now, and the kernel jumps
+
+Decoded the crash instruction from the earlier dump: `(d22e)` is a compressed
+stack store (`c.swsp`), and with `TVAL 0x94` that means the **stack pointer was
+corrupted**, not the FDT. So `announce_and_cleanup()` cannot be trusted in this
+SRAM build yet.
+
+Added a board command `p4boot` that starts the kernel the way
+`boot_jump_linux()` does (RISC-V kernels take `(hartid, dtb)`) without going
+through that path, and used it to find the real obstacle:
+
+```
+esp32p4> p4boot
+p4boot: kernel 48000000 fdt 48600000, jumping
+Unhandled exception code: 939524097        (instruction access fault)
+EPC: 48000000  TVAL: 48000000
+```
+
+The PMA entry that marks the PSRAM window as uncached was missing the **X
+(execute) bit** (TRM ch.2 Reg 2.118: EN bit0, **X bit2**, W bit3, R bit4). With
+`BIT(2)` added, the jump executes instead of faulting:
+
+```
+p4boot: kernel 48000000 fdt 48600000, jumping
+```
+
+…and then the kernel gives no output, because its *data* accesses still go
+through the window whose L1 D-cache lines are the stale ones from before the
+preload (`md.l 0x48000038` still reads 0 while the alias reads `0x05435352`).
+Note the instruction path works - the code is fetched correctly from the part.
+
+Tried invalidating just the L1 D-cache after the preload so those stale lines
+would be dropped: the SPL hangs inside the preload when it runs, so that is not
+viable either.
+
+State: PSRAM executable, `p4boot` jumps to the kernel, reference chain intact.
+Next: make the window's data accesses read the part. The immediate path is to
+understand why the PMA non-cacheable attribute does not take effect on data
+accesses (the window still returns cached, stale values) - with that fixed, both
+`booti 0x48000000 - 0x48600000` and `p4boot` should reach the kernel.

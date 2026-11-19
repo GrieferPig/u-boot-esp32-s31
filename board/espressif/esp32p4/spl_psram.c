@@ -1368,14 +1368,18 @@ static int psram_timing_tune(void)
  * accesses take the direct path instead of entering the HP cache, whose clocks
  * are off in this chain (TRM ch.22 Register 22.15).
  *
- *   A = NAPOT (bits 31:30 = 0b11), EN bit0, R bit4, W bit3
+ *   A = NAPOT (bits 31:30 = 0b11), EN bit0, X bit2, W bit3, R bit4
  *   ATTRIBUTE bit27 = 1 non-cacheable, bit25/24 = write/read miss no allocate
  * pma_addrX holds the address shifted right by 2 (see IDF riscv/csr.h).
+ *
+ * X (bit 2) matters: the kernel executes from this window, and without it the
+ * first instruction fetch faults with an instruction access fault on
+ * 0x4800_0000.
  */
 static void psram_pma_non_cacheable(void)
 {
 	u32 addr = (0x48000000u | (0x04000000u / 2 - 1)) >> 2;
-	u32 cfg = 0xc0000000u | BIT(0) | BIT(4) | BIT(3) |
+	u32 cfg = 0xc0000000u | BIT(0) | BIT(4) | BIT(3) | BIT(2) |
 		  BIT(27) | BIT(25) | BIT(24);
 
 	asm volatile("csrw 0xbd0, %0" :: "r"(addr));
@@ -1513,6 +1517,7 @@ void p4_spl_psram_preload(void)
 	}
 
 	((void (*)(u32))P4_ROM_CACHE_WB_ALL)(P4_CACHE_MAP_DCACHE);
+
 
 	/* Compare source and destination at a few offsets. */
 	{

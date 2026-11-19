@@ -230,6 +230,52 @@ void hw_watchdog_reset(void)
 #define P4_NC_OFFSET		0x00000000u
 #define P4_LOAD_CHUNK		0x1000u
 
+/*
+ * "p4boot" - jump straight to the preloaded kernel.
+ *
+ * booti does accept the image and relocates/fixes up the FDT, but its
+ * announce_and_cleanup() then faults: the faulting instruction is a stack store
+ * (`c.swsp`) with TVAL 0x94, i.e. the stack pointer is corrupted by the time the
+ * handoff runs. Until that is understood, start the kernel the same way
+ * boot_jump_linux() would - RISC-V kernels take (hartid, dtb) - without going
+ * through that path.
+ *
+ * Layout: kernel image at 0x8800_0000 (direct alias) and the FDT at 0x8860_0000,
+ * both placed there by the SPL preload.
+ */
+#define P4_KERN_ALIAS		0x88000000u
+#define P4_DTB_ALIAS		0x88600000u
+/*
+ * The kernel must execute at its physical load address: the device tree
+ * describes memory as 0x4800_0000 upward, so running from the 0x8800_0000 alias
+ * would put the kernel outside its own memory map.
+ */
+#define P4_KERN_RUN		0x48000000u
+#define P4_DTB_RUN		0x48600000u
+
+static int do_p4boot(struct cmd_tbl *cmdtp, int flag, int argc,
+		     char *const argv[])
+{
+	void (*kernel)(u32 hart, void *dtb) = (void *)P4_KERN_RUN;
+
+	if (readl((const void *)(P4_KERN_ALIAS + 0x38)) != 0x05435352u) {
+		printf("p4boot: bad RISCV Image magic at %08x\n", P4_KERN_ALIAS);
+		return CMD_RET_FAILURE;
+	}
+	if (readl((const void *)P4_DTB_ALIAS) != 0xedfe0dd0u) {
+		printf("p4boot: no fdt at %08x\n", P4_DTB_ALIAS);
+		return CMD_RET_FAILURE;
+	}
+
+	printf("p4boot: kernel %08x fdt %08x, jumping\n", P4_KERN_RUN,
+	       P4_DTB_RUN);
+
+	kernel(0, (void *)P4_DTB_RUN);
+	return CMD_RET_SUCCESS;
+}
+
+U_BOOT_CMD(p4boot, 1, 0, do_p4boot, "jump to the preloaded kernel", "");
+
 static int do_p4load(struct cmd_tbl *cmdtp, int flag, int argc,
 		     char *const argv[])
 {
