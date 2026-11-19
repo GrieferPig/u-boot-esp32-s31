@@ -4783,3 +4783,36 @@ i.e. the round 124 MR4 fix is working and is what the tree keeps.
 Practical note: `write_flash` failed with zero verified hashes twice this round and
 succeeded when repeated alone; check the hash count before reading anything into a
 boot log (round 120 recorded the same trap).
+
+## Round 126: dead "alias" boot path removed; p4load confirmed running
+
+Cleanup of temporary instrumentation, as the objective asks, plus one observation about
+p4load's practical limits.
+
+**`p4boot alias` is gone.** It entered the kernel at the uncached 0x8800_0000 alias and
+rewrote `/memory` in the loaded device tree to follow it. It is deleted because the
+kernel relocates itself to its link address no matter where it is entered (measured:
+mepc came back as a link address, FLASH-NOTES round 114), so the alias only moved the
+same failure and the device-tree fixup was a workaround for an address the kernel never
+keeps. `p4boot` now takes no arguments and always enters 0x4800_0000 with the DTB at
+0x4860_0000, and its magic checks read through the **uncached alias** on purpose - a
+magic number read through the cached window proves nothing about what the part holds.
+U-Boot is 328 bytes smaller and `PROMPT OK` was verified after the change.
+
+**p4load runs.** Started at the prompt it walks the image in 0x1000 chunks and prints
+progress per chunk:
+
+```
+p4load: k off 123000
+p4load: k off 124000
+p4load: k off 125000
+p4load: k off 126000 do ...
+```
+
+It got to 0x126000 (1.2 MiB) inside a 16 s window, so a full 3.3 MiB pass needs roughly
+45 s. That is why the round ended without a completed copy: `uart_boot.ps1` asserts RTS
+(hard reset) when it opens the port, which kills a copy in progress. Observing a full
+p4load needs a reset-free capture, which the current helper does not provide - worth
+knowing before reading anything into a truncated `p4load` log.
+
+State: our chain flashed (2/2 hashes) and at the `esp32p4>` prompt.

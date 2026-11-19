@@ -231,66 +231,33 @@ void hw_watchdog_reset(void)
 #define P4_LOAD_CHUNK		0x1000u
 
 /*
- * "p4boot [alias]" - jump straight to the preloaded kernel.
+ * "p4boot" - jump straight to the preloaded kernel.
  *
- * The kernel image and the device tree are placed in PSRAM by the SPL. Entering
- * at 0x4800_0000 (the cached window) does not work: the hart stops on the very
- * first compressed instruction after the 4-byte one at +0xA0, and the window
- * serves a stale line there that no ROM cache call clears (see FLASH-NOTES).
- * Entering through the uncached alias at 0x8800_0000 runs the kernel at full
- * speed instead, but then the kernel's own physical address is 0x8800_0000 while
- * /memory describes 0x4800_0000, so its address arithmetic is wrong and it dies
- * in do_trap_insn_fault.
+ * The kernel image and the device tree are placed in PSRAM by the SPL and the
+ * kernel is entered at its link address, 0x4800_0000.
  *
- * With the "alias" argument this also rewrites /memory in the loaded device tree
- * so it describes the region the kernel is actually running from. That is a
- * normal bootloader fixup and it keeps the device tree on flash untouched.
+ * This used to carry an "alias" mode that entered at the uncached
+ * 0x8800_0000 alias instead. It is gone: the kernel relocates itself to its link
+ * address whatever it is entered at (measured - mepc came back as a link address),
+ * so entering through the alias only moved the same failure, and the device-tree
+ * /memory fixup it needed was a workaround for an address the kernel never keeps.
+ * See FLASH-NOTES rounds 114 and 121-125.
  */
-#define P4_KERN_ALIAS		0x88000000u
-#define P4_DTB_ALIAS		0x88600000u
 #define P4_KERN_RUN		0x48000000u
 #define P4_DTB_RUN		0x48600000u
-#define P4_DTB_MAX		0x00010000u
-
-static void p4_fdt_set_memory(void *fdt, u32 base, u32 size)
-{
-	fdt32_t reg[2];
-	int node, err;
-
-	err = fdt_open_into(fdt, fdt, P4_DTB_MAX);
-	if (err)
-		printf("p4boot: fdt_open_into: %s\n", fdt_strerror(err));
-
-	node = fdt_path_offset(fdt, "/memory");
-	if (node < 0) {
-		printf("p4boot: no /memory: %s\n", fdt_strerror(node));
-		return;
-	}
-
-	reg[0] = cpu_to_fdt32(base);
-	reg[1] = cpu_to_fdt32(size);
-	err = fdt_setprop(fdt, node, "reg", reg, sizeof(reg));
-	if (err)
-		printf("p4boot: /memory/reg: %s\n", fdt_strerror(err));
-	else
-		printf("p4boot: /memory = %08x..%08x\n", base, base + size);
-}
+#define P4_KERN_ALIAS		0x88000000u
+#define P4_DTB_ALIAS		0x88600000u
 
 static int do_p4boot(struct cmd_tbl *cmdtp, int flag, int argc,
 		     char *const argv[])
 {
-	u32 run = P4_KERN_RUN;
-	u32 dtb_run = P4_DTB_RUN;
-	void (*kernel)(u32 hart, void *dtb);
-	bool alias = argc > 1 && !strcmp(argv[1], "alias");
+	void (*kernel)(u32 hart, void *dtb) = (void *)P4_KERN_RUN;
 
-	if (alias) {
-		run = P4_KERN_ALIAS;
-		dtb_run = P4_DTB_ALIAS;
-	}
-
-	kernel = (void *)run;
-
+	/*
+	 * The checks read through the uncached alias on purpose: the cached window
+	 * can serve a stale line, so a magic number read through it proves nothing
+	 * about what the part actually holds.
+	 */
 	if (readl((const void *)(P4_KERN_ALIAS + 0x38)) != 0x05435352u) {
 		printf("p4boot: bad RISCV Image magic at %08x\n", P4_KERN_ALIAS);
 		return CMD_RET_FAILURE;
@@ -300,21 +267,17 @@ static int do_p4boot(struct cmd_tbl *cmdtp, int flag, int argc,
 		return CMD_RET_FAILURE;
 	}
 
-	if (alias)
-		p4_fdt_set_memory((void *)P4_DTB_ALIAS, run, 0x01000000u);
-
-	printf("p4boot: kernel %08x fdt %08x, jumping\n", run, dtb_run);
+	printf("p4boot: kernel %08x fdt %08x, jumping\n", P4_KERN_RUN, P4_DTB_RUN);
 
 	asm volatile("csrci mstatus, 8" ::: "memory");	/* clear MIE */
 	asm volatile("fence.i" ::: "memory");
 	asm volatile("fence" ::: "memory");
 
-	kernel(0, (void *)dtb_run);
+	kernel(0, (void *)P4_DTB_RUN);
 	return CMD_RET_SUCCESS;
 }
 
-U_BOOT_CMD(p4boot, 2, 0, do_p4boot, "jump to the preloaded kernel",
-	   "[alias]");
+U_BOOT_CMD(p4boot, 1, 0, do_p4boot, "jump to the preloaded kernel", "");
 
 static int do_p4load(struct cmd_tbl *cmdtp, int flag, int argc,
 		     char *const argv[])
