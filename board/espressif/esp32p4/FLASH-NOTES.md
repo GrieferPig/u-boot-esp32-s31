@@ -5683,3 +5683,40 @@ at the cache controller's own configuration/状态 rather than at MSPI2 or at th
 
 State: 8-line, our chain flashed (2/2 hashes), `PROMPT OK`, `CACHE_SCTRL` = 0x02F7C679
 (identical to the reference), preload byte-exact.
+
+## Round 147: drove the cache write-back engine directly from its TRM registers - still nothing
+
+Compared the whole cache-controller block (0x500E5000..0x500E50FC) against the reference
+halted in Linux. Only two registers differ, and both are **residue from cache operations**,
+set by this port's own boot rather than configuration:
+
+| offset | register | this port | reference |
+| --- | --- | --- | --- |
+| 0x9C | `CACHE_SYNC_MAP` | 2 | 0 |
+| 0xB0 | `CACHE_L1_ICACHE0_PRELOAD_SIZE` | 0x00590F80 | 0 |
+
+(the id 0x20230519 at 0x00, 0x33 at 0x20, 0x826ED93F at 0x34 and 0xFFFFFFFF at 0xE0/0xEC all
+match). Note `CACHE_L1_ICACHE2_PRELOAD_*` naming: TRM/IDF list four L1 icaches on this part.
+
+Then used the documented sync engine directly (`cache_reg.h`):
+
+```
+CACHE_SYNC_MAP  (0x9C) = 0x30   # bit 4 L1-DCache | bit 5 L2-Cache
+CACHE_SYNC_ADDR (0xA0) = 0x48E00000
+CACHE_SYNC_SIZE (0xA4) = 0x40   # one 64 B block
+CACHE_SYNC_CTRL (0x98) = 0x04   # CACHE_WRITEBACK_ENA, R/W/SC
+```
+
+`CACHE_SYNC_CTRL` reads back 0x00000000 - the bit is self-cleared by hardware, so the engine
+accepted and completed the operation - and the device still does not hold the store. Verified
+independently of the alias by **resetting the chip and reading 0x88E00000 afterwards**: it
+returns 0x5555555C / 0x555D5555, i.e. old leftovers, not the 0x11223344 that was written
+through the window.
+
+So the write-back is requested, reported done, and does not appear in PSRAM. With the sync
+engine's own registers as evidence, the fault is below the software-visible layer that the TRM
+describes - the cache believes it flushed and the PSRAM controller (or the path between them)
+does not deliver it, while the same controller delivers alias writes and cached reads fine.
+
+State: our chain flashed (2/2 hashes), `PROMPT OK`, `CACHE_SCTRL` = 0x02F7C679 identical to the
+reference, preload byte-exact.
