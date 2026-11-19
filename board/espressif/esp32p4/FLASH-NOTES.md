@@ -4652,3 +4652,49 @@ changes how many bytes a clock moves for *both*, so the register phase needs its
 
 State: reverted; the reference chain is flashed (6/6 hashes) and verified booting
 Linux, and the port tree is back at the last verified commit.
+
+## Round 123: a window write stays in its cache line and never reaches the part
+
+Measured exactly what a window write does, byte for byte, from the prompt.
+
+First, clear 16 bytes through the alias so the part really holds 0xFFFFFFFF there,
+then write one word through the window and compare both views:
+
+```
+mw.l 0x88e00000 0xffffffff 4        # alias: 16 bytes = FF
+md.l 0x88e00000 4                   # 88e00000: ffffffff ffffffff ffffffff ffffffff
+mw.l 0x48e00000 0x11223344 1        # window write
+md.l 0x88e00000 4                   # 88e00000: ffffffff ffffffff ffffffff ffffffff  <- part unchanged
+md.l 0x48e00000 4                   # 48e00000: 11223344 ffffffff ffffffff  <- window shows it
+```
+
+So the store **lands in the cache line and never goes out to the part**. The value
+that shows up as 0x5555555d in earlier rounds was a line-fill of old content with a
+byte or two of the new store merged in, not a data-phase misalignment on the bus.
+
+Under pressure it stays that way. Writing 64 KiB through the window and then reading
+the part through the alias:
+
+```
+mw.l 0x48e00000 0x11223344 0x4000   # 64 KiB of the same word through the window
+88e00000: 5555555d 555d5555
+88e04000: 55555545 55555555
+```
+
+Evicting the lines still does not write them back - the part holds the old 0x55555555
+pattern with a handful of single bits flipped. So the cache's **write-back path to
+PSRAM does not carry the data**, and `Cache_WriteBack_All` cannot be used to force it
+(it hangs, FLASH-NOTES round 116).
+
+**This finally explains why the 16-line switch is mandatory rather than optional.**
+`SPI_MEM_S_CACHE_SCTRL` is what times a cache-path transfer, and this port now matches
+the reference there exactly (0x02F7C679: `SRAM_RDUMMY_CYCLELEN` 25,
+`SRAM_WDUMMY_CYCLELEN` 11). Those values are calibrated for 16 data lines, i.e. 4 bytes
+per clock. Running them with 8 data lines means the controller's expected write data
+phase is twice as long as the bytes actually driven, so a write-back has nothing
+coherent to put on the bus - which is exactly the behaviour measured above. In other
+words: the cache path cannot work at 8 lines with the reference's timing, and the
+timing cannot be changed without re-tuning.
+
+State: port tree at the last verified commit, our chain flashed (2/2 hashes) and at
+the `esp32p4>` prompt.
