@@ -4034,3 +4034,51 @@ a stale/partial fetch.
 
 `p4bench` is temporary instrumentation and should be removed once the handoff is
 fixed (tracked with the other cleanup).
+
+## Round 110: the window's cached view of the kernel really is stale - measured at the entry
+
+This round found and proved the cause of the "PC stuck at 0xA4" behaviour.
+
+Reading the same address through both views, with the kernel already preloaded:
+
+```
+0x480000a0: 10500073 0001bff5 001bb517 5f850513   <- window: OLD contents
+0x880000a0: 30047073 82936289 90733072 f0733062   <- alias: the kernel
+0x48000000: 0000a045 00010000                      <- both agree here
+```
+
+So the hart starts at 0x48000000 (correct `j _start_kernel`), reaches 0xA0, and from
+there executes whatever the stale line holds - which is why the PC never reaches
+0xA6, why it looked like a two-instruction loop, and why nothing trapped: the stale
+bytes are valid instructions, just not this kernel's.
+
+Three fixes were tried, only the third measurement matters:
+
+| attempt | result |
+| --- | --- |
+| `Cache_Invalidate_Addr(0x33, 0x48000000, ksize)` after the alias copy | window still stale |
+| copy once more through the window (source: alias), then `Cache_WriteBack_All` | **corrupted the whole preload** - `cmp 0x0 src 0x0000a045 dst 0x00000002` |
+| copy through the window directly from flash, then `Cache_WriteBack_All` | same corruption (`dst 0x00000002`) |
+| `psram_dcache_invalidate()` (map 0x13, the value this file documents as valid) | window still stale; alias copy verified again (`dst 0x0000a045`) |
+
+Conclusions with evidence:
+
+1. **Bulk writes through the cached window lose/corrupt data** (dst became 0x00000002
+   twice, from two different sources), so the alias copy is the only correct way to
+   place the kernel.
+2. **The stale line for the window address is not removed** by the ROM
+   invalidate-by-address helpers for either map value tried, so the incoherence
+   between the alias copy and the window view is real and persistent.
+3. Therefore the handoff must not depend on the window view being coherent. The
+   kernel has to be entered through a path whose cached view is known good, or the
+   window lines have to be filled *after* the copy by executing/reading through the
+   window itself.
+
+Everything was reverted to the committed state afterwards (the invalidate calls
+changed nothing and the window-copy variants corrupt data), rebuilt, flashed and
+verified at the prompt.
+
+Next: get a coherent window view at handoff - either by filling the lines from the
+window with a *safe* mechanism (e.g. reading through the window what the alias just
+wrote, which only allocates read lines and cannot corrupt memory), or by entering
+the kernel at an address whose lines were never stale.
