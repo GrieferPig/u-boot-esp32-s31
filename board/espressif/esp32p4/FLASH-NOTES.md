@@ -3616,3 +3616,39 @@ Next: make the window's data accesses read the part. The immediate path is to
 understand why the PMA non-cacheable attribute does not take effect on data
 accesses (the window still returns cached, stale values) - with that fixed, both
 `booti 0x48000000 - 0x48600000` and `p4boot` should reach the kernel.
+
+## Round 99: the window is fine on a fresh boot; a window read poisons its own line
+
+Checked the PMA encoding against IDF (`components/riscv/include/riscv/csr.h`):
+`PMA_EN`/`X`/`W`/`R` and `PMA_ENTRY_SET_NAPOT(ENTRY, ADDR, SIZE, CFG)` -
+`(ADDR | ((SIZE >> 1) - 1)) >> 2` - are exactly what this port writes, so the
+attribute programming is right.
+
+The important new measurement, on a fresh boot with no prior window access:
+
+```
+esp32p4> md.l 0x48000000 2
+48000000: 0000a045 00010000        <- kernel words, correct
+esp32p4> md.l 0x88000000 2
+88000000: 0000a045 00010000        <- same through the alias
+```
+
+So the window reads the part correctly when its line has not been used yet. The
+failure is self-inflicted: an earlier read of `0x48000038` fills that line with
+the pre-preload contents, and it stays stale - which then makes `booti` report
+`Bad Linux RISCV Image magic!` even though `0x48000000` itself reads correctly.
+Note the split is inside one 64-byte region (`0x00` correct, `0x38` stale after
+poisoning), i.e. the line granularity is 32 bytes here.
+
+Tried two invalidations; both hang:
+
+| call | where | result |
+| --- | --- | --- |
+| `Cache_Invalidate_All(BIT(4))` (L1 D only) | U-Boot command | hangs |
+| `Cache_WriteBack_Invalidate_Addr(...)` over the range | SPL, after the preload | build/run attempt abandoned |
+
+So the usable rule today is: **do not touch the PSRAM window before `booti`, and
+boot it from the physical address** - a clean boot with `booti 0x48000000 -
+0x48600000` reads the header from the part. That is the state to build the final
+boot path on; the flush has to come from somewhere that does not hang (the ROM
+cache helpers are not usable from this context yet).
