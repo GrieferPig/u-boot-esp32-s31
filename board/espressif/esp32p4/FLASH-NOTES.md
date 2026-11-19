@@ -3186,3 +3186,36 @@ unaligned reads from the XIP window are what kills it.
 
 Instrumentation reverted; SPL boot check is back to the 4 KB window pattern
 (`window: bad 0x00000000 of 1024`).
+
+## Round 88: the flash XIP window dies after 16 bytes, in U-Boot and in the SPL
+
+Probed the flash window at the U-Boot prompt, one line at a time:
+
+```
+esp32p4> md.l 0x40900000 4
+40900000: edfe0dd0 3d110000 38000000 240e0000    <- works
+esp32p4> md.l 0x40900000 40                          <- prints the same one line
+esp32p4> md.l 0x40900010 2                           <- no output, stalls
+esp32p4> md.l 0x40901000 2                           <- stalls
+```
+
+So the first 16 bytes of the DTB read fine and the *next* line stalls; the flash
+XIP window is not usable for bulk reads in U-Boot, which is exactly what killed
+p4load (`p4load: dtb off 0 src edfe0dd0` then hang).
+
+Tried moving the load into the SPL instead, where flash reads demonstrably work
+(the SPL loads U-Boot from flash 0x100000). Added `p4_spl_psram_preload()`
+reading kernel flash 0x200000 and DTB flash 0x900000 through the SPL's flash
+window (0x01000000) and copying them into the PSRAM window. Two placements
+tried: before and after `p4_spl_flash_init(0x01000000)`. Both stall, and both
+stall before printing the first `preload:` line, i.e. on the header read of the
+DTB at flash offset 0x900000 (0x01900000) - not on the PSRAM side.
+
+That is consistent with the U-Boot result: reads at flash 0x900000 are the
+problem in both contexts, while reads at flash 0x100000 (where U-Boot lives) are
+fine. Next: check how far the flash mapping actually reaches (the SPL maps 16
+MiB in 64 KiB pages, so either the mapping is not applied to the regions above
+the boot image or the flash controller needs the higher region mapped
+separately) rather than assuming the whole 16 MiB is addressable.
+
+Preload reverted; SPL boot check back to `window: bad 0x00000000 of 1024`.

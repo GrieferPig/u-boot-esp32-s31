@@ -1433,6 +1433,7 @@ static void psram_rw_test(void)
 	p4_spl_early_puts("\n");
 }
 
+
 int p4_spl_psram_init(void)
 {
 	/*
