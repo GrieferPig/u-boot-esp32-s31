@@ -5306,3 +5306,55 @@ a captured register image - the one thing this port has never done, and now the 
 structural difference left.
 
 State: reverted; our chain flashed (2/2 hashes), `PROMPT OK`, preload matching.
+
+## Round 138: the command path belongs on MSPI3 - and with it the register path finally works
+
+Read `esp_psram_impl_enable()` line by line (round 135's "the difference is how the state is
+reached"). One line changes everything:
+
+```c
+s_init_psram_mode_reg(PSRAM_CTRLR_LL_MSPI_ID_3, &mode_reg);
+s_check_psram_connected(PSRAM_CTRLR_LL_MSPI_ID_3);
+s_get_psram_mode_reg(PSRAM_CTRLR_LL_MSPI_ID_3, &mode_reg);
+```
+
+**IDF performs every command-path transfer on MSPI3, not MSPI2.** MSPI2 is the controller
+behind the cache/MMU window; MSPI3 is the separate peri PSRAM controller. This port had its
+whole command path (`psram_xact`) on MSPI2 - the same controller the cache streams through -
+which is the shape of every failure this port has had: the cache/alias path works, the user
+path reads nothing, and the user path breaks outright once the data phase widens.
+
+Round 137 already tried the ROM helper path but with `spi_num = 2`; that returned zeros for
+every mode register. With `spi_num = 3` the same code works:
+
+```c
+esp_rom_spi_set_op_mode(3, ESP_ROM_SPIFLASH_OPI_DTR_MODE);
+esp_rom_spi_cmd_config(3, &conf);
+esp_rom_spi_cmd_start(3, rx, rx_bits / 8, 1 << 1, 0);
+```
+
+Verified on the hardware:
+
+```
+mode: mr0 0x00008d30 mr4 0x000080df mr8 0x0000054b    <- registers read correctly
+cmp  0x00000038 src 0x05435352 dst 0x05435352         <- preload byte-exact
+PROMPT OK
+```
+
+`psram_xact()` now issues its transfers through the ROM on MSPI3, keeping every caller and
+the dummy-bit convention unchanged. This is also a code deletion: the hand-rolled
+USER/USER1/USER2/MOSI_DLEN/MISO_DLEN programming is gone.
+
+**16-line mode with this in place behaves differently, and the difference is informative.**
+With `SDIN_HEX|SDOUT_HEX` set the mode registers *still read correctly* (so the user path on
+MSPI3 tolerates 16 lines - it did not before), but the board still dies at the first cached
+access. So the remaining fault is now unambiguously in the **cache path on MSPI2** alone, with
+the command path verified working at both widths.
+
+State: 8-line kept (16-line still cannot reach the prompt); our chain flashed (2/2 hashes),
+`PROMPT OK`, `mr0` correct, preload matching.
+
+Next: the cache path is now the only failing part and the only controller left to configure
+against IDF's sequence - `s_config_mspi_for_psram()` runs on MSPI2 *after* the mode registers
+are programmed on MSPI3, and this port programs MSPI2's config before its own command-path
+work. Bring MSPI2's configuration to that order.

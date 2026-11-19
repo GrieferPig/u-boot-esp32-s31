@@ -603,87 +603,72 @@ static void psram_opi_dtr_mode(void)
 /* Bytes per clock cycle in the data phase (DDR: 4 for 16 lines). */
 static u32 psram_dbyte = 1;
 
+/*
+ * One PSRAM command/address/data transfer, issued the way IDF does it.
+ *
+ * Two things this port had wrong:
+ *
+ * 1. IDF performs these transfers through the ROM helpers
+ *    (psram_ctrlr_ll_common_transaction -> esp_rom_spi_set_op_mode /
+ *    esp_rom_spi_cmd_config / esp_rom_spi_cmd_start), and
+ *    esp_rom_spi_set_op_mode is what puts the controller into OPI-DTR mode.
+ *    This port wrote USER/USER1/USER2 itself and never called it.
+ *
+ * 2. IDF issues them on MSPI3, not MSPI2: esp_psram_impl_enable() does
+ *    s_init_psram_mode_reg(PSRAM_CTRLR_LL_MSPI_ID_3, &mode_reg) and
+ *    s_get_psram_mode_reg(PSRAM_CTRLR_LL_MSPI_ID_3, &mode_reg), while MSPI2 is
+ *    the controller behind the cache/MMU window. Driving user transactions on
+ *    MSPI2 puts them on the same controller the cache is streaming through,
+ *    which is exactly the shape of the failure seen all along: the cache/alias
+ *    path works, the user path reads nothing (round 137 returned zeros for every
+ *    mode register when it used spi 2), and the user path breaks outright once
+ *    the 16-line data phase is enabled.
+ *
+ * The dummy argument keeps this port's convention, which is already IDF's: a bit
+ * count of the form 2*(cycles-1) (compare AP_HEX_PSRAM_RD_REG_DUMMY_BITLEN).
+ */
+struct p4_rom_spi_cmd {
+	u16 cmd;
+	u16 cmd_bitlen;
+	u32 *addr;
+	u32 addr_bitlen;
+	u32 *tx_data;
+	u32 tx_data_bitlen;
+	u32 *rx_data;
+	u32 rx_data_bitlen;
+	u32 dummy_bitlen;
+};
+
+#define P4_ROM_SPI_CMD_CONFIG	0x4fc00108u
+#define P4_ROM_SPI_CMD_START	0x4fc0010cu
+#define P4_ROM_SPI_SET_OP_MODE	0x4fc00110u
+#define P4_ROM_SPIFLASH_OPI_DTR_MODE	7
+#define P4_PSRAM_SPI_NUM	3		/* MSPI3 carries the command path */
+#define P4_PSRAM_CS_MASK	(1u << 1)	/* the PSRAM sits on CS1 */
+
 static int psram_xact(u16 cmd, u32 addr, u32 *tx, u32 tx_bits,
 		      u32 *rx, u32 rx_bits, u32 dummy)
 {
-	u32 user, i;
+	struct p4_rom_spi_cmd conf;
+	u32 addr_val = addr;
 
-	for (i = 0; i < 100000; i++) {
-		if (!readl((void *)P4_MSPI_S_CMD))
-			break;
-	}
+	((void (*)(int, int))P4_ROM_SPI_SET_OP_MODE)(P4_PSRAM_SPI_NUM,
+						     P4_ROM_SPIFLASH_OPI_DTR_MODE);
 
-	writel(((u32)cmd & 0xffff) | ((16 - 1) << P4_USR_COMMAND_BITLEN_S),
-	       (void *)P4_MSPI_S_USER2);
+	memset(&conf, 0, sizeof(conf));
+	conf.cmd = cmd;
+	conf.cmd_bitlen = 16;
+	conf.addr = &addr_val;
+	conf.addr_bitlen = 32;
+	conf.tx_data = tx;
+	conf.tx_data_bitlen = tx_bits;
+	conf.rx_data = rx;
+	conf.rx_data_bitlen = rx_bits;
+	conf.dummy_bitlen = dummy;
 
-	/*
-	 * Hex PSRAM in DDR mode moves at most 4 bytes per clock (16 lines x 2
-	 * edges), so USER1.DBYTELEN ("data byte length - 1") is 3 for every
-	 * 32-bit and wider data phase, 1 for a 16-bit register access and 0 for
-	 * the 8-bit MR8 read. Deriving it from "> 32" made a 32-bit array
-	 * access move only half of its bytes.
-	 */
-	{
-		u32 bits = rx_bits > tx_bits ? rx_bits : tx_bits;
-
-		psram_dbyte = bits >= 32 ? 3 : (bits ? bits / 8 - 1 : 0);
-	}
-
-	user = ((32 - 1) << P4_USR_ADDR_BITLEN_S);
-	if (dummy)
-		user |= (dummy - 1) & 0x3f;
-	user |= psram_dbyte << 6;
-	writel(user, (void *)P4_MSPI_S_USER1);
-
-	writel(addr, (void *)P4_MSPI_S_ADDR);
-	setbits_le32((void *)P4_MSPI_S_CACHE_FCTRL, P4_CACHE_USR_ADDR_4BYTE);
-
-	user = P4_USR_COMMAND | P4_USR_ADDR;
-	if (dummy)
-		user |= P4_USR_DUMMY;
-	if (tx_bits) {
-		user |= P4_USR_MOSI;
-		writel(tx_bits - 1, (void *)P4_MSPI_S_MOSI_DLEN);
-		if (tx)
-			for (i = 0; i < DIV_ROUND_UP(tx_bits, 32); i++)
-				writel(tx[i], (void *)(P4_MSPI_S_W0 + i * 4));
-	} else {
-		writel(0, (void *)P4_MSPI_S_MOSI_DLEN);
-	}
-	if (rx_bits) {
-		user |= P4_USR_MISO;
-		writel(rx_bits - 1, (void *)P4_MSPI_S_MISO_DLEN);
-	} else {
-		writel(0, (void *)P4_MSPI_S_MISO_DLEN);
-	}
-	writel(user, (void *)P4_MSPI_S_USER);
-
-	/* The PSRAM hangs off CS1. */
-	setbits_le32((void *)P4_MSPI_S_MISC, P4_CS0_DIS);
-	clrbits_le32((void *)P4_MSPI_S_MISC, P4_CS1_DIS);
-
-	setbits_le32((void *)P4_MSPI_S_CMD, P4_USR);
-	for (i = 0; i < 100000; i++) {
-		if (!(readl((void *)P4_MSPI_S_CMD) & P4_USR))
-			break;
-	}
-
-	clrbits_le32((void *)P4_MSPI_S_MISC, P4_CS0_DIS);
-	setbits_le32((void *)P4_MSPI_S_MISC, P4_CS1_DIS);
-
-	if (readl((void *)P4_MSPI_S_CMD) & P4_USR)
-		return -1;
-
-	if (rx_bits && rx) {
-		for (i = 0; i < DIV_ROUND_UP(rx_bits, 32); i++) {
-			u32 v = readl((void *)(P4_MSPI_S_W0 + i * 4));
-			u32 left = rx_bits - i * 32;
-
-			if (left < 32)
-				v &= (1u << left) - 1;
-			rx[i] = v;
-		}
-	}
+	((void (*)(int, void *))P4_ROM_SPI_CMD_CONFIG)(P4_PSRAM_SPI_NUM, &conf);
+	((void (*)(int, void *, int, u32, int))P4_ROM_SPI_CMD_START)
+		(P4_PSRAM_SPI_NUM, rx, (int)(rx_bits / 8), P4_PSRAM_CS_MASK, 0);
 
 	return 0;
 }
@@ -911,6 +896,12 @@ static void psram_axi_config(void)
 	 * at offset 4.
 	 */
 	cmd = readl((void *)P4_SRAM_CMD);
+	/*
+	 * Keep the data phase at 8 lines. 16 lines is what the reference runs
+	 * (SRAM_CMD 0x8CFC0000), and the command path on MSPI3 now tolerates it -
+	 * the mode registers read correctly with the bits set - but the cache path
+	 * still dies on the first cached access, so it cannot be used yet.
+	 */
 	cmd &= ~(P4_CMD_SDIN_HEX | P4_CMD_SDOUT_HEX);
 	cmd |= BIT(18) | BIT(19) | BIT(20) | BIT(21) | P4_CMD_SDUMMY_WOUT;
 	writel(cmd, (void *)P4_SRAM_CMD);
