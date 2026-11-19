@@ -3839,3 +3839,41 @@ compressed pairs, so the first concrete question is whether execution is landing
 on the right boundary at all - i.e. whether the image's `_start_kernel` is 2-byte
 aligned relative to where the `j` lands, or whether the hart is stalling on a
 cache-line refill for the line after 0xA3.
+
+## Round 105: the kernel is looping at 0xA0/0xA4, not stalled
+
+Single-stepping on our own chain (flash -> prompt -> p4boot) settles what the
+earlier "stall" really is:
+
+```
+halt   -> PC=0x480000A4
+step   -> PC=0x480000A0
+step   -> PC=0x480000A4
+resume -> halted at PC=0x480000A0 (breakpoint)
+```
+
+The PC alternates between 0xA0 and 0xA4, so the guest is running a **two-instruction
+loop at the kernel entry**, not sitting on a stalled fetch. Everything said about
+a "stalled instruction fetch" in rounds 101/102 is superseded by this.
+
+Also caught a methodology error: the first halt of this round reported
+`PC=0x481B5BD2` with hart 1 at `0x4FF01F30` - that was the **reference chain's
+Linux**, because the board had been left with the restored reference images and
+the debugger attached to it. Always flash the chain under test before reading
+machine state; the two chains look identical to the debugger otherwise.
+
+Bytes at the loop (verified identical through the alias and in the image file):
+
+```
+880000a0: 30047073 82936289 90733072 f0733062
+file 0xa0: 7370 0430 8962 9382 ...
+```
+
+`0x30047073` is `csrw mstatus, a0`, and the following word does not decode as a
+32-bit instruction, so the loop's second instruction is one of the compressed
+halves - which is why the exact branch target has to be read with a real
+disassembler rather than by hand.
+
+Next: disassemble the image bytes properly (the matching vmlinux has truncated
+section headers, so wrap the raw Image in an ELF or find a toolchain objdump that
+accepts `-b binary -m riscv`) and identify what the 0xA0/0xA4 loop waits on.
