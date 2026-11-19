@@ -5484,3 +5484,42 @@ alignment - which needs a finer instrument than whole-word reads (single-byte st
 consecutive offsets) to see which of the 16 lines carries which byte.
 
 State: 8-line, our chain flashed (2/2 hashes), `PROMPT OK`, preload byte-exact.
+
+## Round 142: in 16-line mode the address phase is lost and the data is shifted one bit
+
+Ran the finer probe that round 141 called for: at the U-Boot prompt with the 16 data lines
+enabled, for each byte offset 0..7 - clear eight bytes through the alias, store one 0xAA byte
+through the window at that offset, read the eight bytes back through the alias:
+
+```
+offset 0: ff 55 ff ff ff ff ff ff
+offset 1: ff 00 ff ff ff ff ff ff
+offset 2: ff 55 ff ff ff ff ff ff
+offset 3: ff 00 ff ff ff ff ff ff
+offset 4: ff 00 ff ff ff ff ff ff
+offset 5: ff 00 ff ff ff ff ff ff
+offset 6: ff 55 ff ff ff ff ff ff
+offset 7: ff 00 ff ff ff ff ff ff
+```
+
+Two conclusions, both new:
+
+1. **The address phase has no effect.** Every offset writes to the same place - the readback
+   never moves. The address is simply not arriving in 16-line mode.
+2. **The data is shifted by one bit.** 0xAA (1010_1010) comes back as 0x55 (0101_0101), a
+   single-bit / half-clock shift in DDR, and byte 0 never takes the written value (always 0xFF).
+
+So 16-line mode is not a dummy-timing trim: both the address and the data phase are
+misaligned by a half clock relative to what the controller thinks it is sending. That is
+consistent with the controller's internal notion of how many bits one beat carries
+(`SRAM_CMD`/`CACHE_SCTRL` describe the transfer in bits, and the dummy fields are expressed as
+2*(cycles-1) - i.e. the code assumes one cycle is two bits everywhere), while the 16-line data
+phase moves four bytes per clock.
+
+Given the TRM does not cover the mode at all (round 141) and every enable bit matches IDF,
+the next step with real prospects is not another register experiment but to **re-implement the
+PSRAM bring-up function-for-function from IDF**, whose complete call list is now known
+(`esp_psram_impl_enable()` plus `s_config_mspi_for_psram()`, the latter transcribed in round
+141). That also settles the bit-length bookkeeping by construction instead of by inference.
+
+State: 8-line, our chain flashed (2/2 hashes), `PROMPT OK`, preload byte-exact.
