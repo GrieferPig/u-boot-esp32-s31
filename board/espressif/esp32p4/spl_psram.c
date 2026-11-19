@@ -129,6 +129,12 @@ typedef void (*rom_cmd_start_fn)(int spi_num, u8 *rx_buf, u16 rx_len,
 #define PSRAM_REG_CMD_BITS	16
 #define PSRAM_REG_ADDR_BITS	32
 #define PSRAM_REG_DUMMY_RD	(2 * (5 - 1))
+/*
+ * MR4 value this part reports when healthy (captured from a working boot; the
+ * write-latency field is overwritten from PSRAM_WR_LATENCY below).
+ */
+#define PSRAM_MR4_KNOWN_GOOD	0x014bu
+
 #define PSRAM_RD_LATENCY	4
 #define PSRAM_WR_LATENCY	2
 #define PSRAM_MR8_BL		3
@@ -325,6 +331,17 @@ static int psram_mode_register_init(void)
 
 	mr01 &= ~(0x3 | (0x7 << 2) | BIT(5));
 	mr01 |= (PSRAM_RD_LATENCY << 2) | BIT(5);
+	/*
+	 * MR4 is written, not merged. When healthy this part reports 0x014b, but
+	 * the merge used to preserve whatever was there, and it has been reading
+	 * back 0x80df - the write latency field (bits 7:5) is 0 instead of 2, which
+	 * is exactly the field that times a write data phase. A bad MR4 therefore
+	 * survives every boot, including after the reference images re-initialise
+	 * the part, because IDF merges that register too. Force the whole register
+	 * to the known-good value instead of inheriting it: that is both the actual
+	 * state this port needs and the "self-healing" the init was missing.
+	 */
+	mr48 = PSRAM_MR4_KNOWN_GOOD;
 	mr48 &= ~(0x7 << 5);
 	mr48 |= (PSRAM_WR_LATENCY << 5);
 

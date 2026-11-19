@@ -4698,3 +4698,44 @@ timing cannot be changed without re-tuning.
 
 State: port tree at the last verified commit, our chain flashed (2/2 hashes) and at
 the `esp32p4>` prompt.
+
+## Round 124: MR4 was corrupted and conserved - the init now writes it explicitly
+
+Ran an A/B in one boot: the same MR4 read with 8 data lines and with 16. Both
+returned 0x0000 at that point, while the init's own read of MR0 comes back correct
+(0x8d30, read latency 4). So the register transfer itself works, and the line width
+is not what garbles it.
+
+That leaves the value. MR4 reads back as **0x80df**, while a healthy part reports
+**0x014b**. Decoding the field that matters:
+
+| value | bits 7:5 (write latency) |
+| --- | --- |
+| 0x014b (healthy) | 2 |
+| 0x80df (what this part reports) | 0 |
+
+The init did a read-modify-write of MR4 - `mr48 &= ~(0x7 << 5); mr48 |= wr_latency`.
+That conserves every other bit, so once the register held a bad value it stayed bad
+across every boot, and the reference images cannot repair it either because IDF
+merges that register too. This is the "self-healing" gap the objective names, in its
+concrete form.
+
+Fixed by writing MR4 outright from `PSRAM_MR4_KNOWN_GOOD` (0x014b, the value this
+part reports when healthy) with the write-latency field set from
+`PSRAM_WR_LATENCY`, instead of inheriting whatever is there. Read-back after the
+change:
+
+```
+mode: mr0 0x00008d30 mr4 0x000080df mr8 0x0000054b   (first read, before the write)
+lat:  mr0 0x00008d30 mr4 0x0000014b                   (after the init wrote it)
+```
+
+The prompt still comes up (`PROMPT OK`), so the change is safe, and the register that
+times the write data phase is now correct instead of whatever the last boot left.
+
+It does **not** by itself fix the window write: writing 0x11223344 through the window
+still leaves the part at 0xFFFFFFFF while the window shows the new value. So the
+missing write-back is in the cache path, not in MR4 - which is consistent with round
+123's conclusion that the cache path's timing is calibrated for 16 lines.
+
+State: our chain flashed (2/2 hashes), at the `esp32p4>` prompt.
