@@ -4414,3 +4414,50 @@ port's tree is unchanged from the last verified commit.
 Next: fix `psram_timing_tune()`'s low-clock reference step. Everything else - the
 16-line data phase, reliable window writes, the self-healing mode registers - sits
 behind the port being able to read PSRAM back correctly at the slow clock.
+
+## Round 118: the init order explains the garbled mode registers, and 16-line mode kills the boot outright
+
+Read the actual init sequence, which explains the MR4 corruption from round 117:
+
+```
+psram_axi_config();
+clrbits_le32(P4_CACHE_FCTRL, BIT(0));   /* close the AXI port */
+psram_word_test();
+psram_timing_tune();
+psram_final_latency();                  /* <- writes MR0/MR4 again */
+writel(0x00030103, P4_MSPI2_BASE + 0x14);
+psram_cache_clocks_on();
+psram_pma_non_cacheable();
+psram_mmu_map(0x01000000);
+setbits_le32(P4_CACHE_FCTRL, BIT(0));   /* open the AXI port */
+```
+
+`psram_final_latency()` is the **last** thing that writes the mode registers, and
+those writes go through the command path. Enabling `SDIN_HEX | SDOUT_HEX` before
+it therefore makes the *mode register* traffic itself run in 16-line mode, which is
+exactly why MR4 came back as 0xa0df instead of 0x014b.
+
+Moved the enable to after `psram_final_latency()` and the divider write, i.e. after
+all mode-register traffic but before the AXI port opens. Result: the board produces
+**no serial output at all** - not the SPL banner, not the ROM banner - and the
+serial stream stops mid-flash:
+
+```
+ERROR: A fatal error occurred: Serial data stream stopped: Possible serial noise or corruption.
+captured 0 chars
+```
+
+So 16-line mode does not merely garble the mode registers; enabling it in this
+configuration takes the board down completely. Recovered with the reference images
+as before (6/6 hashes, `Starting kernel ...`, Linux boots) - third confirmation
+that a reference flash is a reliable recovery path for a chip/serial state left
+bad by this port.
+
+Change reverted; the port's tree is back at the last verified commit and the
+reference chain is flashed and verified.
+
+Next: 16-line mode needs more than the two SRAM_CMD bits - the MMU page size, the
+cache controller's AXI burst setup and the pin/DQS configuration all describe data
+width. Find what else IDF's `s_config_mspi_for_psram` /
+`psram_ctrlr_ll_enable_hex_data_line_mode` touches, and switch the whole set
+together instead of the two bits alone.
