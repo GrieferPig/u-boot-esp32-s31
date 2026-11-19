@@ -5942,3 +5942,26 @@ sctrl 0x02F7C679, kernel runs to /init start.
   serial bridge (repeated 0-char captures); retry on a fresh session.
 - Serial bridge degradation (deaf spells, truncated captures, repeat floods)
   worsened across the session and is host-side, independent of SoC faults.
+
+## Round 6 (2026-11-19): U-Boot init crash is mainline DM NULL deref (imprecise epc)
+
+- U-Boot proper init crash (EPC 0x4ff0c212, TVAL 0x3C, repeated twice) resolved
+  via `nm -n` + objdump: the faulting load is `lw s0,60(s0)` in mainline
+  `device_get_decendent_count` (drivers/core/device.c:813, called from
+  root.c:372 with gd->dm_root), i.e. a NULL-parent deref (load from 0x3C).
+  epc points at the following `j` (imprecise by one insn) - the same imprecise
+  load-fault reporting seen in the kernel oopses. Single-threaded init calling
+  this with NULL dm_root intermittently (most boots reach the prompt) means
+  the gd->dm_root read itself flipped, not a port init-order bug: marginal
+  reads now confirmed in all four phases (SPL copy, U-Boot DM, kernel, userspace).
+- IDF timing reference (rule 11): esp_psram_impl_ap_hex.c enables the DLL on
+  MSPI2+MSPI3 unconditionally (line 392-393, before mode regs), then runs
+  mspi_timing_psram_tuning() + variable dummy. 80M tier (#else): RD_DUMMY 18,
+  REG/WR_DUMMY 8, RD/WR_LATENCY 2, drive_str 0. BUT the live-reference snapshot
+  shows TIMING_CALI=0x1 (DLL OFF) - either the LL skips DLL for this point,
+  the tune disables it after converging, or the snapshot predates it. Do NOT
+  blindly enable DLL to match the code; the stable reference runs DLL-off, so
+  DLL-off + the right static point is sufficient and something else differs.
+  Next: read the reference RX regs (0x180-0x188) to get the true tuned point,
+  and audit the CPU/clock tree (our CPU freq/voltage vs IDF 360 MHz) - both
+  need a healthy serial bridge.
