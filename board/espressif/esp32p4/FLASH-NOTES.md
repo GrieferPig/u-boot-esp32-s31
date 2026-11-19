@@ -3877,3 +3877,40 @@ disassembler rather than by hand.
 Next: disassemble the image bytes properly (the matching vmlinux has truncated
 section headers, so wrap the raw Image in an ELF or find a toolchain objdump that
 accepts `-b binary -m riscv`) and identify what the 0xA0/0xA4 loop waits on.
+
+## Round 106: `_start_kernel` for P4, read from the kernel source
+
+The image bytes cannot be disassembled locally (the toolchain objdump rejects
+`-b binary -m riscv`, the synthetic ELF disassembles to nothing, and the matching
+vmlinux has section headers truncated far past EOF even after padding), so the
+entry was read from the source instead -
+`linux-esp32-s31/arch/riscv/kernel/head.S`, `SYM_CODE_START(_start_kernel)`:
+
+```
+#ifdef CONFIG_SOC_ESP32P4
+	csrci mstatus, 8                 /* matches the bytes at 0xA0: 0x30047073 */
+	/* Standard user counters: cycle/time/instret and implemented HPM8/9/13. */
+	li    t0, 0x2307
+	csrw  0x306, t0                  /* mcounteren */
+	csrci 0x320, 5                   /* mcountinhibit */
+	csrw  0x017, zero                /* CSR 0x017 */
+	csrr  t0, mhartid
+	bnez  t0, esp32p4_secondary_start
+#endif
+```
+
+The first instruction is exactly the `csrci mstatus, 8` (`0x30047073`) seen in
+PSRAM at 0xA0, which confirms this is the entry being executed. The instructions
+that follow are all **CSR accesses to the counter CSRs** (`mcounteren` 0x306,
+`mcountinhibit` 0x320) plus CSR 0x017 - so the 0xA0/0xA4 loop is this prologue,
+and the next thing to establish is what those CSR writes do on this part when
+reached from this handoff (the reference runs the same kernel, so the CSRs
+themselves exist; what differs is the state the loader leaves).
+
+Also confirmed from `head.S`: the image header is 0x40 bytes, `code0` is
+`j _start_kernel`, and with `CONFIG_RISCV_M_MODE` the load offset is 0 - so image
+offset 0xA0 is `_start_kernel` and `p4boot`'s jump to 0x48000000 is correct.
+
+Next: single-step over the individual CSR writes at 0xA4.. using the debugger
+(write one step per halt so the reported PC is meaningful) and find which of them
+stops the hart, comparing the CSR state the reference chain leaves behind.
