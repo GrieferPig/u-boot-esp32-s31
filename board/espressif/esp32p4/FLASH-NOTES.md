@@ -3736,3 +3736,33 @@ Two candidate reasons to check next:
 
 So the picture is now: SPL -> PSRAM window -> kernel entry -> stalls in
 `_start_kernel`. Everything up to the kernel's own entry works.
+
+## Round 102: the hart stops advancing between 0x480000A2 and 0x480000A6
+
+Single-stepped the kernel entry with the debugger. Hardware breakpoints were set
+at the instruction boundaries that follow the reported PC:
+
+```
+halt                      -> PC=0x480000A4
+bp 0x480000a6 4 hw        -> (duplicate, already set)
+bp 0x480000ac 4 hw        -> breakpoint set
+resume / halt             -> PC=0x480000A4    (again)
+mcause = 0, mtval = 0
+```
+
+So the hart executes the first three instructions of `_start_kernel`
+(`li t0, 8` at 0xa0, `csrc mstatus, t0` at 0xa2) and then never reaches
+`fence.i` at 0xa6 or `jal reset_regs` at 0xaa - the breakpoints there are never
+hit and the PC stays at the same value, with no trap taken (mcause/mtval both 0).
+The reported PC itself is not an instruction boundary, which fits a stalled
+instruction fetch being latched rather than a loop.
+
+That is the whole difference from the reference path at this point: the
+reference's U-Boot runs `cleanup_before_linux()` immediately before the jump
+(cache flush/invalidate, PMP, satp), and `p4boot` deliberately skips all of it.
+The chain below the kernel entry is proven working - SPL, PSRAM window, image
+verify, jump, three instructions of the kernel.
+
+Next: reproduce `cleanup_before_linux()` for this board (a) without the ROM
+cache helpers that hang, and (b) with the PMP/satp state the reference leaves, then
+re-run `p4boot`.
