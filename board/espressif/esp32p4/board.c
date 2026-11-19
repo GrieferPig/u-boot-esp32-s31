@@ -281,6 +281,30 @@ static int do_p4wb(struct cmd_tbl *cmdtp, int flag, int argc,
 
 U_BOOT_CMD(p4wb, 2, 0, do_p4wb, "write back caches (map arg)", "[map]");
 
+/*
+ * "p4wba <addr> <size>" - ROM Cache_WriteBack_Addr (0x4FC003F4) for one line or
+ * range, map 0x30 (L1 D + L2, the ROM's own SPI_FLASH_MMAP_INVALIDATE_CACHE_ADDR
+ * pair). A whole-cache pass returns but does not push a dirty PSRAM line, so this
+ * checks whether a targeted writeback reaches the part.
+ */
+static int do_p4wba(struct cmd_tbl *cmdtp, int flag, int argc,
+		    char *const argv[])
+{
+	ulong addr, size;
+
+	if (argc < 3)
+		return CMD_RET_USAGE;
+
+	addr = simple_strtoul(argv[1], NULL, 16);
+	size = simple_strtoul(argv[2], NULL, 16);
+
+	((void (*)(u32, u32, u32))0x4fc003f4u)(0x30u, (u32)addr, (u32)size);
+	printf("p4wba: writeback 0x30 @ %08lx size %lx\n", addr, size);
+	return CMD_RET_SUCCESS;
+}
+
+U_BOOT_CMD(p4wba, 3, 0, do_p4wba, "write back one range", "<addr> <size>");
+
 static int do_p4boot(struct cmd_tbl *cmdtp, int flag, int argc,
 		     char *const argv[])
 {

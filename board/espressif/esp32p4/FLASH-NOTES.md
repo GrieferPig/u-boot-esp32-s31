@@ -4951,3 +4951,40 @@ State: our chain flashed (2/2 hashes), `PROMPT OK`, preload verifying, MR4 self-
 Next: try `Cache_WriteBack_Addr` (0x4FC003F4) on the specific line before concluding the
 writeback engine is dead - a whole-cache pass may be skipping lines that a targeted
 writeback would push.
+
+## Round 130: a targeted writeback does not flush either; 16 lines is fatal with any dummy profile
+
+**`Cache_WriteBack_Addr` on the dirty line does not push it to the part.** Added `p4wba
+<addr> <size>` (ROM 0x4FC003F4, map 0x30 - the L1 D + L2 pair the ROM's own
+`SPI_FLASH_MMAP_INVALIDATE_CACHE_ADDR` uses) and ran the sequence:
+
+```
+mw.l 0x88e00000 0xffffffff 4        # part = FF
+mw.l 0x48e00000 0x11223344 1        # store through the cached window
+p4wba 0x48e00000 0x40               # targeted writeback of that line
+md.l 0x88e00000 2  -> ffffffff ffffffff
+p4wb 30                             # whole-cache writeback
+md.l 0x88e00000 2  -> ffffffff ffffffff
+```
+
+So neither form of writeback reaches the part. The store, the MMU mapping, the cache being
+enabled and both writeback entry points are all accounted for, and the data still never
+arrives.
+
+**The remaining difference is the data-line width, and 16 lines is fatal regardless of the
+dummy profile.** This port's working dummy values are IDF's 250 MHz set (RD 18 / WR 8), and
+every hex profile in `esp_psram_impl_ap_hex.c` is 16 lines wide - only the dummies vary per
+speed - so the coherent pairing is 16 lines with *those* dummies, not with the 200 MHz ones
+tried in rounds 122/125. Setting `SDIN_HEX | SDOUT_HEX` while keeping the 250 MHz dummies
+still kills the board outright:
+
+```
+ERROR: A fatal error occurred: Serial data stream stopped
+captured 0 chars
+```
+
+So 16-line mode is fatal with both dummy profiles tried (200 MHz and 250 MHz), while 8-line
+mode is stable but cannot write back through the cache. That is the precise contradiction
+the port is stuck on, and it is now stated as such rather than guessed at.
+
+State: reverted; our chain flashed (2/2 hashes), `PROMPT OK`, preload verifying.
