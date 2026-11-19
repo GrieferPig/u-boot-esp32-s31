@@ -451,6 +451,47 @@ static int do_p4sync(struct cmd_tbl *cmdtp, int flag, int argc,
 U_BOOT_CMD(p4sync, 3, 0, do_p4sync, "write back one range (retained stub)",
 	   "<addr> <size>");
 
+#define P4_CSR(csr) case csr: asm volatile("csrr %0, " #csr : "=r"(v)); break
+
+static int do_p4csr(struct cmd_tbl *cmdtp, int flag, int argc,
+		    char *const argv[])
+{
+	ulong csr;
+	unsigned long v = ~0ul;
+
+	if (argc < 2)
+		return CMD_RET_USAGE;
+
+	csr = simple_strtoul(argv[1], NULL, 0);
+
+	switch (csr) {
+	P4_CSR(0x300);
+	P4_CSR(0x301);
+	P4_CSR(0x3a0);
+	P4_CSR(0x3a2);
+	P4_CSR(0x3b0);
+	P4_CSR(0x3b1);
+	P4_CSR(0x3b2);
+	P4_CSR(0x3b3);
+	P4_CSR(0xbc0);
+	P4_CSR(0xbc1);
+	P4_CSR(0xbc2);
+	P4_CSR(0xbc3);
+	P4_CSR(0xbd0);
+	P4_CSR(0xbd1);
+	P4_CSR(0xbd2);
+	P4_CSR(0xbd3);
+	default:
+		printf("p4csr: unsupported csr 0x%lx\n", csr);
+		return CMD_RET_FAILURE;
+	}
+	printf("p4csr: 0x%lx = 0x%lx\n", csr, v);
+	return CMD_RET_SUCCESS;
+}
+
+U_BOOT_CMD(p4csr, 2, 0, do_p4csr, "read one CSR (PMA/PMP/mode)",
+	   "<csr number>");
+
 static int do_p4load(struct cmd_tbl *cmdtp, int flag, int argc,
 		     char *const argv[])
 {

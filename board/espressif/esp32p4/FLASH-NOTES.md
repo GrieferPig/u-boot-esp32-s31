@@ -5863,3 +5863,35 @@ cache-sync stub, and the kernel runs to userspace (/init starts).
 State: SPL (dtb -> 0x48600000, hart1 release, DIV 80 MHz) + proper (stub,
 fdt patch, WB, p4sync) flashed (hashes verified), `PROMPT OK`, mr8 0x0B,
 sctrl 0x02F7C679, kernel runs to /init start.
+
+## Round 151 (2026-11-19): PMP root-cause + RX sweep + p4csr; /init blocked by timer variance
+
+- RX sweep (self-healing, runs every boot): sweeps MSPI2 DIN0_MODE x EXTRA_DUMMY
+  (32 points) with a cache-path 1 KB write/WB/INV/alias-read trial, picks the middle
+  of the longest passing run. Result: all 32 pass at 0x48F00000 (run 0+0x20 wide),
+  (151g: keeps the replayed reference point din=0 dummy=0 unless IT fails - an
+  all-pass sweep has no power to improve on the proven state, so it must not move
+  it. Only a failing default triggers the full sweep + middle-of-best-run pick.)
+  Honest limit: passes everywhere, so it cannot see the kernel faults (weak test
+  vs volume/thermal effects); kept as infrastructure + reporter.
+- L1-I (150g) REVERTED (151f): enabling Cache_Enable_L1_CORE0_ICache made one `go`
+  pass (rc 0x125 -> 0x200) but did NOT fix the /init fault and destabilized U-Boot
+  proper across resets (env crash, init-dots hangs). Cache_Invalidate_All is
+  deprecated/broken on P4 (rom/cache.h: use Cache_Invalidate_Addr); calling it with
+  the full map (0x33) TRAPS the SPL (P4TRAP cause 1 epc 0x0b891530). Do not use.
+- PMP root cause (151b/c, THE /init fetch-fault answer): kernel is NOMMU M-mode
+  (CONFIG_RISCV_M_MODE=y, MMU=n), drops to U-mode for userspace; head.S SKIPS PMP
+  setup for P4, expecting firmware to leave a permissive entry (generic path sets
+  pmpaddr0=-1, pmpcfg0=NAPOT|R|W|X). p4csr showed pmpcfg0=0x0 out of ROM (no entries:
+  M allowed, S/U denied by default). Deterministic /init cause-1 fault at entry
+  (readable+correct page, M-mode `go` works, U-fetch denied) fits exactly. Fix: SPL
+  programs pmpaddr0=-1, pmpcfg0=0x1F (unlocked full RWX), verified via p4csr=0x1f.
+- p4csr (151a): `p4csr <num>` dumps PMA (0xBC0/0xBD0: entry0 = 0xCB00001D /
+  0x127FFFFF, matches SPL programming, 128 MB NAPOT R+W+X) and PMP CSRs.
+- Timer oops 0x4822c4ee x3 IDENTICAL (wild jump into gzip data, ra=boot_command_line,
+  memcpy-like args a0=0x4880c400 a1=0 a2=0xF00): deterministic-when-triggered, blocks
+  /init verification. Systimer INT_ENA=INT_RAW=0 (no stale IRQ). Next layer is
+  driver/handoff or pattern-dependent marginal reads, not firmware clocks.
+- Flash reads flaky, 4th confirmation: 0x4022C4E0 reads b2 40... vs sha256-verified
+  file 9d a3... (f3dd3833...09bc52 intact); SPL copy-time reads were correct.
+- Cacheability proven: window-write + INV-no-WB loses the pattern (writes are cached).

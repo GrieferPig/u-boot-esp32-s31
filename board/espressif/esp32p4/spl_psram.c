@@ -858,6 +858,29 @@ static int psram_mode_reg_init(void)
 #define P4_SRAM_CMD		(P4_MSPI2_BASE + 0x44)
 #define P4_CACHE_SCTRL		(P4_MSPI2_BASE + 0x40)
 #define P4_CACHE_FCTRL		(P4_MSPI2_BASE + 0x3c)
+/*
+ * MSPI2 receive timing (TRM ch.47 SPI - SPI_MEM_S_TIMING_CALI/DIN_MODE;
+ * field layout from IDF spi_mem_s_reg.h v5.4.1). IDF's mspi_timing_tuning
+ * adapts these per chip at every boot; the replayed reference image only
+ * carries one chip's tuned point, so this port sweeps them itself.
+ */
+#define P4_RX_TIMING_CALI	(P4_MSPI2_BASE + 0x180)
+#define P4_RX_DIN_MODE		(P4_MSPI2_BASE + 0x184)
+#define P4_RX_DIN0_MODE_MASK	(7u << 0)
+#define P4_RX_EXTRA_DUMMY_MASK	(7u << 2)
+#define P4_RX_DLL_BIT		BIT(5)
+/* Cache sync engine (real base 0x3FF10000 = IDF DR_REG_CACHE_BASE). */
+#define P4_SYNC_CTRL		0x3ff10098u
+#define P4_SYNC_MAP		0x3ff1009cu
+#define P4_SYNC_ADDR		0x3ff100a0u
+#define P4_SYNC_SIZE		0x3ff100a4u
+#define P4_SYNC_MAP_D_L2	0x30u
+#define P4_SYNC_WB		0x4u
+#define P4_SYNC_INV		0x1u
+#define P4_SYNC_DONE		0x10u
+/* Sweep scratch: inside the 16 MB MMU window, above kernel and DTB. */
+#define P4_RX_SCRATCH		0x48f00000u
+#define P4_RX_NWORDS		256u
 #define P4_CTRL1		(P4_MSPI2_BASE + 0x0c)
 #define P4_DDR_AXI		(P4_MSPI2_BASE + 0xd8)
 #define P4_MMU_CONTENT		(P4_MSPI2_BASE + 0x37c)
@@ -1450,6 +1473,27 @@ static int psram_timing_tune(void)
 /* TRM ch.9 "System and Memory": the MMU maps the PSRAM window. The item
  * registers are not in the manual (see the file header). */
 /*
+ * TRM ch.2 PMP. The M-mode NOMMU kernel (CONFIG_RISCV_M_MODE) drops to U-mode
+ * for userspace, but its head.S skips PMP setup for the P4, expecting the
+ * firmware (IDF) to leave a permissive entry behind. The generic head.S path
+ * writes pmpaddr0 = -1 (full 4 GB NAPOT) and pmpcfg0 = NAPOT|R|W|X for the
+ * same reason. With no PMP entry configured (pmpcfg0 reads 0x0 out of the
+ * ROM), S/U-mode accesses fault by default while M-mode succeeds - which is
+ * exactly the deterministic /init fetch fault: cause 1 (access fault) at the
+ * entry point with the page readable and correct (M-mode Code: dump works,
+ * M-mode `go` at the same address works, U-mode fetch faults). Mirror the
+ * generic entry, unlocked, so the kernel keeps full control.
+ */
+static void psram_pmp_open(void)
+{
+	u32 all = ~0u, rwxn = 0x1fu; /* NAPOT | R | W | X, unlocked */
+
+	asm volatile("csrw 0x3b0, %0" :: "r" (all));
+	asm volatile("csrw 0x3a0, %0" :: "r" (rwxn));
+	asm volatile("fence" ::: "memory");
+}
+
+/*
  * TRM ch.2 "High-Performance CPU", Register 2.118 pma_cfgX (CSR 0xBC0+n) and
  * pma_addrX (CSR 0xBD0+n): mark the external-RAM window non-cacheable so CPU
  * accesses take the direct path instead of entering the HP cache, whose clocks
@@ -1625,6 +1669,151 @@ void p4_spl_psram_preload(void)
 	}
 }
 
+static const u32 rx_pat[P4_RX_NWORDS] = {
+	0xaaaaaaaa, 0x55555555, 0x1234abcd, 0xdeadbeef,
+	0x6d2b79f5, 0x40aec71f, 0x0fce02cc, 0xffffffff,
+	0x00000000, 0xff00ff00, 0x00ff00ff, 0x5a5a5a5a,
+	0xa5a55a5a, 0x05435352, 0xedfe0dd0, 0x0000a045
+};
+
+/* One sync-engine op; 0 = done, -1 = timed out (never hangs the boot). */
+static int rx_sync_op(u32 addr, u32 size, u32 op)
+{
+	u32 spin = 0;
+
+	writel(P4_SYNC_MAP_D_L2, (void *)P4_SYNC_MAP);
+	writel(addr, (void *)P4_SYNC_ADDR);
+	writel(size, (void *)P4_SYNC_SIZE);
+	writel(op, (void *)P4_SYNC_CTRL);
+	while (!(readl((void *)P4_SYNC_CTRL) & P4_SYNC_DONE)) {
+		if (++spin > 100000)
+			return -1;
+	}
+	return 0;
+}
+
+/*
+ * Cache-path write + writeback + invalidate + alias readback of 1 KB.
+ * The pattern is 16 anchor words xored with a per-word stream so a
+ * stuck or shifted line cannot alias to a pass; 1 KB (16 lines) is wide
+ * enough that a marginal sample point fails it, unlike a single line.
+ */
+static int rx_trial(void)
+{
+	u32 i, v, want;
+
+	for (i = 0; i < P4_RX_NWORDS; i++) {
+		want = rx_pat[i & 15] ^ (i * 0x01000193u);
+		writel(want, (void *)(P4_RX_SCRATCH + i * 4));
+	}
+	if (rx_sync_op(P4_RX_SCRATCH, P4_RX_NWORDS * 4, P4_SYNC_WB))
+		return 0;
+	if (rx_sync_op(P4_RX_SCRATCH, P4_RX_NWORDS * 4, P4_SYNC_INV))
+		return 0;
+	for (i = 0; i < P4_RX_NWORDS; i++) {
+		want = rx_pat[i & 15] ^ (i * 0x01000193u);
+		v = readl((const void *)(P4_RX_SCRATCH + 0x40000000u + i * 4));
+		if (v != want)
+			return 0;
+	}
+	return 1;
+}
+
+static void rx_apply(u32 din, u32 dummy)
+{
+	u32 v;
+
+	v = readl((void *)P4_RX_DIN_MODE);
+	v &= ~P4_RX_DIN0_MODE_MASK;
+	v |= din & 7u;
+	writel(v, (void *)P4_RX_DIN_MODE);
+	v = readl((void *)P4_RX_TIMING_CALI);
+	v &= ~P4_RX_EXTRA_DUMMY_MASK;
+	v |= (dummy & 7u) << 2;
+	writel(v, (void *)P4_RX_TIMING_CALI);
+}
+
+/*
+ * Self-healing MSPI2 receive timing: sweep the RX sample point
+ * (DIN0_MODE) and extra dummy cycles, testing the exact path the kernel
+ * needs (cached-window write, engine writeback, invalidate, uncached
+ * read). Picks the middle of the longest passing run for margin, the way
+ * IDF's mspi_timing_tuning picks its window; falls back to a DLL-assisted
+ * pass, and never fails the boot - it reports and keeps the safest point
+ * found. Runs on every boot, so voltage/temperature drift is adapted to.
+ */
+static void psram_rx_tune(void)
+{
+	u32 din, dummy, best_din = 0, best_dummy = 0;
+	u32 run_start = 0, run_len = 0, best_start = 0, best_len = 0;
+	u32 dll, pass;
+
+	/*
+	 * The replayed reference point (din 0, dummy 0) is the proven state every
+	 * stable boot in this port ran in. Only deviate from it on evidence that
+	 * it fails; an all-pass sweep has no discriminating power, so picking its
+	 * middle would change timing for no reason.
+	 */
+	rx_apply(0, 0);
+	if (rx_trial() && rx_trial()) {
+		p4_spl_early_puts("rx tune: defaults hold\n");
+		return;
+	}
+
+	for (dll = 0; dll < 2; dll++) {
+		if (dll) {
+			setbits_le32((void *)P4_RX_TIMING_CALI,
+				     P4_RX_DLL_BIT);
+			udelay(10);
+		}
+		run_len = 0;
+		for (din = 0; din < 8; din++) {
+			for (dummy = 0; dummy < 4; dummy++) {
+				rx_apply(din, dummy);
+				pass = rx_trial() && rx_trial();
+				if (pass) {
+					if (!run_len)
+						run_start = din * 4 + dummy;
+					run_len++;
+					if (run_len > best_len) {
+						best_len = run_len;
+						best_start = run_start;
+						best_din = din;
+						best_dummy = dummy;
+					}
+				} else {
+					run_len = 0;
+				}
+			}
+		}
+		if (best_len)
+			break;
+		clrbits_le32((void *)P4_RX_TIMING_CALI, P4_RX_DLL_BIT);
+	}
+	if (best_len) {
+		u32 mid = best_start + best_len / 2;
+
+		/* Middle of the best run: maximum margin on both sides. */
+		best_din = (mid / 4) & 7u;
+		best_dummy = mid % 4;
+		rx_apply(best_din, best_dummy);
+		p4_spl_early_puts("rx tune: din ");
+		p4_spl_early_hex(best_din);
+		p4_spl_early_puts(" dummy ");
+		p4_spl_early_hex(best_dummy);
+		p4_spl_early_puts(" run ");
+		p4_spl_early_hex(best_start);
+		p4_spl_early_puts("+");
+		p4_spl_early_hex(best_len);
+		p4_spl_early_puts(best_len >= 8 ? " wide\n" : " narrow\n");
+		if (!rx_trial())
+			p4_spl_early_puts("rx tune: verify failed\n");
+	} else {
+		rx_apply(0, 0);
+		p4_spl_early_puts("rx tune: no passing point, defaults\n");
+	}
+}
+
 int p4_spl_psram_init(void)
 {
 	/*
@@ -1709,6 +1898,7 @@ int p4_spl_psram_init(void)
 	 * the MSPI2 window and both reads and writes are correct - that is the
 	 * state every working verification in this port has been run in.
 	 */
+	psram_pmp_open();
 	psram_pma_non_cacheable();
 	psram_mmu_map(0x01000000);
 
@@ -1721,12 +1911,19 @@ int p4_spl_psram_init(void)
 	 * with no explicit enable a store to 0x4800_0000 shows up in the window and
 	 * never lands in the part, while the same store through the uncached alias
 	 * does land. Argument 0 = autoload disabled, which is IDF's default build.
+	 * (L1-I is deliberately left off: enabling it via Cache_Enable_L1_CORE0_ICache
+	 * destabilized U-Boot proper across resets, and Cache_Invalidate_All is
+	 * deprecated/broken on the P4 (rom/cache.h: use Cache_Invalidate_Addr),
+	 * so there is no safe way to give U-Boot a clean I-cache here. The kernel
+	 * reaches userspace fine without SPL-enabled L1-I.)
 	 */
 	((void (*)(u32))0x4fc004f4u)(0);	/* Cache_Enable_L1_DCache */
 	((void (*)(u32))0x4fc00504u)(0);	/* Cache_Enable_L2_Cache */
 	p4_spl_early_puts("psram: caches enabled\n");
 
 	setbits_le32((void *)P4_CACHE_FCTRL, BIT(0));
+
+	psram_rx_tune();
 
 	psram_cache_check();
 
