@@ -5272,3 +5272,37 @@ keeping this port's callers unchanged, then re-run the three checks (prompt, pre
 16-line bits on, which is the configuration that has been impossible to reach.
 
 State: our chain unchanged and verified (2/2 hashes, `PROMPT OK`, preload matching).
+
+## Round 137: the ROM transaction path is not a drop-in replacement here
+
+Replaced the body of `psram_xact()` with exactly IDF's three ROM calls
+(`esp_rom_spi_set_op_mode` 0x4FC00110, `esp_rom_spi_cmd_config` 0x4FC00108,
+`esp_rom_spi_cmd_start` 0x4FC0010C, `esp_rom_spi_cmd_t` struct as documented in round 136,
+CS mask `1 << 1`), keeping every caller unchanged. Signatures were checked against
+`esp32p4/rom/opi_flash.h` including `uint8_t cs_en_mask`.
+
+It builds (208 bytes smaller than the hand-rolled version) and the board still reaches the
+prompt, but **every mode-register read comes back zero**:
+
+```
+mode: verify failed mr0 0x00000000 mr8 0x00000000
+```
+
+and the preload still verifies through the alias, i.e. the cache path is unaffected while the
+user path reads nothing. Switching the mode argument from `ESP_ROM_SPIFLASH_OPI_DTR_MODE` (7)
+to the 16-line variant `ESP_ROM_SPIFLASH_OPI_HEX_DTR_MODE` (12) made it worse - the board no
+longer reaches the prompt at all.
+
+So the ROM helpers depend on state that IDF's own driver establishes around them (its SPI
+driver bookkeeping and the op-mode transition it has already made once), and calling them
+from inside this port's replay-based init is not equivalent. Reverted to the hand-rolled
+transaction, which does read correctly (mr0 = 0x00008d30, preload `cmp` matching,
+`PROMPT OK`).
+
+That closes the "port the ROM transaction" idea as stated. What remains of the structural
+difference is the *order* IDF brings the controller up in, which would mean rewriting
+`p4_spl_psram_init()` to follow `esp_psram_impl_enable()` step for step instead of replaying
+a captured register image - the one thing this port has never done, and now the only
+structural difference left.
+
+State: reverted; our chain flashed (2/2 hashes), `PROMPT OK`, preload matching.
