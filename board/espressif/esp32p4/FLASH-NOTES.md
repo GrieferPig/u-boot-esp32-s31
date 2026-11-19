@@ -4618,3 +4618,37 @@ with `SDIN_HEX | SDOUT_HEX` set before the first transaction rather than after t
 last.
 
 State: reference chain flashed (6/6 hashes) and verified booting, Linux OK.
+
+## Round 122: the garbled mode registers are produced by 16-line mode, not inherited
+
+Round 121 concluded that the 16-line switch has to be whole-path rather than a late
+one-liner. Tried exactly that:
+
+1. stop clearing `SDIN_HEX | SDOUT_HEX` in `psram_axi_config()` so the bits are set
+   before the first transaction and stay set;
+2. move the register-read dummy to IDF's 200 MHz value,
+   `AP_HEX_PSRAM_RD_REG_DUMMY_BITLEN = 2*(7-1)` (this port had `2*(5-1)`, the
+   low-speed set's 5 cycles - a genuine mix-up, and the reason the mode registers
+   were suspect).
+
+Result on a **freshly recovered chip** (reference images flashed and verified booting
+Linux immediately before, then this build flashed):
+
+```
+mode: mr0 0x00008d30 mr4 0x000080df mr8 0x0000054b
+ mismatch 0x00000000 want 0x40aec71f got 0x4ff43174
+```
+
+MR4 comes back as `0x80df` instead of `0x014b`. That corrects an assumption made in
+rounds 116/117/118: this particular corruption is **not** an inherited chip state,
+because the reference chain had just re-initialised the part. 16-line mode itself
+makes our register reads return garbage.
+
+That is consistent with the round 121 bus hang: the register path and the array path
+are separate transfers in `psram_transaction()` / `psram_xact()`, and the register
+one carries its own bit lengths and dummy. Flipping the data width to 16 lines
+changes how many bytes a clock moves for *both*, so the register phase needs its own
+16-line bit lengths, not just a new dummy value.
+
+State: reverted; the reference chain is flashed (6/6 hashes) and verified booting
+Linux, and the port tree is back at the last verified commit.
