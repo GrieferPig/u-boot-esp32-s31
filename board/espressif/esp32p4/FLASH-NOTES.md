@@ -4562,3 +4562,59 @@ back, before drawing conclusions from a boot log.
 
 State: port tree at the last verified commit, rebuilt, flashed (hash verified,
 read-back confirmed) and at the `esp32p4>` prompt.
+
+## Round 121: 16-line mode hangs the first window read, and every shared block matches
+
+Instrumented the tail of the PSRAM init with progress prints and enabled the HEX
+bits after `psram_final_latency()`. The last print reached is the one before
+`psram_cache_check()`:
+
+```
+psram: hex data lines 0x8cfc0000
+dbg: clocks on
+dbg: pma
+dbg: mmu
+dbg: axi open
+dbg: axi open done
+dbg: cache check        <- dies here
+```
+
+So everything up to and including opening the AXI port succeeds; the **first cached
+window read** in 16-line mode is what dies - and it does not trap, it hangs:
+
+```
+[esp32p4.hp.cpu0] Unable to halt. dmcontrol=0x00000001, dmstatus=0x00400ca2
+[esp32p4.hp.cpu0] Fatal: Hart 0 failed to halt during examine
+```
+
+A hart that the debug module cannot halt is a hart stuck on a bus access that never
+completes. 16-line mode turns the first window read into a bus hang, not a fault.
+
+**Every block that could explain it matches the reference.** Dumped the cache
+controller block alongside the reference, which is the one block never compared
+before:
+
+| address | this port | reference |
+| --- | --- | --- |
+| 0x500E5000 (VER) | 0x20230519 | 0x20230519 |
+| 0x500E5020 (cache clocks) | 0x00000033 | 0x00000033 |
+| 0x500E5004..0x500E501C, 0x500E5024, 0x500E5040.. | 0 | 0 |
+
+Together with round 120 (all of `s_config_mspi_for_psram` matched: splice bits,
+DDR mode/variable dummy/swaps, write-dummy level control, all 20 pin-mux registers)
+this leaves **no register difference anywhere** except `SDIN_HEX | SDOUT_HEX`
+themselves. That points at *when* the mode is established rather than at its
+configuration: IDF enables 16-line mode once during init, before any PSRAM traffic
+exists, while this port runs the entire init - the mode-register reads and writes,
+the latency programming, the divider changes - in 8-line mode and then flips the
+data width last, with the controller already active. A bus hang on the very next
+transfer is what an established transaction engine would do if the width changed
+underneath it.
+
+The corollary is that the 16-line switch cannot be a late one-liner: the command
+path (`psram_xact`, which drives 32-bit words over 8 lines) is itself written for
+8-line transfers and would have to move to 16-line transfers in the same change,
+with `SDIN_HEX | SDOUT_HEX` set before the first transaction rather than after the
+last.
+
+State: reference chain flashed (6/6 hashes) and verified booting, Linux OK.
