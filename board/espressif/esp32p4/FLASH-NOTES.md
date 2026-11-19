@@ -5648,3 +5648,38 @@ chapter requires for a write-back to be issued.
 
 State: 8-line, our chain flashed (2/2 hashes), `PROMPT OK`, `CACHE_SCTRL` = 0x02F7C679
 (identical to the reference), preload byte-exact.
+
+## Round 146: the dcache never writes back - not on demand, not on eviction
+
+TRM ch.9 System and Memory, section 9.3.3.2/9.3.3.3 (Cache, Cache Operations) is explicit:
+
+* the 64 KB L1 dcache is two-way, 64 B blocks, "supporting two writing strategies:
+  write-through and write-back";
+* write-back "clears dirty bits in the tag memory and updates new data to external memory";
+* clean "clears dirty bits in the tag memory without updating data to external memory";
+* L2 is 128/256/512 KB, eight-way, and also supports write-back.
+
+Measured against that, and against the earlier round 145 result:
+
+```
+mw.l 0x88e00000 0xffffffff 4        # device words = 0xffffffff through the alias
+mw.l 0x48e00000 0x11223344 1        # store through the cached window
+mw.l 0x48200000 0x12345678 0x4000   # 64 KB of WINDOW stores - forced eviction
+md.l 0x88e00000 2  ->  ffffffff ffffffff     # device still has the old contents
+```
+
+**The dirty line is discarded on eviction and never reaches the device**, not by
+`Cache_WriteBack_All` (0x4FC00414, round 145) and not by eviction pressure.
+
+Worth recording for the next person: pressuring the cache through the **alias** cannot test
+eviction at all - the alias is the uncached window, so those stores never allocate a line.
+The first version of this test did exactly that and "proved" the wrong thing; the run above
+uses the window.
+
+So the port's cache is in write-back strategy (stores do not go straight to memory) but the
+write-back itself never happens. TRM 9.3.3.3 says write-back is a *cache operation* the
+software has to issue, and the ROM's whole-cache call does not produce it here - which points
+at the cache controller's own configuration/状态 rather than at MSPI2 or at the device.
+
+State: 8-line, our chain flashed (2/2 hashes), `PROMPT OK`, `CACHE_SCTRL` = 0x02F7C679
+(identical to the reference), preload byte-exact.
