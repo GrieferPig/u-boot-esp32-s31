@@ -4280,3 +4280,49 @@ only debug entry point, and it carries the `/memory` fixup used by the alias tes
 Next: fix the window write path. The cache + MMU + MSPI2 must be able to write back
 a line to PSRAM; nothing in this port has ever made that happen, so the write-side
 configuration of the PSRAM window is where the bug is.
+
+## Round 115: the cache-path dummy cycles were a mix of two IDF configurations
+
+Dumped the MSPI2 block on both chains and compared register by register. Two
+registers differ, everything else is identical:
+
+| register | this port | reference |
+| --- | --- | --- |
+| `SPI_MEM_S_CACHE_SCTRL` (0x5008E040) | 0x01F7C479 | 0x02F7C679 |
+| `SPI_MEM_S_SRAM_CMD` (0x5008E044) | 0x80FC0000 | 0x8CFC0000 |
+| all of 0x5008E000..0x5008E03C, 0x048.. | identical | identical |
+
+Decoding `CACHE_SCTRL` with `soc/esp32p4/register/hw_ver3/soc/spi_mem_s_reg.h`:
+
+* `SRAM_RDUMMY_CYCLELEN` (bits 11:6): 17 here, 25 on the reference
+* `SRAM_WDUMMY_CYCLELEN` (bits 27:22): **7 here, 11 on the reference**
+
+IDF keeps one coherent dummy set per PSRAM speed
+(`esp_psram_impl_ap_hex.c`): 250 MHz = RD 18/WR 9, 200 MHz = RD 14/WR 7,
+otherwise RD 10/WR 5 - and the reference's fields are exactly the **200 MHz**
+set. This port had the 250 MHz read dummy (18) next to the low-speed write dummy
+(5) while programming the mode registers for the 200 MHz latency (4). That mix is
+the concrete "address/data phase" defect: a wrong write dummy shifts where the
+data phase falls.
+
+Changed both to the reference's set (`P4_PSRAM_CACHE_RD_DUMMY = 2*(14-1)`,
+`P4_PSRAM_WR_DUMMY = 2*(7-1)`), and window writes changed behaviour for the first
+time in this whole effort:
+
+```
+WR dummy 5 cycles (old): mw.l 0x48e00000 cafef00d -> alias reads 0x55555555   (nothing)
+WR dummy 7 cycles:       mw.l 0x48e00000 cafef00d -> alias reads 0x5555555d   (partial!)
+WR dummy 9 cycles:       mw.l 0x48e00000 cafef00d -> alias reads 0x55555555   (nothing)
+```
+
+So the write now **reaches the part at the right address** (the low byte changed to
+0x5d) - the address phase is right - but the data phase is still off. The write
+dummy is the knob: 7 is closest, 5 and 9 give nothing.
+
+The 7-cycle version is kept (it matches the reference), rebuilt, flashed and the
+prompt verified.
+
+Next: get the data phase exact. The remaining suspects are the write latency in
+MR4 (`PSRAM_WR_LATENCY` is 2 here, IDF's 200 MHz set uses 1) and whether the cache
+path needs the same `SRAM_CMD` bits as the reference (0x8CFC0000 vs our
+0x80FC0000 - bit 27 differs).

@@ -839,8 +839,24 @@ static int psram_mode_reg_init(void)
 
 #define P4_PSRAM_RD_DUMMY	(2 * (14 - 1))
 /* The cache path needs the same 46-cycle read latency the tuning found. */
-#define P4_PSRAM_CACHE_RD_DUMMY	18
-#define P4_PSRAM_WR_DUMMY	(2 * (5 - 1))
+/*
+ * The cache path must use the same dummy timing as the command path above.
+ * IDF picks one coherent set per PSRAM speed (esp_psram_impl_ap_hex.c):
+ *
+ *   250 MHz: RD 18 / WR 9   (latency 6/3)
+ *   200 MHz: RD 14 / WR 7   (latency 4/1)
+ *   else:    RD 10 / WR 5   (latency 2/2)
+ *
+ * This port had the read dummy of the 250 MHz set (18) next to the write dummy
+ * of the low-speed set (5), while the mode registers are programmed for the
+ * 200 MHz latency (4). Dumping SPI_MEM_S_CACHE_SCTRL next to the reference chain
+ * shows the mismatch directly: SRAM_RDUMMY_CYCLELEN 17 vs 25 and
+ * SRAM_WDUMMY_CYCLELEN 7 vs 11, i.e. the reference is running the 14/7 set.
+ * A wrong write dummy puts the data phase in the wrong place, which is why
+ * writes through the cached window never landed.
+ */
+#define P4_PSRAM_CACHE_RD_DUMMY	(2 * (14 - 1))
+#define P4_PSRAM_WR_DUMMY	(2 * (7 - 1))
 
 /*
  * The command path is tuned with the slow profile (MR0 read latency 2), which
