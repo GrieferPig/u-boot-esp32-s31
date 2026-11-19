@@ -243,8 +243,11 @@ static int do_p4load(struct cmd_tbl *cmdtp, int flag, int argc,
 		u32 n = dsize - off > P4_LOAD_CHUNK ? P4_LOAD_CHUNK
 						    : dsize - off;
 
+		printf("p4load: dtb off %x src %08x\n", off,
+		       readl((const void *)(P4_DTB_SRC + off)));
 		memcpy((void *)(P4_DTB_DST + P4_NC_OFFSET + off),
 		       (const void *)(P4_DTB_SRC + off), n);
+		printf("p4load: dtb off %x copied\n", off);
 	}
 	printf("p4load: dtb done\n");
 
@@ -252,10 +255,10 @@ static int do_p4load(struct cmd_tbl *cmdtp, int flag, int argc,
 		u32 n = ksize - off > P4_LOAD_CHUNK ? P4_LOAD_CHUNK
 						    : ksize - off;
 
+		printf("p4load: k off %x\n", off);
 		memcpy((void *)(P4_KERN_DST + P4_NC_OFFSET + off),
 		       (const void *)(P4_KERN_SRC + off), n);
-		if (!(off & 0xffff))
-			printf("p4load: %x\n", off);
+		printf("p4load: k off %x done\n", off);
 	}
 
 	printf("p4load: kernel %x bytes -> 0x%08x (%08x), dtb %x -> 0x%08x (%08x)\n",

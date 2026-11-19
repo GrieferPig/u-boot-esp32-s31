@@ -3141,3 +3141,48 @@ left is p4load: it prints `p4load: start k=354c60 d=113d` and then hangs in the
 DTB copy loop. The destination is fine (0x48F00000 verified above), so the
 suspect is the source side - the flash address it reads from - or the long
 memcpy runs in that loop; that is the next thing to isolate.
+
+## Round 87: the window is good for every access pattern; p4load dies on the flash read
+
+Verified the memory window at every access width and alignment the SPL and
+U-Boot can generate:
+
+```
+w32 bad 0x00000000        (4 KB of 32-bit words)
+w16 0x0000beef  w8 0x0000005a
+w64 0x55667788 0x11223344 (both halves correct)
+memcpy-aligned bad 0x00000000
+unaligned 0x11223344
+memcpy-unaligned bad 0x00000000
+```
+
+So 8/16/32/64-bit, aligned and unaligned, plus memcpy and memcmp, all work
+through 0x4800_0000. The window configuration is not the problem.
+
+p4load was then instrumented per chunk. On a fresh boot:
+
+```
+p4load: start k=354c60 d=113d
+p4load: dtb off 0 src edfe0dd0     <- reading flash at 0x900000 works
+                                   <- hangs in the memcpy to 0x48F00000
+```
+
+At the prompt the same split shows up:
+
+```
+esp32p4> mw.l 0x48000000 0xcafe1234 4
+esp32p4> md.l 0x48000000 4
+48000000: cafe1234 cafe1234 cafe1234 cafe1234      <- window fine in U-Boot
+esp32p4> md.l 0x900000 1
+                                                   <- hangs on the flash read
+```
+
+So the PSRAM side is healthy inside U-Boot too, and the failure is reading the
+**flash XIP window** (0x900000 here) in bulk: a single header word reads fine,
+a 4 KB memcpy from it does not. That is the last blocker for `p4load`, and the
+next step is to check how the flash window is mapped for U-Boot (the SPL maps
+flash at 0x01000000, while p4load reads raw flash offsets) and whether wide or
+unaligned reads from the XIP window are what kills it.
+
+Instrumentation reverted; SPL boot check is back to the 4 KB window pattern
+(`window: bad 0x00000000 of 1024`).

@@ -4,6 +4,6 @@
 
 #define P4_UBOOT_OFFSET	0x00100000u
 #define P4_UBOOT_LOAD_ADDR	0x4ff00000u
-#define P4_UBOOT_SIZE		0x00027820u
+#define P4_UBOOT_SIZE		0x000278b0u
 
 #endif
