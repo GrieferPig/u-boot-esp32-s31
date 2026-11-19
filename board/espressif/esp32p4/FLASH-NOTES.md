@@ -5720,3 +5720,38 @@ does not deliver it, while the same controller delivers alias writes and cached 
 
 State: our chain flashed (2/2 hashes), `PROMPT OK`, `CACHE_SCTRL` = 0x02F7C679 identical to the
 reference, preload byte-exact.
+
+## Round 148: the cache block's registers are not writable from U-Boot, and one is stuck at 2
+
+Went after the L2 side. `cache_reg.h` (hw_ver3) places the L2 control registers at
+`CACHE_BASE + 0x270` (`CACHE_L2_CACHE_CTRL`), `+0x274` (`L2_BYPASS_CACHE_CONF`),
+`+0x278` (`L2_CACHESIZE_CONF`) and the sync engine at `+0x98..0xA4`. Reading
+0x500E5270..0x500E528C on this chain returns **all zero**, so the L2 controls carry no
+configuration to compare against.
+
+Two hardware facts came out of trying to use them:
+
+1. **The cache block does not accept writes from the U-Boot prompt.** Writing
+   `0x500E509C = 0x20`, then `= 0x03`, then `= 0x00` all leave it reading `0x00000002`;
+   `0x500E53FC` (per the header `CACHE_DATE_REG`) reads 0 and ignores `0xDEADBEEF`. So the
+   cache configuration in force at the prompt is whatever the ROM left, not something this
+   stage can retune.
+2. **`0x500E509C` = 2 here, 0 on the reference.** Which field that is depends on the block
+   base, and the base is not self-consistent in the header: `CACHE_DATE_REG` is documented at
+   `BASE + 0x3FC`, but 0x500E53FC reads 0 while 0x500E5000 reads 0x20230519 - a build-date
+   value, i.e. the *first* word of the block. So either the real base is 0x500E5000 and this
+   part's layout differs from hw_ver3's by one word, or the header's base is 0x500E5004. Under
+   the unshifted reading 0x9C is `CACHE_SYNC_MAP` with bits [0..3] = L1-ICache0..3,
+   [4] = L1-DCache, [5] = L2-Cache, so 2 = "L1-ICache2"; under the shifted reading 0x9C is
+   `CACHE_SYNC_CTRL` and 2 = `CACHE_CLEAN_ENA` stuck set, which would mean the sync engine never
+   completes another operation and therefore never issues a write-back - i.e. exactly the
+   observed symptom.
+
+That ambiguity is the next thing to settle, and it is cheap to settle: read the TRM's cache
+register map (ch.9) for the block's documented base and offset of the sync controls, and check
+whether 0x500E5000 is documented as a date/info word. Whichever way it resolves decides whether
+the fault is "sync engine stuck" (software-fixable in the SPL, before the block is locked) or
+"map residue" (harmless).
+
+State: our chain flashed (2/2 hashes), `PROMPT OK`, `CACHE_SCTRL` = 0x02F7C679 identical to the
+reference, preload byte-exact.
