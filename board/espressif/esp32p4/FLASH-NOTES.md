@@ -4326,3 +4326,46 @@ Next: get the data phase exact. The remaining suspects are the write latency in
 MR4 (`PSRAM_WR_LATENCY` is 2 here, IDF's 200 MHz set uses 1) and whether the cache
 path needs the same `SRAM_CMD` bits as the reference (0x8CFC0000 vs our
 0x80FC0000 - bit 27 differs).
+
+## Round 116: the 16-line bits are the missing data phase, and this init is not self-healing
+
+**The remaining data-phase difference is the 16-line (HEX) bits.** Decoding
+`SPI_MEM_S_SRAM_CMD` with `hw_ver3/soc/spi_mem_s_reg.h` gives bit 26 =
+`SDIN_HEX`, bit 27 = `SDOUT_HEX`. The reference chain has both set
+(`0x8CFC0000`), this port clears them (`0x80FC0000`) - which is exactly the
+8-line data phase the code comment already warns about ("a 32-bit AXI store
+leaves two bytes at offset 0 and two at offset 4"), and exactly the
+`0x5555555d`-instead-of-`0xcafef00d` partial write seen at the prompt.
+
+Setting them is **not** possible yet: with the HEX bits on, the low-clock tuning
+step reads back garbled mode registers and the boot stops:
+
+```
+tune: low-clock reference failed
+lat: mr0 0x00007755 mr4 0x00008d30        (mr0 is clearly shifted/garbled)
+```
+
+So the tuning step itself has to run in 16-line mode before the bits can stay on.
+Tried also separating the command-path and cache-path write dummies (5 vs 7) in
+case they were fighting; that build did not boot either, so it was reverted.
+
+**The init is not self-healing - proved by accident and by recovery.** After the
+experiments above left the PSRAM's MR4 at `0x80df` (it is `0x014b` when healthy),
+this port's SPL failed its own word test and never reached the prompt:
+
+```
+mode: mr0 0x00008d30 mr4 0x000080df mr8 0x0000054b
+wordtest wrote 0x00000001 read80 0x00000000 read84 0x00000000
+tune: low-clock reference failed
+```
+
+Flashing the **reference chain** afterwards brought the same board back with no
+extra steps (`Starting kernel ...`, Linux boots again), i.e. IDF's bootloader
+recovers a chip left in a bad state while this port cannot. The reason is visible
+in `psram_mode_register_init()`: it reads MR0/MR4/MR8 and only merges the latency
+fields into whatever the chip currently holds, so a stale/garbled prior state is
+preserved instead of being replaced. That is the concrete work item behind
+"make SPL PSRAM init self-healing".
+
+State at the end of the round: the reference chain is flashed and verified
+booting, and the port's own tree is back at the last verified commit.
