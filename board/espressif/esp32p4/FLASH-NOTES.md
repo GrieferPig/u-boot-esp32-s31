@@ -5081,3 +5081,50 @@ State: write-through change reverted (unproven, and it changes nothing); our cha
 Next: call `Cache_PSRAM_MMU_Init()` before programming the `SPI_MEM_S_MMU_ITEM_*` entries
 (it may reset them, so order matters) and re-run the store test - that is the only piece of
 the cache-side PSRAM setup this port has never touched.
+
+## Round 133: full MSPI2 diff - exactly two registers differ, and they are mutually locked
+
+Stopped guessing and dumped the whole MSPI2 register block (0x5008E000..0x5008E0FC, 64
+registers) on both chains, at the U-Boot prompt here and with the reference halted in Linux.
+**Only two registers differ:**
+
+| offset | register | this port | reference |
+| --- | --- | --- | --- |
+| 0x040 | `SPI_MEM_S_CACHE_SCTRL` | 0x01F7C479 | 0x02F7C679 |
+| 0x044 | `SPI_MEM_S_SRAM_CMD` | 0x80FC0000 | 0x8CFC0000 |
+
+Everything else is bit-identical, including `CTRL1` (0x2EE00000, both splice enables),
+`SMEM_DDR` (0x3020) and the second DDR register (0x3023), the CS-timing pair (0x1A0/0x170),
+`USER`-side `0x010`/`0x014`, and the whole 0x060..0x0C0 span.
+
+Those two registers are the two knobs already known:
+* `CACHE_SCTRL` holds the cache-path dummy cycles (`SRAM_RDUMMY_CYCLELEN` 17 vs 25,
+  `SRAM_WDUMMY_CYCLELEN` 7 vs 11);
+* `SRAM_CMD` holds `SDIN_HEX|SDOUT_HEX` (bits 26/27), i.e. 8-line vs 16-line data phase.
+
+**Called `Cache_PSRAM_MMU_Init` (ROM 0x4FC00514) before programming the
+`SPI_MEM_S_MMU_ITEM_*` entries.** Harmless - prompt up, preload verified
+(`cmp 0x00000038 src 0x05435352 dst 0x05435352`) - and the store test is unchanged
+(`mw.l 0x88e00000 0xffffffff 4; mw.l 0x48e00000 0x11223344 1` -> the part still reads
+0xFFFFFFFF).
+
+**Tried the full reference pair at once**, which had never been done with the current fixes
+(explicit MR4, caches enabled): `CACHE_SCTRL` = the reference's dummy values *and*
+`SRAM_CMD` = 0x8CFC0000. The board still dies at the first cached access:
+
+```
+lat: mr0 0x00008d7e mr4 0x0000a0df
+psram: caches enabled
+(no prompt)
+```
+
+So the two remaining register differences are mutually locked here:
+* matching the reference on both kills the board before it reaches the prompt;
+* round 47 showed that matching only `CACHE_SCTRL` silently kills the write path;
+* and keeping our values keeps the port alive with a working alias write path and a dead
+  cache write path.
+
+That is the impasse stated in register terms, with nothing left unexplained at the register
+level in MSPI2, the MMU, the pin mux, the cache block or the PMA.
+
+State: reverted; our chain flashed (2/2 hashes), `PROMPT OK`, preload verifying.
