@@ -3766,3 +3766,37 @@ verify, jump, three instructions of the kernel.
 Next: reproduce `cleanup_before_linux()` for this board (a) without the ROM
 cache helpers that hang, and (b) with the PMP/satp state the reference leaves, then
 re-run `p4boot`.
+
+## Round 103: the disassembly was against the wrong vmlinux - and the real entry stalls at 0xA4
+
+Compared the bytes actually loaded in PSRAM with the image file on the host:
+
+```
+0x880000a0: 30047073 82936289 90733072 f0733062     <- what the part holds
+file 0xa0:  7370 0430 8962 9382 ...                 <- same, so the copy is fine
+```
+
+But `/home/grieferpig/p4linux/build/esp32p4/linux/vmlinux` (dated Aug 25) has
+`42a1 3002b073` (`li t0,8` / `csrc mstatus,t0`) at its `_start_kernel`, while the
+Image flashed here (dated Nov 18) holds `30047073` (`csrw mstatus, a0`) at image
+offset 0xA0. **They are different builds**, so the round-101 disassembly mapped
+the PC to the wrong instructions - the `_start_kernel` prologue I quoted is not
+this image's.
+
+What the machine state actually says about the stall:
+
+```
+pc      = 0x480000A4          (right after csrw mstatus, a0 at 0xA0)
+mstatus = 0x80006008          (MIE still set -> no instruction has cleared it)
+mtvec   = 0x4ff00243          (still U-Boot's handler, the kernel never set its own)
+pmpcfg0 = 0x00000000          (no PMP entries -> PMP is not the cause)
+mcause  = 0, mtval = 0        (no trap)
+```
+
+and the copy itself is byte-correct against the file, so this is not corrupt data.
+
+Next: get the vmlinux that matches the Nov 18 image (or extract symbols for it)
+so the instructions around 0xA4 can be read correctly, and check whether the
+stall follows `csrw mstatus, a0` writing mstatus from a0 = 0 - i.e. whether the
+kernel expects a different value in a0 at entry than the plain hartid this port
+passes.
