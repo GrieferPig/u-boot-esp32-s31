@@ -3460,3 +3460,33 @@ the preload (PMA or the L2's region attributes) and verify with a window read
 that matches the alias. The window self-check already proves the uncached path
 is correct, so making the window uncached for U-Boot too should let `booti` see
 the RISCV magic and start the kernel.
+
+## Round 95: booti accepts the kernel through the alias - the blocker is now FDT setup
+
+Took the cached window out of the picture entirely by booting through the direct
+alias, which is the path verified byte-exact in round 93:
+
+```
+esp32p4> md.l 0x88000038 1     -> 05435352
+esp32p4> booti 0x88000000 - 0x88f00000
+## Flattened Device Tree blob at 88f00000
+   Booting using the fdt blob at 0x88f00000
+FDT creation failed! hanging...
+```
+
+The `Bad Linux RISCV Image magic!` check now **passes** - U-Boot accepts the
+image and moves on to FDT setup, so the kernel really is loadable from PSRAM.
+
+Also ruled out the DTB position: it was at 0x48F0_0000 (15 MiB, no room to
+expand), so it was moved to 0x8860_0000 (6 MiB) - still `FDT creation failed!`,
+and an explicit `fdt resize 0x8000` before boot does not help either.
+
+The failure is `image_setup_linux()` in `boot_prep_linux()`
+(`arch/riscv/lib/bootm.c`), i.e. the LMB reservation / FDT fixup step, not the
+image header check or the DTB validity (the blob is recognised and its address is
+accepted). Tried disabling the caches before the jump so U-Boot would read the
+window uncached - that hangs the SPL itself, so it is not a viable route.
+
+State: preload through the alias, DTB at 6 MiB, `booti 0x88000000 - 0x88600000`
+reaches FDT setup. Next: instrument `image_setup_linux()` / `image_setup_libfdt()`
+to see which of its steps returns non-zero.

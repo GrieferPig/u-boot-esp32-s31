@@ -1472,7 +1472,12 @@ static void psram_rw_test(void)
  * The alias is 0x8800_0000 + (vaddr - 0x4800_0000).
  */
 #define P4_KERN_ADDR		0x88000000u
-#define P4_DTB_ADDR		0x88f00000u
+/*
+ * Keep the DTB away from the top of the window: U-Boot's booti expands it in
+ * place and needs room after it, which 0x48F0_0000 (15 MiB, at the end of the
+ * mapped 16 MiB) does not have.
+ */
+#define P4_DTB_ADDR		0x88600000u
 #define P4_PRE_CHUNK		0x1000u
 #define P4_ROM_CACHE_WB_ALL	0x4fc00414u
 #define P4_CACHE_MAP_DCACHE	((1u << 4) | (1u << 5))
