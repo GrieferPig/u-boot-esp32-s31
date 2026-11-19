@@ -129,6 +129,9 @@ typedef void (*rom_cmd_start_fn)(int spi_num, u8 *rx_buf, u16 rx_len,
 #define PSRAM_REG_CMD_BITS	16
 #define PSRAM_REG_ADDR_BITS	32
 #define PSRAM_REG_DUMMY_RD	(2 * (5 - 1))
+/* MR4 as this part reports it when healthy; the latency field is set below. */
+#define PSRAM_MR4_KNOWN_GOOD	0x014bu
+
 #define PSRAM_RD_LATENCY	4
 #define PSRAM_WR_LATENCY	2
 #define PSRAM_MR8_BL		3
@@ -325,6 +328,15 @@ static int psram_mode_register_init(void)
 
 	mr01 &= ~(0x3 | (0x7 << 2) | BIT(5));
 	mr01 |= (PSRAM_RD_LATENCY << 2) | BIT(5);
+	/*
+	 * MR4 is written, not merged: a merge conserves every other bit, so a part
+	 * that has been left with a bad MR4 stays bad across every boot, and the
+	 * reference images cannot repair it either because IDF merges that register
+	 * too. When healthy this part reports 0x014b (write latency 2 in bits 7:5);
+	 * a corrupted one reads back 0x80df, i.e. write latency 0, which is the field
+	 * that times a write data phase.
+	 */
+	mr48 = PSRAM_MR4_KNOWN_GOOD;
 	mr48 &= ~(0x7 << 5);
 	mr48 |= (PSRAM_WR_LATENCY << 5);
 
@@ -1621,6 +1633,21 @@ int p4_spl_psram_init(void)
 	 */
 	psram_pma_non_cacheable();
 	psram_mmu_map(0x01000000);
+
+	/*
+	 * Enable the L1 D-cache and the L2 explicitly, the way IDF's bootloader does
+	 * it (cache_ll_l1_enable_dcache / cache_ll_l2_enable_cache in
+	 * esp32p4/include/hal/cache_ll.h, which call the ROM at these addresses with
+	 * an autoload flag). Access to the PSRAM window goes through the cache
+	 * controller's MMU, and a dirty line can only reach the part through the L2 -
+	 * with no explicit enable a store to 0x4800_0000 shows up in the window and
+	 * never lands in the part, while the same store through the uncached alias
+	 * does land. Argument 0 = autoload disabled, which is IDF's default build.
+	 */
+	((void (*)(u32))0x4fc004f4u)(0);	/* Cache_Enable_L1_DCache */
+	((void (*)(u32))0x4fc00504u)(0);	/* Cache_Enable_L2_Cache */
+	p4_spl_early_puts("psram: caches enabled\n");
+
 	setbits_le32((void *)P4_CACHE_FCTRL, BIT(0));
 
 	psram_cache_check();

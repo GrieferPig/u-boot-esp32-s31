@@ -258,6 +258,29 @@ void hw_watchdog_reset(void)
 #define P4_KERN_ALIAS		0x88000000u
 #define P4_DTB_ALIAS		0x88600000u
 
+/*
+ * "p4wb [map]" - ROM Cache_WriteBack_All (0x4fc00414), map bits from
+ * esp32p4/rom/cache.h: 0x01/0x02 L1 I0/I1, 0x10 L1 D, 0x20 L2.
+ *
+ * This exists to settle one question: a store to the cached PSRAM window is
+ * absorbed by the cache and the part keeps the old contents, so either the
+ * writeback path works and nothing flushes, or it does not work at all.
+ */
+static int do_p4wb(struct cmd_tbl *cmdtp, int flag, int argc,
+		   char *const argv[])
+{
+	u32 map = (1u << 4) | (1u << 5);
+
+	if (argc > 1)
+		map = simple_strtoul(argv[1], NULL, 16);
+
+	((void (*)(u32))0x4fc00414u)(map);
+	printf("p4wb: writeback all, map 0x%02x\n", map);
+	return CMD_RET_SUCCESS;
+}
+
+U_BOOT_CMD(p4wb, 2, 0, do_p4wb, "write back caches (map arg)", "[map]");
+
 static int do_p4boot(struct cmd_tbl *cmdtp, int flag, int argc,
 		     char *const argv[])
 {

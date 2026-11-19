@@ -4912,3 +4912,42 @@ preload verification matching.
 Next: re-apply the MR4 explicit write (it is still the right idea for a self-healing init)
 *on top of* the restored dummy values and re-verify the preload after it, rather than
 assuming it is harmless because it built and reached the prompt.
+
+## Round 129: caches now enabled explicitly (IDF-matched); writeback returns but does not flush
+
+With the write path restored (round 128) the cached-window write was re-examined from
+scratch, because several of its earlier measurements were taken on the broken build.
+
+**The caches were never enabled explicitly.** IDF's bootloader enables them through
+`cache_ll_l1_enable_dcache()` / `cache_ll_l2_enable_cache()`, which call the ROM at
+`Cache_Enable_L1_DCache` (0x4FC004F4) and `Cache_Enable_L2_Cache` (0x4FC00504) with an
+autoload flag. This port only enabled the cache *clocks*. Added both calls (autoload 0,
+IDF's default build) before opening the AXI port. They do not hang, the prompt still
+comes up, and the preload still verifies byte-for-byte:
+
+```
+psram: caches enabled
+cmp 0x00000038 src 0x05435352 dst 0x05435352
+```
+
+**`Cache_WriteBack_All` no longer hangs.** Round 46 recorded it hanging, but that was on
+the broken build; with the write path restored it returns:
+
+```
+mw.l 0x48e00000 0x11223344 1     # store through the cached window
+md.l 0x48e00000 1  -> 11223344   # the window sees it
+p4wb 30            -> p4wb: writeback all, map 0x30
+md.l 0x88e00000 2  -> ffffffff ffffffff   # the part still has the old contents
+```
+
+So a whole-cache write-back completes but the dirty PSRAM line is still not written to the
+part. Together with the alias store landing correctly, that localizes the remaining fault
+to the cache->PSRAM write-back path itself, not to the store, the MMU mapping or the
+cache being disabled.
+
+State: our chain flashed (2/2 hashes), `PROMPT OK`, preload verifying, MR4 self-healing to
+0x014b. `p4wb` is a temporary diagnostic command (`[map]`, default 0x30).
+
+Next: try `Cache_WriteBack_Addr` (0x4FC003F4) on the specific line before concluding the
+writeback engine is dead - a whole-cache pass may be skipping lines that a targeted
+writeback would push.
