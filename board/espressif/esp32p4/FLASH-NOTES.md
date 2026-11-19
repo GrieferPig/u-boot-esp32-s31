@@ -4369,3 +4369,48 @@ preserved instead of being replaced. That is the concrete work item behind
 
 State at the end of the round: the reference chain is flashed and verified
 booting, and the port's own tree is back at the last verified commit.
+
+## Round 117: the timing tuner never succeeds, and that gates the 16-line switch
+
+Tried to get the 16-line data phase in place, and found the blocker in front of it.
+
+**The tuner's own reference check fails.** Every boot prints
+
+```
+axi: sctrl 0x02f7c679
+tune: low-clock reference failed
+```
+
+i.e. `psram_timing_tune()` writes a known pattern at the slow clock and cannot read
+it back. It has apparently been failing for a while: the boot only continues
+because the caller ignores the -1, and the SPL's window word test fails right
+before it (`wordtest wrote 0x00000001 read80 0x00000000`). So the port has never
+actually calibrated the PSRAM timing, and the command path only works at the fixed
+values that happen to be right for the alias copy.
+
+**Switching to 16 lines then breaks the mode-register writes.** Moving the
+`SDIN_HEX | SDOUT_HEX` enable to after the tuner call does apply it -
+
+```
+psram: hex data lines 0x8cfc0000
+```
+
+- but the boot then stops right after the mode register step, with MR4 left at
+  `0xa0df` instead of `0x014b`, so the write latency/other MR4 fields come back
+  garbled in 16-line mode. Writing the mode registers while in 16-line mode needs
+  16-line-appropriate dummy timing, which is exactly what the (failing) tuner would
+  have produced. Reverted.
+
+**Recovery, again, is the reference chain.** With the chip left in the bad MR4
+state, this port's SPL fails its word test and never reaches the prompt; flashing
+the reference images restores it deterministically (`Readlatency 0x04`,
+`DRAM: 16 MiB`, `Starting kernel ...`, Linux boots). That is now the second time
+this round-trip has been observed, which makes "self-healing init" a concrete,
+reproducible gap rather than a nice-to-have.
+
+State at the end of the round: reference chain flashed and verified booting; the
+port's tree is unchanged from the last verified commit.
+
+Next: fix `psram_timing_tune()`'s low-clock reference step. Everything else - the
+16-line data phase, reliable window writes, the self-healing mode registers - sits
+behind the port being able to read PSRAM back correctly at the slow clock.
