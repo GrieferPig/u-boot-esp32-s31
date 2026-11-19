@@ -5571,3 +5571,46 @@ does not accept stores. What is left unverified is the *timing* content of IDF's
 replaces with its own tuner that reports "tune: low-clock reference failed".
 
 State: 8-line, our chain flashed (2/2 hashes), `PROMPT OK`, preload byte-exact.
+
+## Round 144: the port was running a mixed latency/dummy profile - made coherent
+
+Read IDF's per-profile constants (`esp_psram_impl_ap_hex.c`) as a table for the first time
+instead of one value at a time. IDF defines three coherent sets, selected together:
+
+| profile | RD_DUMMY | RD_REG_DUMMY | WR_DUMMY | RD_LATENCY | WR_LATENCY |
+| --- | --- | --- | --- | --- | --- |
+| high (250 MHz+) | 2*(18-1) | 2*(9-1) | 2*(9-1) | 6 | 3 |
+| 200 MHz | 2*(14-1) | 2*(7-1) | 2*(7-1) | 4 | 1 |
+| low | 2*(10-1) | 2*(5-1) | 2*(5-1) | 2 | 2 |
+
+This port was mixing all three: cache RD dummy 18 (low), cache WR dummy 8 (low), array RD
+dummy 26 (200 MHz), register dummy 8 (low), RD latency 4 (200 MHz) and **WR latency 2 (low)**.
+The reference's `CACHE_SCTRL` = 0x02F7C679 pins the correct set down: `SRAM_RDUMMY_CYCLELEN` 25
+and `SRAM_WDUMMY_CYCLELEN` 11 are exactly 2*(14-1) and 2*(7-1), i.e. the **200 MHz** profile -
+which requires WR latency **1**, not 2.
+
+Rebuilt the profile coherently for 200 MHz: register dummy 2*(7-1), cache RD dummy 2*(14-1),
+cache WR dummy 2*(7-1), WR latency 1 (both the init value and the final value), RD latency 4
+unchanged.
+
+Result, verified on hardware:
+
+```
+axi: sctrl 0x02f7c679        <- now bit-identical to the reference's CACHE_SCTRL
+mode: mr0 0x00008d30 mr4 0x00004b40 mr8 0x0000304b
+cmp  0x00000038 src 0x05435352 dst 0x05435352
+PROMPT OK
+```
+
+This also explains round 47 retroactively: changing the cache dummies to the reference's 200
+MHz values broke the write path *because* the write latency was still 2 (the low-profile
+value) - the dummies moved to 200 MHz while the latency stayed behind. The fix was never to
+revert the dummies; it was to move the latency with them.
+
+The cached window still absorbs stores (`mw.l 0x88e00000 0xffffffff 4; mw.l 0x48e00000
+0x11223344 1; md.l 0x88e00000 2` -> `ffffffff ffffffff`), so the profile was not the last
+piece either, but the transmit setup is now internally consistent and matches the reference
+register-for-register.
+
+State: our chain flashed (2/2 hashes), `PROMPT OK`, preload byte-exact, `CACHE_SCTRL`
+identical to the reference.
