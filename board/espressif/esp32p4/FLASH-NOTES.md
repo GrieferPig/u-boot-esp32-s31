@@ -5404,3 +5404,41 @@ address bit length rather than at any missing enable.
 
 State: 8-line, our chain flashed (2/2 hashes), `PROMPT OK`, mode registers correct, preload
 matching.
+
+## Round 140: removing the MSPI2 replay dropped the DLL delay register - restored
+
+Found a regression introduced by round 139's cleanup: `SPI_MEM_S_DLL_DLY_DB`
+(0x5008E0DC) was 0x3023 in the reference, and the captured MSPI2 replay had been its **only**
+writer. Removing that replay left it at 0, i.e. the cache path was running with no DLL delay
+programming at all.
+
+Restored it in `psram_axi_config()`, which is now the single MSPI2 configuration point:
+
+```c
+writel(0x00003023u, (void *)(P4_MSPI2_BASE + 0xdc));
+```
+
+8-line verified after the change: `PROMPT OK`, `cmp 0x00000038 src 0x05435352 dst 0x05435352`.
+
+Also corrected a mistake in this round's first experiment: the write-dummy edit silently did
+not apply (the define had different spacing), so the "RD 18 / WR 16" run was actually still
+RD 18 / WR 8. Recorded here so that experiment is not read as evidence about WR 16.
+
+**16-line is still not usable, and the failure is now a data-mapping one, not a timing one.**
+With the DLL delay restored, 16-line still boots but corrupts every store, and the corruption
+is visible even through *alias* writes:
+
+```
+mw.l 0x88e00000 0x00000000 8      # clear through the alias
+mw.l 0x48e00000 0x11223344 1      # one store through the window
+md.l 0x88e00000 8  ->  ffff00ff ffffffff ffff55ff ffffffff
+                       ffff00ff ffffffff ffff00ff ffffffff
+```
+
+A word of zeros reads back as 0xffff00ff, i.e. the data lines carry the wrong bytes, and the
+pattern repeats per 8 bytes. That is a line-mapping problem in the 16-line data phase, not a
+dummy-cycle or DLL problem, and it needs the 16-line byte/line mapping worked out from the TRM
+(K ch.47 "SPI" - the hex data-line mode) rather than more one-register experiments.
+
+State: 8-line, our chain flashed (2/2 hashes), `PROMPT OK`, preload byte-exact, DLL delay
+programmed.

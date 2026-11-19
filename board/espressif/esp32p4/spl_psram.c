@@ -897,6 +897,15 @@ static void psram_axi_config(void)
 		((u32)(P4_PSRAM_WR_DUMMY - 1) << P4_SCTRL_WDUMMY_S);
 	writel(sctrl, (void *)P4_CACHE_SCTRL);
 
+	/*
+	 * SPI_MEM_S_DLL_DLY_DB (0x0dc): the DLL delay programming the reference
+	 * holds (0x3023). Its only writer in this port was the captured MSPI2 replay,
+	 * which is gone now that MSPI2 is configured exactly once here, so without
+	 * this the register is left at 0 and the cache path runs with no DLL delay
+	 * programming at all.
+	 */
+	writel(0x00003023u, (void *)(P4_MSPI2_BASE + 0xdc));
+
 
 	/* CS timing + split transaction, as the reference has it. */
 	writel(0x8400b18fu, (void *)(P4_MSPI2_BASE + 0x1a0));
