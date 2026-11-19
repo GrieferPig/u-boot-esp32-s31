@@ -5214,3 +5214,61 @@ transfer - the piece to port next, rather than any further register comparison.
 
 State: our chain restored and verified after the comparison (2/2 hashes, `PROMPT OK`, preload
 matching).
+
+## Round 136: IDF performs PSRAM transactions through the ROM - this port hand-rolls them
+
+Following round 135's conclusion ("the difference is how the state is reached"), read how
+IDF actually issues a single command/address/data transfer. It does not touch the user
+registers directly at all:
+
+```c
+psram_ctrlr_ll_common_transaction_base(mspi_id, mode, cmd, cmd_bitlen, addr, addr_bitlen,
+                                       dummy_bits, mosi, mosi_bitlen, miso, miso_bitlen,
+                                       cs_mask, is_write_erase_operation)
+{
+    esp_rom_spi_set_op_mode(mspi_id, mode);          /* ROM 0x4FC00110 */
+    esp_rom_spi_cmd_t conf = { ... };                /* struct, see below */
+    esp_rom_spi_cmd_config(mspi_id, &conf);          /* ROM 0x4FC00108 */
+    esp_rom_spi_cmd_start(mspi_id, miso, miso_bitlen / 8, cs_mask, is_write_erase_operation); /* ROM 0x4FC0010C */
+}
+```
+
+with `mode = ESP_ROM_SPIFLASH_OPI_DTR_MODE` and `cs_mask = 1 << 1` (CS1, which is where the
+PSRAM sits - this port does the same with MISC.CS0/CS1_DIS).
+
+The struct (`esp32p4/rom/opi_flash.h`):
+
+```c
+typedef struct {
+    uint16_t cmd; uint16_t cmdBitLen;
+    uint32_t *addr;  uint32_t addrBitLen;
+    uint32_t *txData; uint32_t txDataBitLen;
+    uint32_t *rxData; uint32_t rxDataBitLen;
+    uint32_t dummyBitLen;
+} esp_rom_spi_cmd_t;
+```
+
+and the mode enum (`esp_rom/include/esp_rom_spiflash.h`):
+
+```
+QIO=0 QOUT DIO DOUT FASTRD SLOWRD OPI_STR OPI_DTR=7 OOUT OIO_STR OIO_DTR QPI OPI_HEX_DTR=12
+```
+
+**This port's `psram_xact()` instead writes USER/USER1/USER2/MOSI_DLEN/MISO_DLEN by hand and
+never calls `esp_rom_spi_set_op_mode` at all.** That call is what puts the controller into
+OPI-DTR mode; without it the controller is left in whatever mode the replayed ROM image
+happened to leave, which is consistent with everything observed: the alias/cache path works
+(it is driven by CACHE_SCTRL/SRAM_CMD, not by the user registers), the mode-register
+transactions garble as soon as the 16-line bits are set (the user path is not in OPI-DTR),
+and the tuner's reference step fails for the same reason.
+
+There is also an `ESP_ROM_SPIFLASH_OPI_HEX_DTR_MODE = 12` in the enum, which is a
+16-line-specific variant and a candidate for the PSRAM path; which one IDF uses for the hex
+PSRAM is not yet confirmed.
+
+Next: replace the body of `psram_xact()` with exactly those three ROM calls (struct-based),
+keeping this port's callers unchanged, then re-run the three checks (prompt, preload
+`cmp`, window store) - first in 8-line mode to confirm nothing regresses, then with the
+16-line bits on, which is the configuration that has been impossible to reach.
+
+State: our chain unchanged and verified (2/2 hashes, `PROMPT OK`, preload matching).
