@@ -5358,3 +5358,49 @@ Next: the cache path is now the only failing part and the only controller left t
 against IDF's sequence - `s_config_mspi_for_psram()` runs on MSPI2 *after* the mode registers
 are programmed on MSPI3, and this port programs MSPI2's config before its own command-path
 work. Bring MSPI2's configuration to that order.
+
+## Round 139: MSPI2 configured once (after the mode registers), and 16-line mode finally boots
+
+Applied IDF's ordering to the cache-side controller: `s_config_mspi_for_psram()` runs once on
+MSPI2 *after* the mode registers are programmed (and those go through MSPI3, so MSPI2 does not
+need to be live for them). This port replayed a captured MSPI2 image at the top of the init and
+then configured MSPI2 again later - the cache controller existed twice over, the first image
+armed before the PSRAM had been touched at all.
+
+Removed the `psram_m2` replay; `psram_axi_config()` is now the single MSPI2 configuration
+point. Two visible improvements:
+
+* the mode register read is finally correct: `mode: mr0 0x00008d30 mr4 0x00004b40 mr8 0x0000304b`
+  (MR4 = 0x4b, the known-good value; it used to read 0x80df);
+* preload still byte-exact, `PROMPT OK`, and the SPL image is 900 bytes smaller.
+
+**16-line mode now reaches the prompt.** With `SDIN_HEX|SDOUT_HEX` set on top of this ordering
+the board no longer dies:
+
+```
+PROMPT OK
+mode: mr0 0x00008d30 mr4 0x00004b40 mr8 0x0000304b
+cmp  0x00000038 src 0x05435352 dst 0xffff00ff      <- data corrupted, but it boots
+```
+
+and a window store now **does reach the part**, just at the wrong place:
+
+```
+mw.l 0x88e00000 0xffffffff 4
+mw.l 0x48e00000 0x11223344 1
+md.l 0x88e00000 2  ->  ffffffff ffff57ff     (written word +0 shows up at +4)
+```
+
+So 16-line mode is no longer fatal and writes are no longer dropped: they are misaligned by a
+word, which is a data-phase problem, not a missing path.
+
+Disabling splice (`AW_SPLICE_EN`/`AR_SPLICE_EN`) in 16-line mode makes the store disappear
+again (`ffffffff ffffffff`), so splice has to stay on - it is what assembles the wide transfer.
+
+Reverted to 8-line for the committed state (preload byte-exact again). The remaining work in
+16-line mode is the write data-phase alignment: a 32-bit store has to start on the right beat,
+which points at `SRAM_WDUMMY_CYCLELEN` (11 now, the reference's value) together with the
+address bit length rather than at any missing enable.
+
+State: 8-line, our chain flashed (2/2 hashes), `PROMPT OK`, mode registers correct, preload
+matching.

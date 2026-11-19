@@ -224,12 +224,26 @@ static void psram_cache_cmds(void)
 	writel(0x00000200u, (void *)0x5008e054);
 }
 
+/*
+ * Kept for reference: the captured MSPI2 image. Not written any more - see the
+ * comment inside psram_replay().
+ */
 static void psram_replay(void)
 {
 	unsigned int i;
 
-	for (i = 0; i < ARRAY_SIZE(psram_m2); i++)
-		writel(psram_m2[i].val, (void *)(P4_MSPI2_BASE + psram_m2[i].off));
+	/*
+	 * MSPI2 is deliberately NOT replayed here.
+	 *
+	 * IDF configures the cache-side controller (MSPI2) exactly once, in
+	 * s_config_mspi_for_psram(), *after* the mode registers have been
+	 * programmed - and it programs those through MSPI3, so MSPI2 does not need to
+	 * be live for them. This port replayed a captured MSPI2 image at the top of
+	 * the init and then configured it again later, i.e. the cache controller
+	 * existed twice over, with the first image armed before the PSRAM device had
+	 * been touched at all. The single configuration point is psram_axi_config(),
+	 * which this init calls after psram_mode_reg_init().
+	 */
 	for (i = 0; i < ARRAY_SIZE(psram_m3); i++)
 		writel(psram_m3[i].val, (void *)(P4_MSPI3_BASE + psram_m3[i].off));
 	for (i = 0; i < ARRAY_SIZE(psram_ck); i++)
@@ -882,6 +896,7 @@ static void psram_axi_config(void)
 		P4_SCTRL_WCMD |
 		((u32)(P4_PSRAM_WR_DUMMY - 1) << P4_SCTRL_WDUMMY_S);
 	writel(sctrl, (void *)P4_CACHE_SCTRL);
+
 
 	/* CS timing + split transaction, as the reference has it. */
 	writel(0x8400b18fu, (void *)(P4_MSPI2_BASE + 0x1a0));
