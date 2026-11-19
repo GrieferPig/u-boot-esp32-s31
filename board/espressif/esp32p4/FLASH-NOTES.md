@@ -3219,3 +3219,45 @@ the boot image or the flash controller needs the higher region mapped
 separately) rather than assuming the whole 16 MiB is addressable.
 
 Preload reverted; SPL boot check back to `window: bad 0x00000000 of 1024`.
+
+## Round 89: the kernel and DTB load into PSRAM, and the last wall is cache coherency
+
+Found a long-standing misreading of our own code: `p4_spl_flash_init(0x01000000)`
+takes the mapped **size** (16 MiB), not a base address. The flash XIP window is
+fixed at `P4_FLASH_VADDR = 0x4000_0000`, which is why `p4load` used
+0x4020_0000 / 0x4090_0000 all along. Every earlier "flash probe" at
+0x0100_0000 + offset was reading an unmapped address - that is why those hung.
+
+With the correct base, `p4_spl_psram_preload()` in the SPL loads both images:
+
+```
+preload: k 0x00354c60 d 0x0000113d
+.... preload: done
+```
+
+(4 dots = one per MiB of kernel.) So the whole chain PSRAM + flash -> PSRAM
+works inside the SPL.
+
+But U-Boot then reads stale data at the target addresses:
+
+```
+esp32p4> md.l 0x48f00000 1      -> 55555555        (expected edfe0dd0)
+esp32p4> md.l 0x48000038 1      -> a5a5000e        (the SPL window check's pattern)
+```
+
+Three placements tried:
+
+| placement | result |
+| --- | --- |
+| after `p4_spl_flash_init` (caches on), cached window | copy reports done, U-Boot sees stale data - writes stay dirty in L2 |
+| after `p4_spl_flash_init`, non-cacheable alias 0x8800_0000 | writes lost entirely; U-Boot still sees the old pattern |
+| before `p4_spl_flash_init` (caches off), correct base | `preload: no fdt` - the ROM's mapping does not cover flash 0x900000 |
+
+So the data only lands in the part when the caches are off, and the flash region
+above the boot image is only mapped after `p4_spl_flash_init()`. The missing
+piece is a cache writeback after the preload (ROM `Cache_WriteBack_All`) so the
+kernel lines reach the part while the caches stay on. That is the next step, and
+it is the last one before `booti` can work from the prompt.
+
+Reverted to the working state (`window: bad 0x00000000 of 1024`, boots to
+`esp32p4>`).
