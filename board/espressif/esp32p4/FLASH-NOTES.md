@@ -3329,3 +3329,50 @@ is on (with it off, the 4 KB pattern test passes).
 Both changes are kept: they are IDF-correct regardless, and they remove two
 real differences from the working configuration. Boot state unchanged
 (`window: bad 0x00000000 of 1024`, reaches `esp32p4>`).
+
+## Round 92: the window works with the caches on - the dirty lines never reach the part
+
+Isolated the cache path with direct probes instead of the copy code.
+
+**1. The window is readable with the caches on.** After `p4_spl_flash_init()`
+(caches on), a command-path read of PSRAM offset 0 returned `0x15555455` (the AXI
+owns the path) while a window read returned `0xa5a50000` - the pattern the
+boot-time window check had written. So reads through 0x4800_0000 are correct.
+
+**2. Window writes stick too.** Writing 0xcafe0001 through the window and reading
+it straight back gave 0xcafe0001, and the uncached alias showed a *different*
+word - classic cache behaviour, i.e. the write landed in the cache.
+
+**3. `Cache_WriteBack_All` (ROM 0x4fc00414) pushes lines out**, while
+`Cache_WriteBack_Invalidate_All` (0x4fc0041c, used in the earlier attempt)
+discards them:
+
+```
+probe: chip-before 0x15555455  chip-after 0xa5a50008
+```
+
+so the earlier "writes are dropped" conclusion was wrong - they were dirty and
+then thrown away by the invalidating variant.
+
+**4. `psram_pma_non_cacheable()` was defined but never called** (removed in
+round 77 on the mistaken "the caches are off" reading). Restored in front of the
+MMU map.
+
+**5. What remains.** The preload with `Cache_WriteBack_All` still is not visible
+from U-Boot:
+
+```
+esp32p4> md.l 0x48f00000 1   -> 19030000   (the preload wrote edfe0dd0)
+esp32p4> mw.l 0x48f00000 0xd00dfeed 1
+esp32p4> md.l 0x48f00000 1   -> d00dfeed   <- U-Boot's own write/read works
+```
+
+So the window is usable in both contexts, and the multi-MB preload is what
+loses data: the dirty lines evicted while copying 3.4 MB never reach the part
+(only the ones still resident at `Cache_WriteBack_All` time do). Next: make the
+copy itself not depend on cache eviction - write through the uncached path for
+the whole copy, or flush per chunk - and confirm by reading the DTB back through
+the alias from the SPL before jumping to U-Boot.
+
+Code state: PMA non-cacheable restored, preload present with
+`Cache_WriteBack_All`, boots to `esp32p4>`.

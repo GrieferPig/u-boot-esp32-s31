@@ -220,6 +220,12 @@ void spl_board_init(void)
 			;
 	}
 
+	{
+		void p4_spl_psram_preload(void);
+
+		p4_spl_psram_preload();
+	}
+
 
 	/* payload loading happens from the U-Boot prompt for now */
 

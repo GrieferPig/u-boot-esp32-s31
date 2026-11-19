@@ -1447,6 +1447,64 @@ static void psram_rw_test(void)
 
 
 
+
+/*
+ * Preload the kernel and the DTB from flash into PSRAM, then push the lines
+ * out to the part.
+ *
+ * Flash XIP window: 0x4000_0000 (P4_FLASH_VADDR); the argument of
+ * p4_spl_flash_init() is the mapped size, not a base. Kernel: flash 0x200000
+ * (image_size at offset 0x10), DTB: flash 0x900000 (FDT totalsize).
+ *
+ * The copies pass through the caches, so the writeback has to be
+ * Cache_WriteBack_All (ROM 0x4fc00414) with the L1 D and L2 map bits
+ * (rom/cache.h: CACHE_MAP_L1_DCACHE BIT(4), CACHE_MAP_L2_CACHE BIT(5)).
+ * Cache_WriteBack_Invalidate_All discards the dirty lines instead, which is
+ * why an earlier attempt lost the data.
+ */
+#define P4_FLASH_WIN		0x40000000u
+#define P4_KERN_OFF		0x00200000u
+#define P4_DTB_OFF		0x00900000u
+#define P4_KERN_ADDR		0x48000000u
+#define P4_DTB_ADDR		0x48f00000u
+#define P4_PRE_CHUNK		0x1000u
+#define P4_ROM_CACHE_WB_ALL	0x4fc00414u
+#define P4_CACHE_MAP_DCACHE	((1u << 4) | (1u << 5))
+
+void p4_spl_psram_preload(void)
+{
+	const u32 *kern = (const u32 *)(P4_FLASH_WIN + P4_KERN_OFF);
+	const u32 *dtb = (const u32 *)(P4_FLASH_WIN + P4_DTB_OFF);
+	u32 ksize, dsize, off;
+
+	if (dtb[0] != 0xedfe0dd0u) {
+		p4_spl_early_puts("preload: no fdt\n");
+		return;
+	}
+	ksize = kern[4];
+	dsize = __builtin_bswap32(dtb[1]);
+	p4_spl_early_puts("preload: k ");
+	p4_spl_early_hex(ksize);
+	p4_spl_early_puts(" d ");
+	p4_spl_early_hex(dsize);
+
+	for (off = 0; off < dsize; off += P4_PRE_CHUNK) {
+		u32 n = dsize - off > P4_PRE_CHUNK ? P4_PRE_CHUNK : dsize - off;
+
+		memcpy((void *)(P4_DTB_ADDR + off),
+		       (const void *)(P4_FLASH_WIN + P4_DTB_OFF + off), n);
+	}
+	for (off = 0; off < ksize; off += P4_PRE_CHUNK) {
+		u32 n = ksize - off > P4_PRE_CHUNK ? P4_PRE_CHUNK : ksize - off;
+
+		memcpy((void *)(P4_KERN_ADDR + off),
+		       (const void *)(P4_FLASH_WIN + P4_KERN_OFF + off), n);
+	}
+
+	((void (*)(u32))P4_ROM_CACHE_WB_ALL)(P4_CACHE_MAP_DCACHE);
+	p4_spl_early_puts(" preload: done\n");
+}
+
 int p4_spl_psram_init(void)
 {
 	/*
@@ -1520,6 +1578,15 @@ int p4_spl_psram_init(void)
 	writel(0x00030103u, (void *)(P4_MSPI2_BASE + 0x14));
 
 	psram_cache_clocks_on();
+	/*
+	 * Take the CPU's PSRAM window accesses off the cache path. With them
+	 * cached, writes land in L2 and dirty lines evicted during a multi-MB
+	 * copy never reach the part (the DTB written first was gone by the time
+	 * the kernel copy finished). Uncached, the same accesses go straight to
+	 * the MSPI2 window and both reads and writes are correct - that is the
+	 * state every working verification in this port has been run in.
+	 */
+	psram_pma_non_cacheable();
 	psram_mmu_map(0x01000000);
 	setbits_le32((void *)P4_CACHE_FCTRL, BIT(0));
 
