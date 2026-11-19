@@ -4180,3 +4180,53 @@ core does at 0xA4 by stepping *from a fresh region* and reading `mcause` right a
 the step (the earlier step reported 0xA4 -> 0xA0, which matches a trap that returns
 to a vector whose base is misread), and compare with the same bytes executed at an
 address that is not the start of a page-with-boundary.
+
+## Round 113: entered through the alias, the kernel runs - and reaches its own trap handler
+
+Added `p4boot alias`, which enters the kernel through the uncached alias
+(0x8800_0000) instead of the cached window, and ran it:
+
+```
+esp32p4> p4boot alias
+p4boot: kernel 88000000 fdt 88600000, jumping
+halt -> PC=0x481B5D22   Halt cause (2) - Illegal Instruction
+halt -> PC=0x481B6612   Halt cause (2) - Illegal Instruction
+```
+
+Resolved those against the matching build (`/tmp/build-p4/vmlinux` with its
+System.map):
+
+| address | symbol | where |
+| --- | --- | --- |
+| 0x481B5D22 | `do_trap_insn_fault` | arch/riscv/kernel/traps.c:171 |
+| 0x481B6612 | `ct_nmi_exit` | kernel/context_tracking.c:213 |
+| 0x481B5BD2 | `arch_cpu_idle` | arch/riscv/kernel/process.c:101 (the reference chain's idle PC) |
+
+So through the alias the hart executes the kernel **at full speed**, gets ~1.7 MiB
+into the image (past `start_kernel`, into the idle/context-tracking code) and is
+landing in the kernel's illegal-instruction handler - not stuck at the entry any
+more. That is a different, much later failure than the window's 0x0A4 crawl, and it
+proves the image, the preload and the entry convention are all correct.
+
+It does not boot cleanly from the alias because the alias puts the kernel's own
+physical address at 0x8800_0000 while the device tree describes memory as starting
+at 0x4800_0000, so the kernel's address arithmetic is off - the entry has to be the
+window. But this pins the remaining problem to the *window's fetch*, not the kernel.
+
+Also confirmed the console side while doing this: the DT carries
+`/chosen/bootargs = "console=tty0 console=ttyS0,115200 clk_ignore_unused"` and
+`stdout-path = "usbserial0:115200n8"`, so once the kernel gets far enough the UART0
+log will appear on COM9 without any help from the loader.
+
+Two more dead ends recorded: `p4inv <map>` (ROM `Cache_Invalidate_All`, 0x4fc00404)
+hangs the moment it runs with map 0x10, same as the earlier invalidate attempt, and
+window writes stay unflushable for every map (round 112).
+
+Everything was reverted to the committed state, rebuilt, flashed and verified at
+the prompt.
+
+Next: the window fetch is the only blocker. Since whole-cache invalidation hangs and
+by-address invalidation does nothing, the remaining lever is the line itself - either
+re-create it through a path that is allowed to write (which is not the window), or
+avoid the cached window for the first instruction fetch by entering at a page whose
+lines were never populated.
