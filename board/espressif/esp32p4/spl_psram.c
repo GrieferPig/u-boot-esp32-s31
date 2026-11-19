@@ -139,7 +139,15 @@ typedef void (*rom_cmd_start_fn)(int spi_num, u8 *rx_buf, u16 rx_len,
 #define PSRAM_MR8_BL		3
 #define PSRAM_MR8_BT		0
 #define PSRAM_MR8_RBX		1
-#define PSRAM_MR8_X16		1
+/*
+ * 8-line mode (IDF CONFIG_SPIRAM_USE_8LINE_MODE: mode_reg.mr8.x16 = 0 with
+ * the controller hex bits off in esp_psram_impl_ap_hex.c). Full 16-line
+ * needs the MSPI3 command path reworked to IDF's direct-LL style first:
+ * the ROM OPI_HEX_DTR op mode hangs this board, and the MSPI2 hex data
+ * phase reads back 0xffff00ff here. MR8 low byte is then
+ * bl = 3 (2048 byte burst), bt = 0, rbx = 1, x16 = 0.
+ */
+#define PSRAM_MR8_X16		0
 
 void p4_spl_early_puts(const char *s);
 void p4_watchdogs_off(void);
@@ -751,7 +759,7 @@ static void psram_probe(void)
  * Mode registers: MR0 (latency/drive), MR4 (write latency) and MR8 (burst).
  * Values follow the AP hex PSRAM defaults IDF/S31 use for the 200-250 MHz
  * profile: lt = 1, read latency 2..4, write latency 1..2, bl = 3, rbx = 1,
- * x16 = 1 (hex mode).
+ * x16 = 0 (8-line mode, IDF CONFIG_SPIRAM_USE_8LINE_MODE).
  */
 static int psram_mode_reg_write(u32 mr0, u32 mr8)
 {
@@ -793,7 +801,7 @@ static int psram_mode_reg_init(void)
 	 * part's defaults, so program them unconditionally and prove the result
 	 * by reading them back, retrying once.
 	 *
-	 * MR0 = fixed read latency 2; MR8 = 2048 byte burst, x16 (hex) mode.
+	 * MR0 = fixed read latency 2; MR8 = 2048 byte burst, 8-line mode.
 	 * MR4 (write latency) is deliberately not written: this part ignores
 	 * the write (it reads back 0xdf before and after) and the reference
 	 * chain runs with the same value.
@@ -877,13 +885,26 @@ static void psram_final_latency(void)
 	w = (mr4 & 0x1f) | (P4_PSRAM_WR_LATENCY_FINAL << 5);
 	psram_xact(0xC0C0, 0x4, &w, 16, NULL, 0, 0);
 
+	/*
+	 * Reprogram MR0 (final read latency) but keep the MR8 geometry byte
+	 * intact: bl = 3 (2048 byte burst), bt = 0, rbx = 1, x16 = 0 (8-line).
+	 * Passing the bare PSRAM_MR8_X16 flag here used to write MR8 = 0x01,
+	 * silently switching the burst/wrap geometry under a controller that
+	 * was programmed for bl = 3 / rbx = 1 - cached writebacks framed for
+	 * the wrong geometry never landed in the part. IDF keeps the full
+	 * byte (s_init_psram_mode_reg in esp_psram_impl_ap_hex.c) and so
+	 * do we.
+	 */
 	psram_mode_reg_write((P4_PSRAM_RD_LATENCY_FINAL << 2) | BIT(5),
-			     PSRAM_MR8_X16);
+			     PSRAM_MR8_BL | (PSRAM_MR8_BT << 2) |
+			     (PSRAM_MR8_RBX << 3) | (PSRAM_MR8_X16 << 6));
 
 	p4_spl_early_puts("lat: mr0 ");
 	p4_spl_early_hex(psram_read_reg(0x0, 12));
 	p4_spl_early_puts(" mr4 ");
 	p4_spl_early_hex(psram_read_reg(0x4, 12));
+	p4_spl_early_puts(" mr8 ");
+	p4_spl_early_hex(psram_read_reg(0x8, 12));
 	p4_spl_early_puts("\n");
 }
 
@@ -926,10 +947,16 @@ static void psram_axi_config(void)
 	 */
 	cmd = readl((void *)P4_SRAM_CMD);
 	/*
-	 * Keep the data phase at 8 lines. 16 lines is what the reference runs
-	 * (SRAM_CMD 0x8CFC0000), and the command path on MSPI3 now tolerates it -
-	 * the mode registers read correctly with the bits set - but the cache path
-	 * still dies on the first cached access, so it cannot be used yet.
+	 * Keep the data phase at 8 lines: the device MR8 x16 bit is 0, so
+	 * controller and device agree on 8-line framing (IDF
+	 * CONFIG_SPIRAM_USE_8LINE_MODE pairs x16 = 0 with the hex bits off;
+	 * psram_ctrlr_ll_enable_hex_data_line_mode() sets mem_sdin_hex /
+	 * mem_sdout_hex only in the default hex build). Setting the hex bits
+	 * while this port's MSPI3 command path and MSPI2 cache path both
+	 * frame 8 lines reads back 0xffff00ff and corrupts MR4 to 0x80df,
+	 * so full 16-line stays off until the command path is reworked to
+	 * IDF's direct-LL style. (TRM ch.47 SPI - SPI_MEM_SRAM_CMD:
+	 * SDIN_HEX/SDOUT_HEX; IDF LL mem_sdin_hex/mem_sdout_hex.)
 	 */
 	cmd &= ~(P4_CMD_SDIN_HEX | P4_CMD_SDOUT_HEX);
 	cmd |= BIT(18) | BIT(19) | BIT(20) | BIT(21) | P4_CMD_SDUMMY_WOUT;

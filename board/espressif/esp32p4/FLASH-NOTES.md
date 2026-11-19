@@ -5755,3 +5755,53 @@ the fault is "sync engine stuck" (software-fixable in the SPL, before the block 
 
 State: our chain flashed (2/2 hashes), `PROMPT OK`, `CACHE_SCTRL` = 0x02F7C679 identical to the
 reference, preload byte-exact.
+
+## Round 149: the "cache block" was HP SYSREG; MR8 clobber fixed; write path works; Linux booted
+
+Three buried mistakes surfaced and one got fixed, end to end.
+
+1. **0x500E5000 is HP SYSREG, not the cache block.** TRM ch.9 Table 9.3-2 maps
+   0x500E_5000 to HP System Register (VER_DATE 0x20230519 confirms it), and IDF's
+   hp_system_reg.h agrees (HP_SYSTEM_VER_DATE_REG = HP_SYS + 0x0). Every
+   round-140..148 poke at "CACHE_SYNC_CTRL 0x98 / MAP 0x9C / DATE 0x3FC" hit
+   SYSREG instead (0x98/0x9C there are L2_MEM_INT regs - harmless, which is why
+   nothing ever happened). The real cache base is DR_REG_CACHE_BASE =
+   0x3FF10000 (IDF reg_base.h: HPCPUTCP 0x3FF00000 + 0x10000), verified on silicon:
+   DATE 0x02304130, SYNC_CTRL 0x10 (DONE), SYNC_MAP default 0x20 (L2 only).
+   TRM ch.9 has no cache register summary (TRM 未覆盖 for the sync engine
+   registers); IDF cache_reg.h v5.4.1 is the authority, and its SYNC_CTRL/MAP/
+   ADDR/SIZE offsets (0x98/0x9C/0xA0/0xA4) match what the silicon does.
+2. **The real sync engine works; the MSPI write path was broken.** Driving
+   0x3FF10098 directly completes (DONE=1) and invalidate visibly drops lines,
+   yet neither cached-window nor alias stores reached the part (alias read-back
+   is an L2/posted-buffer illusion: the window re-read of the same cell shows
+   the device leftover). Root cause in psram_final_latency: it passed the bare
+   PSRAM_MR8_X16 flag (= 1) as the whole MR8 byte, writing MR8 = 0x01 (8-line,
+   32-byte burst, no wrap) over the 0x4B geometry the controller was programmed
+   for - writebacks framed for bl = 3 / rbx = 1 never landed. Fix: write the
+   full geometry byte (bl = 3, bt = 0, rbx = 1, x16 = 0 -> 0x0B, i.e. IDF
+   CONFIG_SPIRAM_USE_8LINE_MODE) and keep the controller hex bits off, so
+   device and controller agree on 8-line framing; added the missing MR8
+   readback to the lat: line so the blind spot stays closed. Full 16-line is
+   deferred: turning SRAM_CMD hex on while the MSPI3 command path still frames
+   8 lines reads back 0xffff00ff and corrupts MR4 to 0x80df (measured), and the
+   ROM OPI_HEX_DTR op mode hangs the board - the command path needs reworking
+   to IDF's direct-LL style first.
+3. **Write path proven, three ways.** WB (SYNC_MAP 0x30, real engine) +
+   INVALIDATE + alias read returns the pattern: the part holds it. A full
+   p4load (3.5 MB kernel + DTB via the alias) completes; p4boot then enters
+   the kernel at 0x48000000 and **Linux boots** (6.18.0-p4-reconstructed+,
+   full early boot down to `Kernel panic - not syncing: P4 retained executable
+   cache callback missing` - a kernel-side handoff expectation, not a memory
+   fault). A DTB written by the earlier p4load survived a chip reset in the
+   part and the kernel parsed it (OF reserved-mem nodes printed).
+4. **p4load kills the board after its final print, deterministically**
+   (exception excode 1 = instruction access fault, EPC/RA/TVAL all 0).
+   `sleep 45` survives, so it is not time/WDT starvation but p4load-specific
+   (3.5 MB of dirty-cache activity). Theories for next round: L2-carve overlap
+   with U-Boot SRAM, L2 ECC fault, or the second hart. The SPL->p4boot path
+   already boots without p4load, so this blocks convenience, not Linux.
+
+State: our SPL flashed (hash verified), `PROMPT OK`, `mode: mr8 0x300b`
+stable across final_latency, `lat: mr8 0x300b`, `axi: sctrl 0x02f7c679`,
+preload cmp lines all pass, `window: bad 0 of 1024`.
