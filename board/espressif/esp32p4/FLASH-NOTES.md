@@ -5128,3 +5128,52 @@ That is the impasse stated in register terms, with nothing left unexplained at t
 level in MSPI2, the MMU, the pin mux, the cache block or the PMA.
 
 State: reverted; our chain flashed (2/2 hashes), `PROMPT OK`, preload verifying.
+
+## Round 134: the permission and timing blocks match as well - MSPI2 is fully accounted for
+
+Finished the register sweep over the parts never compared:
+
+**`SPI_MEM_S_FMEM_PMS0..3_ATTR/ADDR/SIZE` (0x100..0x12C) - the memory permission
+registers.** These are the one plausible mechanism for "reads work, writes are dropped",
+so they were the last good suspect. Bit-identical on both chains:
+
+```
+0x5008E100: 00000003 00000003 00000003 00000003
+0x5008E110: 00000000 00ffffff 01ffffff 02ffffff
+0x5008E120: 00001000 00001000 00001000 00001000
+```
+
+**The timing block 0x160..0x19C - also identical:**
+
+```
+0x5008E160: 00000000 00000000 01005000 00000000
+0x5008E170: 00000000 000c0000 fc000000 00000000
+0x5008E180: 00000021 00000000 00000000 00000000
+0x5008E190: 00000021 00000000 00000000 00000000
+```
+
+With rounds 131/133 that accounts for **all of MSPI2 from 0x000 to 0x1C0 (112 registers)**:
+the only two that differ are `CACHE_SCTRL` (0x040) and `SRAM_CMD` (0x044), and both
+alternatives for those two have been tried and fail (round 133).
+
+So the port is blocked on a behaviour that register matching cannot reproduce: the same
+address reads correctly through the cache and writes into a hole, with every controller,
+MMU, permission, timing, pin-mux, cache-block and PMA register verified equal to a chain
+where the same write lands. That leaves exactly two honest ways forward, and neither is a
+register tweak:
+
+1. **Re-implement the PSRAM bring-up following IDF's sequence** instead of this port's
+   "replay the ROM state, then patch it" structure. The replay is the one structural
+   difference that has never been removed, and every register-level difference has now been
+   ruled out.
+2. **Move the kernel out of the cached window**: `CONFIG_PHYS_RAM_BASE` is
+   `0x4800_0000` with `CONFIG_PHYS_RAM_BASE_FIXED=y`, set in the device defconfig
+   (`esp32p4_reconstructed_defconfig`), and the kernel relocates itself to that link address
+   no matter where it is entered. Linking it at `0x8800_0000` - the alias, where writes
+   demonstrably work - would let it run without the dead cached window. This is a
+   device-config change, but it moves the whole kernel onto the uncached alias, so it trades
+   the bug for a very slow system rather than fixing it, and it would have to be checked
+   against the reference chain, which uses the same kernel image.
+
+State: reference chain was flashed for the comparison and the port's own chain restored
+afterwards; our chain flashed (2/2 hashes), `PROMPT OK`, preload verifying.
