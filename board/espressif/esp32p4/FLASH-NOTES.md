@@ -3700,3 +3700,39 @@ stays the only observation channel.
 Next: disassemble/read the loop at 0x480000A4 to confirm what it waits on, and
 if it is the second hart, implement the P4's core-1 start so both harts enter the
 kernel.
+
+## Round 101: the wait loop is inside `_start_kernel`, right after `fence.i`
+
+Resolved the stuck PC against the kernel ELF that matches this image
+(`/home/grieferpig/p4linux/build/esp32p4/linux/vmlinux`, entry 0x48400000). The
+Image has **no extra header offset**: its first word is the kernel's own entry
+jump, so Image offset N corresponds to vmlinux 0x48400000 + N.
+
+```
+48400000 <_start>:
+48400000: a045          j     484000a0 <_start_kernel>
+
+484000a0 <_start_kernel>:
+484000a0: 42a1          li    t0, 8
+484000a2: 3002b073      csrc  mstatus, t0        (0xa2..0xa5)
+484000a6: 0000100f      fence.i
+484000aa: 223d          jal   484001d8 <reset_regs>
+```
+
+The sampled PC 0x480000A4 is inside that prologue, immediately around the
+`csrc mstatus` / `fence.i` pair - i.e. the kernel is being entered correctly and
+stalls at its very first handful of instructions, not later in memory setup.
+With `mcause = 0` there is no trap; the hart simply does not advance.
+
+Two candidate reasons to check next:
+
+* `fence.i` on this part - the instruction-cache synchronisation it triggers may
+  not complete with the cache state this chain hands over (the reference's
+  U-Boot runs a `cleanup_before_linux()` before the jump, which this `p4boot`
+  path does not);
+* the same stale-L1-D-cache problem already proven for the window at
+  0x4800_0000, if `reset_regs` reads memory before the kernel takes over the
+  cache.
+
+So the picture is now: SPL -> PSRAM window -> kernel entry -> stalls in
+`_start_kernel`. Everything up to the kernel's own entry works.
