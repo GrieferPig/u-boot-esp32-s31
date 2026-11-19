@@ -1410,6 +1410,16 @@ static void psram_mmu_map(u32 size)
 	u32 entries = size >> 16;
 	u32 i;
 
+	/*
+	 * Page size for the PSRAM side of the MMU (MSPI2 + 0x384). Never
+	 * programmed before, which left the window correct only with the caches
+	 * off (the uncached path does not use this mapping) and wrong as soon as
+	 * the L2 was on. 0x13200004 is what the working reference holds, with
+	 * bits [4:3] = 2 selecting 64 KiB pages - the same geometry the flash
+	 * side is given in p4_spl_flash_init().
+	 */
+	writel(0x13200004u, (void *)(P4_MSPI2_BASE + 0x384));
+
 	for (i = 0; i < entries; i++) {
 		writel(i, (void *)(P4_MSPI2_BASE + 0x380));
 		writel(i | BIT(11) | BIT(10), (void *)(P4_MSPI2_BASE + 0x37c));
@@ -1432,6 +1442,7 @@ static void psram_rw_test(void)
 	}
 	p4_spl_early_puts("\n");
 }
+
 
 
 

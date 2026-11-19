@@ -53,6 +53,19 @@ void p4_spl_early_hex(u32 v);
 #define ROM_CACHE_EN_IC1		0x4fc004e4u
 #define ROM_CACHE_EN_DC			0x4fc004f4u
 #define ROM_CACHE_EN_L2			0x4fc00504u
+/*
+ * ROM Cache_Set_L2_Cache_Mode(cache_size_t, cache_ways_t, cache_line_size_t).
+ * IDF's cache_hal_init_l2_cache() calls it with the configured L2 geometry
+ * (components/hal/cache_hal.c); CACHE_SIZE_256K = 10 and CACHE_LINE_SIZE_64B = 3
+ * per esp32p4/rom/cache.h, matching CONFIG_CACHE_L2_CACHE_256KB and
+ * CONFIG_CACHE_L2_CACHE_LINE_64B. Without it the L2 is left in whatever mode
+ * the ROM set and accesses through it to the PSRAM window are dropped.
+ */
+#define ROM_CACHE_SET_L2_MODE		0x4fc003d4u
+#define P4_L2_SIZE_256K			10u
+#define P4_L2_WAYS			8u
+#define P4_L2_LINE_64B			3u
+#define P4_CACHE_MAP_L2			(1u << 5)
 
 #define CACHE_MAP_L1_ALL	0x3u	/* L1 icache | L1 dcache */
 
@@ -103,6 +116,11 @@ int p4_spl_flash_init(u32 size)
 	val &= ~MMU_PAGE_SIZE_MASK;
 	val |= MMU_PAGE_SIZE_64K;
 	writel(val, (void *)MMU_POWER_CTRL);
+
+	/* L2 geometry, then drop stale lines (IDF cache_hal_init_l2_cache()). */
+	((void (*)(u32, u32, u32))ROM_CACHE_SET_L2_MODE)(P4_L2_SIZE_256K, P4_L2_WAYS,
+							P4_L2_LINE_64B);
+	((rom_flags_fn)ROM_CACHE_INVALIDATE_ALL)(P4_CACHE_MAP_L2);
 
 	p4_spl_puts("tab ");
 	for (i = 0; i < P4_MMU_ENTRY_COUNT; i++)

@@ -3298,3 +3298,34 @@ State restored to the commit: boots to `esp32p4>`, `window: bad 0x00000000 of
 and PSRAM windows (the cache attributes / `HP_SYSTEM` cache config / PMA
 entries that map 0x4000_0000 and 0x4800_0000) rather than trying more copy
 placements.
+
+## Round 91: two missing cache/MMU initialisations from IDF, and what they did not fix
+
+Following AGENTS.md §11, compared the cache setup against IDF's `cache_hal`:
+
+1. **`Cache_Set_L2_Cache_Mode`** (ROM 0x4fc003d4) - IDF calls it in
+   `cache_hal_init_l2_cache()` (`components/hal/cache_hal.c`) as
+   `Cache_Set_L2_Cache_Mode(cache_size, 8, cache_line_size)`. Per
+   `esp32p4/rom/cache.h`: `CACHE_SIZE_256K = 10`, `CACHE_LINE_SIZE_64B = 3`,
+   which is exactly `CONFIG_CACHE_L2_CACHE_256KB` +
+   `CONFIG_CACHE_L2_CACHE_LINE_64B`. This port never called it, so the L2 kept
+   whatever geometry the ROM left. Added, together with an L2 invalidate,
+   before the L2 is enabled.
+2. **PSRAM MMU page size** (`MSPI2 + 0x384`). The flash side gets its page size
+   programmed in `p4_spl_flash_init()`, but the PSRAM side was never written.
+   The working reference holds `0x13200004` there (read live, bits [4:3] = 2 =
+   64 KiB pages, same as the flash MMU's `0x13200004`). Added to
+   `psram_mmu_map()` before the entries are written.
+
+Neither changed the symptom: the preload still reports
+`dtb dst 0x19030000 kern dst 0x00000002`, and the destination read-back is
+identical across every variant tried so far (with/without the writeback, with
+the L2 mode set, with the page size set). That the values are *the same
+regardless of what is written* is the important detail: the writes are not
+reaching the part at all while the caches are enabled, which is consistent with
+the earlier finding that every access to the window misbehaves only when the L2
+is on (with it off, the 4 KB pattern test passes).
+
+Both changes are kept: they are IDF-correct regardless, and they remove two
+real differences from the working configuration. Boot state unchanged
+(`window: bad 0x00000000 of 1024`, reaches `esp32p4>`).
