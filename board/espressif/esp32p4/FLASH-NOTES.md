@@ -3102,3 +3102,42 @@ IDF bootloader, which installs the MMU/PMA and the cache long before any
 application code runs. Replicating that means the cache/MMU bring-up has to be
 the very first thing in the SPL (before the stack is used), which the current
 U-Boot SPL entry flow does not give us without restructuring it.
+
+## Round 86: the PSRAM memory window works - it was the read latency all along
+
+With the real read latency (4) programmed in round 82, the cache-path read no
+longer truncates data. Verified end to end through the cacheable window:
+
+```
+window: bad 0x00000000 of 1024        (4 KB written and read back, all correct)
+```
+
+and at several offsets, including the ones p4load uses:
+
+```
+win 0x48000000=0xcafe0000   win 0x48400000=0xcafe0001
+win 0x48c00000=0xcafe0002   win 0x48f00000=0xcafe0003
+win 0x49000000=0xcafe0004
+```
+
+Two configuration choices are deliberate and both matter:
+
+* **8-line data phase**: the SRAM_CMD hex bits (26/27) are left clear. In
+  16-line mode *every* window read stalls, at every dummy setting including 0
+  (rounds 75 and 83). In 8-line mode with 4-byte AXI beats the controller
+  completes and returns the whole word, because the part is at its real
+  14-cycle latency.
+* **latency 4**, not 2: with latency 2 the same 8-line read returned only the
+  low 16 bits (`0x1111ffff` for `0x11111111`); with latency 4 it returns
+  `0x11111111`. This is the bug that has been chased since round 67 - the
+  trailing `0xffff` half was data phase truncation from sampling too early,
+  and the 16-line stall was the same mismatch with a shorter clock.
+
+Also swept `SMEM_DDR` variants (rd/wr data swap, variable dummy, tx mask) and
+every one returned the correct value, so none of those bits were involved.
+
+So the command path (MSPI3) and the memory window (MSPI2) both work now. What is
+left is p4load: it prints `p4load: start k=354c60 d=113d` and then hangs in the
+DTB copy loop. The destination is fine (0x48F00000 verified above), so the
+suspect is the source side - the flash address it reads from - or the long
+memcpy runs in that loop; that is the next thing to isolate.

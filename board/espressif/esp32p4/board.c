@@ -208,7 +208,14 @@ void hw_watchdog_reset(void)
 #define P4_DTB_SRC		0x40900000u
 #define P4_KERN_DST		0x48000000u
 #define P4_DTB_DST		0x48f00000u
-#define P4_NC_OFFSET		0x40000000u
+/*
+ * Copy through the plain cacheable window. The non-cacheable alias
+ * (0x8800_0000) is what earlier rounds used, but the window that is verified
+ * working end to end on this chain is 0x4800_0000 (the SPL's window check
+ * writes and reads it back), and no cache is enabled here anyway, so the
+ * alias buys nothing.
+ */
+#define P4_NC_OFFSET		0x00000000u
 #define P4_LOAD_CHUNK		0x1000u
 
 static int do_p4load(struct cmd_tbl *cmdtp, int flag, int argc,

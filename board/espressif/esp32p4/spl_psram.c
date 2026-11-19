@@ -1053,14 +1053,36 @@ static void psram_range_check(void)
  */
 
 
+/*
+ * Prove the cacheable window end to end: write a pattern through it and read
+ * it back through it. The chip runs 16-line but the controller is left in
+ * 8-line mode (no SRAM_CMD hex bits), which paired with the real read latency
+ * of 4 moves 4 bytes per AXI beat correctly - in 16-line mode every read
+ * stalls, and with the old latency of 2 the data came back truncated.
+ */
+/*
+ * Prove the cacheable window end to end: write a 4 KB pattern through it and
+ * read it back through it. The part reports a 14-cycle read latency, and with
+ * that latency programmed while the controller stays in 8-line mode the window
+ * moves 4 bytes per AXI beat correctly. In 16-line mode every window read
+ * stalls, and with the old latency-2 programming the data came back truncated,
+ * so both of those settings are deliberate here.
+ */
 static void psram_cache_check(void)
 {
-	u32 i;
+	u32 i, v, bad = 0;
 
-	for (i = 0; i < 16; i++)
-		writel(0xa5a50000u + i, (void *)(0x88200000 + i * 4));
+	for (i = 0; i < 1024; i++)
+		writel(0xa5a50000u + i, (void *)(0x48000000 + i * 4));
+	for (i = 0; i < 1024; i++) {
+		v = readl((void *)(0x48000000 + i * 4));
+		if (v != 0xa5a50000u + i)
+			bad++;
+	}
 
-	p4_spl_early_puts("axis: burst written\n");
+	p4_spl_early_puts("window: bad ");
+	p4_spl_early_hex(bad);
+	p4_spl_early_puts(" of 1024\n");
 }
 
 static void psram_bulk_test(void)
@@ -1483,7 +1505,6 @@ int p4_spl_psram_init(void)
 	psram_final_latency();
 	writel(0x00030103u, (void *)(P4_MSPI2_BASE + 0x14));
 
-	setbits_le32((void *)P4_SRAM_CMD, P4_CMD_SDIN_HEX | P4_CMD_SDOUT_HEX);
 	psram_cache_clocks_on();
 	psram_mmu_map(0x01000000);
 	setbits_le32((void *)P4_CACHE_FCTRL, BIT(0));
