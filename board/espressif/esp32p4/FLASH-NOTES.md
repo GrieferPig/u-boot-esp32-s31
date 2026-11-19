@@ -4082,3 +4082,52 @@ Next: get a coherent window view at handoff - either by filling the lines from t
 window with a *safe* mechanism (e.g. reading through the window what the alias just
 wrote, which only allocates read lines and cannot corrupt memory), or by entering
 the kernel at an address whose lines were never stale.
+
+## Round 111: why the window stays cached - the ROM's PMA entry 15 outranks ours
+
+Added `p4pma` (dumps all 16 PMA entries via `csrr 0xBC0+i / 0xBD0+i`) and read
+the table from the prompt:
+
+```
+pma[ 0] cfg cb00001d addr 127fffff
+pma[ 1] .. pma[14] cfg 08000000 addr 00000000      (disabled)
+pma[15] cfg c000001d addr 11ffffff
+```
+
+Decoding with the IDF field definitions (`PMA_EN`/`X`/`W`/`R`, `PMA_NONCACHEABLE`
+bit27, `PMA_WRITEMISSNOALLOC` bit25, `PMA_READMISSNOALLOC` bit24):
+
+* entry 0 is **this port's** entry: NAPOT, R/W/X, non-cacheable + no-allocate,
+  LOCK, base `0x12000000 << 2 = 0x48000000`, size 2^26 = 64 MiB - exactly PSRAM;
+* entry 15 is the **ROM's**: NAPOT, R/W/X, **cacheable**, base
+  `0x10000000 << 2 = 0x40000000`, size 2^28 = 256 MiB - the whole external window,
+  which contains PSRAM.
+
+The window behaves as cached, so on this part the **higher PMA index wins** and
+entry 15 overrides entry 0. That closes the question left open in round 110: the
+non-cacheable entry was programmed correctly but never had any effect.
+
+Also proved by direct experiment that the window view is not just stale cache but
+incoherent with the chip for writes:
+
+```
+mw.l 0x88f00000 deadbeef -> md.l 0x48f00000 = deadbeef      (alias write seen by window)
+mw.l 0x48e00000 cafef00d -> md.l 0x48e00000 = cafef00d
+                           md.l 0x88e00000 = 55555555      (window write NOT in memory)
+```
+
+So writes through the window stay in cache and never reach the part (no writeback
+happens for them), while reads can return those lines - the opposite of what a
+single coherent view would do, and the reason both bulk-write attempts corrupted
+the preload.
+
+Tried moving this port's entry to index 15 (overwriting the ROM's) so the whole
+window would be uncached: the SPL dies immediately
+(`P4TRAP cause=0x38000001 epc=0x236ee6fa`, then a load fault) - flash lives in the
+same window and the SPL's flash access breaks. Reverted, rebuilt, flashed, prompt
+verified, and entry 15 is back to the ROM's value.
+
+Next: leave the PMA alone and make the *data* coherent instead - either get a
+writeback of the window's dirty lines to actually happen (a `Cache_WriteBack_All`
+after a small window write can be checked directly with the alias), or fill the
+kernel's lines from a source that cannot corrupt memory.

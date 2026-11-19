@@ -308,6 +308,45 @@ static int do_p4bench(struct cmd_tbl *cmdtp, int flag, int argc,
 U_BOOT_CMD(p4bench, 3, 0, do_p4bench, "time reads from an address",
 	   "<addr> <words>");
 
+/*
+ * "p4pma" - dump the 16 PMA entries.
+ *
+ * The PMA decides whether the PSRAM window is cached, and the window behaves as
+ * cached no matter what this port writes there. These are the registers that
+ * show why: PMACFG(i) = 0xBC0 + i, PMAADDR(i) = 0xBD0 + i (IDF riscv/csr.h).
+ */
+#define PMA_SHOW(n) do {						\
+		u32 c, a;						\
+									\
+		asm volatile("csrr %0, %1" : "=r"(c) : "i"(0xBC0 + (n)));	\
+		asm volatile("csrr %0, %1" : "=r"(a) : "i"(0xBD0 + (n)));	\
+		printf("pma[%2d] cfg %08x addr %08x\n", n, c, a);		\
+	} while (0)
+
+static int do_p4pma(struct cmd_tbl *cmdtp, int flag, int argc,
+		    char *const argv[])
+{
+	PMA_SHOW(0);
+	PMA_SHOW(1);
+	PMA_SHOW(2);
+	PMA_SHOW(3);
+	PMA_SHOW(4);
+	PMA_SHOW(5);
+	PMA_SHOW(6);
+	PMA_SHOW(7);
+	PMA_SHOW(8);
+	PMA_SHOW(9);
+	PMA_SHOW(10);
+	PMA_SHOW(11);
+	PMA_SHOW(12);
+	PMA_SHOW(13);
+	PMA_SHOW(14);
+	PMA_SHOW(15);
+	return CMD_RET_SUCCESS;
+}
+
+U_BOOT_CMD(p4pma, 1, 0, do_p4pma, "dump the PMA entries", "");
+
 static int do_p4boot(struct cmd_tbl *cmdtp, int flag, int argc,
 		     char *const argv[])
 {
