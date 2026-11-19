@@ -3914,3 +3914,39 @@ offset 0xA0 is `_start_kernel` and `p4boot`'s jump to 0x48000000 is correct.
 Next: single-step over the individual CSR writes at 0xA4.. using the debugger
 (write one step per halt so the reported PC is meaningful) and find which of them
 stops the hart, comparing the CSR state the reference chain leaves behind.
+
+## Round 107: the hart never executes past the first CSR write at 0xA0
+
+Two methodology findings and one measurement.
+
+**Leftover hardware breakpoints survive a debugger restart.** The "loop" seen in
+round 105 was partly an artifact: `resume` came back with
+`debug_reason=00000001` (breakpoint) at exactly 0x480000A0 - the hardware
+trigger set in round 34 is a CPU register and outlives the OpenOCD process. The
+breakpoints were removed (`rbp 0x480000a0`, `0x480000a6`, `0x480000ac`), after
+which `halt` reports `debug_reason=00000000` at PC=0x480000A4. Always clear
+hardware triggers before interpreting a PC that keeps coming back.
+
+**The kernel has not executed past 0xA0.** The counter CSRs that `_start_kernel`
+writes immediately after `csrci mstatus, 8` still hold their reset values:
+
+```
+mcounteren     = 0x00000007     (head.S writes 0x2307)
+mcountinhibit  = 0x00000000     (head.S writes 5)
+mhartid        = 0x00000000
+pc             = 0x480000A4
+```
+
+So the hart has done `csrci mstatus, 8` and nothing after it - consistent with
+the step result `0xA4 -> 0xA0`, i.e. the instruction at 0xA4 in the loaded image
+is not the `li t0, 0x2307` that head.S shows next. The image on the card and the
+kernel tree's head.S are therefore not the same source revision, which also
+explains why byte-level disassembly attempts kept disagreeing with the source.
+
+Also tried (and reverted, since it changed nothing) invalidating only the L1
+I-caches after the SPL's alias copy, in case an instruction-cache line still held
+pre-copy bytes for the kernel entry; the hart's behaviour was identical.
+
+Next: identify the kernel revision actually flashed (build id / strings from the
+Image around the entry, or the payload directory's build logs) and read *its*
+entry code, instead of continuing to compare against a head.S that does not match.
