@@ -4739,3 +4739,47 @@ missing write-back is in the cache path, not in MR4 - which is consistent with r
 123's conclusion that the cache path's timing is calibrated for 16 lines.
 
 State: our chain flashed (2/2 hashes), at the `esp32p4>` prompt.
+
+## Round 125: the register *write* path also breaks in 16-line mode
+
+Round 124 made MR4 explicit, which removed the reason earlier 16-line attempts
+failed (a garbled MR4 readback being merged back). So 16-line mode was re-tried with
+that gone, establishing `SDIN_HEX | SDOUT_HEX` in `psram_axi_config()` so the whole
+rest of the init runs at 16 lines:
+
+```
+lat: mr0 0x00000000 mr4 0x00007755      (readback after psram_final_latency)
+```
+
+Still garbled. `psram_final_latency()` re-reads MR4 before writing it, so the read was
+removed as well - it now starts from `PSRAM_MR4_KNOWN_GOOD` and only sets the write
+latency field:
+
+```
+lat: mr0 0x00001111 mr4 0x00008d30      (readback; the two values are transposed noise)
+```
+
+MR0 comes back as 0x1111 and MR4 as 0x8d30 - the *values are still scrambled*, with
+MR0's bits appearing where MR4's should be. That is not a read problem any more: MR0
+is written by `psram_mode_reg_write()` as an 8-bit register over a 16-bit data phase
+(`psram_xact(0xC0C0, 0x0, &w, 16, ...)`), and in 16-line mode that transfer no longer
+addresses the register the way the write intends.
+
+So the conclusion from round 54 is confirmed from the other side: it is not the mode
+register *reads* that have to be made 16-line-aware, it is the **register transfers
+themselves**. Both register directions have to be re-derived for a 4-bytes-per-clock
+data phase before 16-line mode can be established at all - only then can the cache
+path, which is what actually needs 16 lines, be switched over.
+
+Reverted. Verified state: `PROMPT OK` with
+
+```
+mode: mr0 0x00008d30 mr4 0x000080df mr8 0x0000054b   (first read)
+lat:  mr0 0x00008d30 mr4 0x0000014b                   (after the init wrote MR4)
+```
+
+i.e. the round 124 MR4 fix is working and is what the tree keeps.
+
+Practical note: `write_flash` failed with zero verified hashes twice this round and
+succeeded when repeated alone; check the hash count before reading anything into a
+boot log (round 120 recorded the same trap).
