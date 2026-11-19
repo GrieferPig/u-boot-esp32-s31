@@ -739,12 +739,16 @@ static void psram_probe(void)
 	p4_spl_early_puts("\n");
 
 	/*
-	 * Command-mode transactions must run at a slow bus clock: the S31 port
-	 * uses MPLL/20 (~20 MHz) for its register accesses, and the replay
-	 * leaves CLOCK at divider 1 (full speed), where the dummy window is far
-	 * too short for a register read.
+	 * Command-mode transactions run at the IDF point (MPLL/4 = 80 MHz, the
+	 * same divider MSPI2 uses), not MPLL/20. IDF issues every mode-register
+	 * access at full bus speed with 8 dummy bits (s_config_mspi_for_psram +
+	 * s_init_psram_mode_reg) and the part reads back correct values; at
+	 * MPLL/20 the reads come back bit-shifted (0x15555557 vs 0x5555D450)
+	 * and inconsistent across reads (MR0 0x8D08 vs 0x8D30), as if the
+	 * device-side DLL never locks at the slow clock. 0x00030103 encodes the
+	 * same MPLL source as 0x00130913 with /4 instead of /20.
 	 */
-	writel(0x00130913u, (void *)(P4_MSPI3_BASE + 0x14));
+	writel(0x00030103u, (void *)(P4_MSPI3_BASE + 0x14));
 	writel(0x00130913u, (void *)(P4_MSPI2_BASE + 0x14));
 	psram_pin_mux_init();
 	psram_opi_dtr_mode();

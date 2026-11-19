@@ -5987,3 +5987,23 @@ sctrl 0x02F7C679, kernel runs to /init start.
   OPI_HEX_DTR hangs, MSPI2 hex reads 0xffff00ff = upper lines undriven).
   The command path (shifted reads: 0x15555557 vs 0x5555D450, MR0 0x8D08 vs
   0x8D30 across reads) is the next root item per the round goal.
+
+## Round 8 (2026-11-19): MSPI3 at 80MHz tested; reads are noisy, keep IDF point
+
+- Set MSPI3 command clock to MPLL/4 (0x00030103, same as MSPI2) instead of
+  MPLL/20: IDF issues all mode-reg accesses at full 80 MHz with 8 dummies.
+  Boot still works (cache fine, prompt reached), but reads did NOT become
+  correct - they changed shape (wordtest 0x55575155/0xD4501555 vs
+  0x35555557/0x5555D450; MR readbacks 0x8530/0x0320/0x100B vs
+  0x8D30/0x0B40/0x300B). Keeping 80 MHz (IDF-aligned, verified safe); the
+  slow clock is not the fix.
+- Reads are NOISY per transaction (MR0 0x8D08 probe vs 0x8D30 init vs 0x8530
+  final; dummy sweep 8-28 all identical 0x8D08 while addresses decode
+  distinctly), not just shifted. ROM mode 7 is OPI_DTR = 8-line DDR
+  (esp_rom_spiflash.h; 12 is the 16-line HEX that hangs), matching our
+  8-line device - so not a line-mode mismatch. Points to MSPI3 RX sample
+  timing (never tuned; ROM defaults) as the next item: same DIN/dummy sweep
+  on the MSPI3 RX regs.
+- Mode verified list: cmd 0x4040, mode OPI_DTR, cs 1<<1, addr 32-bit all match
+  IDF s_init_psram_mode_reg exactly; only the clock differed (now matched)
+  and MR8 bit length (IDF reads MR8 as 8-bit, we read 16-bit).
