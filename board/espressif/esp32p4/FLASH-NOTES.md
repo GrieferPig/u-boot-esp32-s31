@@ -5442,3 +5442,45 @@ dummy-cycle or DLL problem, and it needs the 16-line byte/line mapping worked ou
 
 State: 8-line, our chain flashed (2/2 hashes), `PROMPT OK`, preload byte-exact, DLL delay
 programmed.
+
+## Round 141: TRM does not cover the hex path; IDF's enable set is already complete here
+
+Downloaded the P4 TRM (v1.0, 24 MB) per AGENTS.md section 4 and searched it for the 16-line
+data phase: **"TRM 未覆盖"**. The manual mentions PSRAM 76 times in total and documents no
+`SPI_MEM_S_*` register, no `SRAM_CMD`, no `SDIN_HEX`/`SDOUT_HEX`, and no hex/16-line mode at
+all - this TRM predates that part variant, so there is no manual basis for the byte/line
+mapping and the mapping has to come from IDF plus measurement.
+
+Then read `s_config_mspi_for_psram()` (`esp_psram_impl_ap_hex.c`) for the enables this port
+might be missing, and checked each one bit by bit against the live values:
+
+| IDF call | bit | this port |
+| --- | --- | --- |
+| `enable_4byte_addr` | `CACHE_SCTRL[0]` | set (0x01F7C479 bit 0 = 1) |
+| `enable_oct_line_mode` | `CACHE_SCTRL[21]`, `SRAM_CMD[18..21]` | set (both bits 1) |
+| `enable_wr_dummy_level_control` | `SRAM_CMD[23]` | set (0x8CFC0000 bit 23 = 1) |
+| `enable_hex_data_line_mode` | `SRAM_CMD[26..27]` | set when 16-line is enabled |
+| `enable_ddr_mode` | `SMEM_DDR[0]` | set (0x3023) |
+| `enable_wr/rd_splice`, `enable_axi_access` | `CTRL1[26]`, `[25]`, `FCTRL[0]` | set |
+
+Decoding the two `CACHE_SCTRL` values bit by bit settles the question: `0x01F7C479` vs the
+reference `0x02F7C679` differ **only inside the two dummy-cycle fields** -
+`SRAM_RDUMMY_CYCLELEN` (17 vs 25) and `SRAM_WDUMMY_CYCLELEN` (7 vs 11). Bits 0 (4-byte
+address) and 21 (oct line mode) are identical, so nothing is missing from the enable set; the
+one remaining difference is the dummy timing itself, and both candidate values have been
+tried (18/8 keeps writes dead in 8-line; 26/12 with 16-line corrupts them).
+
+Measured in 16-line mode this round, clearing four words to zero through the **alias** and then
+reading them back:
+
+```
+md.l 0x88e00000 4  ->  ffff00ff ffffffff ffff00ff ffffffff
+```
+
+i.e. even an alias write of zeros reads back as 0xFF in every byte except one, repeated per
+8 bytes. That is byte-level transport corruption in the 16-line data phase, and with the
+enable set proven complete and the TRM silent, the remaining lever is the dummy/beat
+alignment - which needs a finer instrument than whole-word reads (single-byte stores at
+consecutive offsets) to see which of the 16 lines carries which byte.
+
+State: 8-line, our chain flashed (2/2 hashes), `PROMPT OK`, preload byte-exact.
