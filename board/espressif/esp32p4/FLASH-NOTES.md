@@ -3996,3 +3996,41 @@ Next: measure where the fetch latency is coming from - read the PSRAM/MSPI2 mode
 registers and the cache configuration as U-Boot leaves them and compare against
 the reference chain's values at the same point, then fix the handoff state rather
 than the kernel.
+
+## Round 109: the memory paths are healthy - it is the fetch at 0xA4 itself
+
+Built `p4bench <addr> <words>` (board command, reads N words and reports mcycle
+per word) and measured the three paths in the same units:
+
+```
+p4bench 4ff00000 4096 ->  63534 cycles,  15 cycles/word   (SRAM)
+p4bench 88000000 4096 -> 524324 cycles, 128 cycles/word   (PSRAM alias, uncached)
+p4bench 48000000 4096 -> 122394 cycles,  29 cycles/word   (PSRAM window)
+```
+
+So data access is healthy everywhere: the window is faster than the uncached
+alias, as it should be. And this same U-Boot retires **~196M instructions in 2 s
+(~98 MIPS)** from SRAM, measured with `minstret`.
+
+Against that, the kernel from PSRAM retires ~15-50 instructions per second and
+sits at 0xA4 forever. Things ruled out this round:
+
+* **not a trap loop** - a hardware breakpoint on `mtvec` (0x4ff00243) is never
+  hit, and `mcause`/`mepc`/`mtval` read 0 at every halt;
+* **not the PMA non-cacheable entry** - with `psram_pma_non_cacheable()` disabled
+  it still crawls (68 instructions in ~5 s), and the entry was restored after;
+* **not the compressed-instruction mode** - `misa = 0x40901125`, so bit 2 (C) is
+  set and RVC is available;
+* **not general PSRAM execution slowness** - moving the PC directly to 0xBE makes
+  the hart run at full speed afterwards (~900M instructions retired), i.e. this
+  PSRAM can execute this kernel quickly.
+
+So the pathology is tied to arriving at 0xA4 from `csrci mstatus,8` at 0xA0 - the
+boundary between a 4-byte instruction and the first 2-byte compressed one. The
+hart also ended that experiment halted with `Halt cause (2) - Illegal
+Instruction` at a U-Boot address (0x4FF16124), which is the next thread to pull:
+whether the first compressed instruction after a 4-byte one is being decoded from
+a stale/partial fetch.
+
+`p4bench` is temporary instrumentation and should be removed once the handoff is
+fixed (tracked with the other cleanup).

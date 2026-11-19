@@ -253,6 +253,61 @@ void hw_watchdog_reset(void)
 #define P4_KERN_RUN		0x48000000u
 #define P4_DTB_RUN		0x48600000u
 
+/*
+ * "p4bench <addr> <words>" - time a run of reads.
+ *
+ * Executing the kernel from the PSRAM window runs at roughly 50 instructions
+ * per second while this same U-Boot retires ~100M instructions/s from SRAM, so
+ * the fetch path into PSRAM is what needs measuring. Reading through the window,
+ * through the uncached alias and from SRAM in the same units (mcycle) shows
+ * whether the slowness is the window mapping itself or the memory behind it.
+ */
+static u64 p4_cycles(void)
+{
+	u32 lo, hi, hi2;
+
+	do {
+		asm volatile("csrr %0, mcycleh" : "=r"(hi));
+		asm volatile("csrr %0, mcycle" : "=r"(lo));
+		asm volatile("csrr %0, mcycleh" : "=r"(hi2));
+	} while (hi != hi2);
+
+	return ((u64)hi << 32) | lo;
+}
+
+static int do_p4bench(struct cmd_tbl *cmdtp, int flag, int argc,
+		      char *const argv[])
+{
+	ulong addr, cnt, i;
+	volatile u32 sum = 0;
+	u64 t0, t1;
+	u32 delta, per;
+
+	if (argc < 3)
+		return CMD_RET_USAGE;
+
+	addr = simple_strtoul(argv[1], NULL, 16);
+	cnt = simple_strtoul(argv[2], NULL, 16);
+
+	t0 = p4_cycles();
+	for (i = 0; i < cnt; i++)
+		sum += readl((const void *)(addr + i * 4));
+	t1 = p4_cycles();
+
+	/* 32-bit arithmetic only: a u64 division here links libgcc's __udivdi3,
+	 * which does not relocate in this configuration. */
+	delta = (u32)(t1 - t0);
+	per = cnt ? delta / (u32)cnt : 0;
+
+	printf("p4bench: %lu words @ %08lx: %u cycles, %u cycles/word (sum %08x)\n",
+	       cnt, addr, delta, per, sum);
+
+	return CMD_RET_SUCCESS;
+}
+
+U_BOOT_CMD(p4bench, 3, 0, do_p4bench, "time reads from an address",
+	   "<addr> <words>");
+
 static int do_p4boot(struct cmd_tbl *cmdtp, int flag, int argc,
 		     char *const argv[])
 {
