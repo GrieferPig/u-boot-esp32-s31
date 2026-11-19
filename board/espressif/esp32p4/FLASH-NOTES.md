@@ -3490,3 +3490,45 @@ window uncached - that hangs the SPL itself, so it is not a viable route.
 State: preload through the alias, DTB at 6 MiB, `booti 0x88000000 - 0x88600000`
 reaches FDT setup. Next: instrument `image_setup_linux()` / `image_setup_libfdt()`
 to see which of its steps returns non-zero.
+
+## Round 96: FDT relocation was the blocker, and the next wall is a NULL dereference
+
+Read `image_setup_linux()` (`boot/image-board.c`) and `boot_relocate_fdt()`
+(`boot/image-fdt.c`) instead of guessing, and caught the message the earlier
+filter had hidden:
+
+```
+   Booting using the fdt blob at 0x88600000
+device tree - allocation error
+FDT creation failed! hanging...
+```
+
+So `lmb_alloc_base()` could not place the relocated FDT. The reason is this
+port's own `dram_init()`: with `CONFIG_ESP32P4_SRAM_ONLY` the single DRAM bank is
+the SRAM (`P4_SRAM_MID_BASE`), which the running U-Boot already fills, so there
+is nowhere to put the FDT.
+
+Setting `fdt_high=ffffffff` makes `boot_relocate_fdt()` use the FDT in place and
+gets past that step:
+
+```
+esp32p4> setenv fdt_high ffffffff
+esp32p4> booti 0x88000000 - 0x88600000
+## Flattened Device Tree blob at 88600000
+   Booting using the fdt blob at 0x88600000
+   Using Device Tree in place at 88600000, end 8860413c
+Working FDT set to 88600000
+Unhandled exception code: 939524101        (load access fault)
+EPC: 4ff17814  RA: 4ff00376  TVAL: 00000094
+```
+
+`TVAL = 0x94` is a NULL pointer plus a 0x94 struct offset, hit inside U-Boot
+(EPC in the SRAM image) right after the in-place FDT setup - i.e. in one of the
+board/arch fixups that run on the blob, not in the kernel handoff (no
+"Starting kernel ..." yet).
+
+Next: resolve EPC 0x4ff17814 against the U-Boot ELF to name the function, then
+look at what pointer it is dereferencing (the `0x94` offset suggests a struct
+field on a NULL `gd->bd` or a device). The `fdt_high` workaround also needs to
+become a proper fix in `dram_init()` - the DRAM bank should describe PSRAM so the
+relocation has somewhere real to go.
