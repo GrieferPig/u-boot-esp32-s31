@@ -5523,3 +5523,51 @@ PSRAM bring-up function-for-function from IDF**, whose complete call list is now
 141). That also settles the bit-length bookkeeping by construction instead of by inference.
 
 State: 8-line, our chain flashed (2/2 hashes), `PROMPT OK`, preload byte-exact.
+
+## Round 143: IDF's whole LL configuration decoded and matched, and its last ordering step applied
+
+Decoded every remaining `psram_ctrlr_ll_*` function that `s_config_mspi_for_psram()` uses, so
+the register programming can be compared against IDF field by field instead of by value:
+
+| IDF call | registers / fields |
+| --- | --- |
+| `set_wr_cmd` | `CACHE_SCTRL[20]` = 1, `SRAM_DWR_CMD.bitlen` = bitlen-1, `.value` = cmd |
+| `set_rd_cmd` | `CACHE_SCTRL[5]` = 1, `SRAM_DRD_CMD.bitlen` = bitlen-1, `.value` = cmd |
+| `set_addr_bitlen` | `CACHE_SCTRL.SRAM_ADDR_BITLEN` = bitlen-1 |
+| `set_wr_dummy` | `CACHE_SCTRL[3]` = 1, `WDUMMY_CYCLELEN` = dummy_bits-1 |
+| `set_rd_dummy` | `CACHE_SCTRL[4]` = 1, `RDUMMY_CYCLELEN` = dummy_bits-1 |
+| `enable_4byte_addr` | `CACHE_SCTRL[0]` |
+| `enable_oct_line_mode` | `CACHE_SCTRL[21]`, `SRAM_CMD[18..21]` |
+| `enable_hex_data_line_mode` | `SRAM_CMD[26..27]` |
+| `enable_wr_dummy_level_control` | `SRAM_CMD[23]` |
+| `enable_variable_dummy` | `SMEM_DDR[1]` |
+| `enable_ddr_mode` | `SMEM_DDR[0]` |
+| `enable_ddr_wr/rd_data_swap` | `SMEM_DDR[3]` / `[2]` (both off) |
+| `enable_axi_access` | `FCTRL[0]` = 1 **and `FCTRL[1]` (close_axi_inf_en) = 0** |
+| `enable_wr/rd_splice` | `CTRL1[26]` / `[25]` |
+| `enable_split_trans` | `SMEM_AC.split_trans_en` (0x1a0) |
+| `set_page_size(2048)` | `SMEM_ECC_CTRL.page_size` (0x174) |
+| `enable_dll` | `SMEM_TIMING_CALI.dll_timing_cali` (0x190) |
+
+Every one of these already matches in this port - checked live: `SMEM_ECC_CTRL` = 0x000C0000,
+`SMEM_TIMING_CALI` = 0x00000021 (bit 0, DLL calibration, set), `SMEM_AC` = 0x8400B18F,
+`CACHE_SCTRL` differs from the reference only inside the two dummy fields. So the
+configuration is not the gap; the sequence is.
+
+Applied the one ordering difference that IDF's own code makes explicit
+(`esp_psram_impl_enable()`): `enable_ddr_mode()` happens inside
+`s_config_mspi_for_psram()`, while `enable_variable_dummy()` is the **last** call in the
+function, after `mspi_timing_psram_tuning()`. This port had both bits set in the middle of
+`psram_axi_config()`. Split accordingly: `SMEM_DDR[0]` in the config, `SMEM_DDR[1]` after the
+tuning.
+
+Verified: `PROMPT OK`, `cmp 0x00000038 src 0x05435352 dst 0x05435352`, and the window store is
+still absorbed (`88e00000: ffffffff`) - the ordering change is neutral for the 8-line path.
+
+This closes the register/sequence comparison against IDF: configuration matches field for
+field, ordering now matches in every step the source spells out, and the cached window still
+does not accept stores. What is left unverified is the *timing* content of IDF's
+`mspi_timing_psram_tuning()` and `mspi_timing_ll_*` (DQS/tap calibration), which this port
+replaces with its own tuner that reports "tune: low-clock reference failed".
+
+State: 8-line, our chain flashed (2/2 hashes), `PROMPT OK`, preload byte-exact.

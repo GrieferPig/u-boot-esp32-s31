@@ -936,7 +936,13 @@ static void psram_axi_config(void)
 	 * and bit 5 (outminbytelen) must stay set, otherwise the DDR data
 	 * placement is wrong. Only set ddr_en and var_dummy.
 	 */
-	setbits_le32((void *)P4_DDR_AXI, BIT(0) | BIT(1));
+	/*
+	 * IDF enables DDR mode here and variable-dummy only AFTER
+	 * mspi_timing_psram_tuning() (esp_psram_impl_enable(): s_config_mspi_for_psram()
+	 * calls enable_ddr_mode(), and enable_variable_dummy() is the last call after
+	 * the tuning). Split them accordingly.
+	 */
+	setbits_le32((void *)P4_DDR_AXI, BIT(0));
 
 	/* AXI stays closed until the MMU is programmed. */
 	clrbits_le32((void *)P4_CACHE_FCTRL, BIT(31));
@@ -1612,6 +1618,9 @@ int p4_spl_psram_init(void)
 	clrbits_le32((void *)P4_CACHE_FCTRL, BIT(0));
 	psram_word_test();
 	psram_timing_tune();
+
+	/* IDF's last init step: variable dummy, once the tuning has settled. */
+	setbits_le32((void *)P4_DDR_AXI, BIT(1));
 
 	/*
 	 * Now that the command path is no longer needed, put the cache
