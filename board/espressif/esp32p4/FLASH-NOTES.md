@@ -4512,3 +4512,53 @@ State: port tree at the last verified commit, rebuilt, flashed and at the prompt
 Next: bring the rest of `s_config_mspi_for_psram()` across *before* turning the hex
 bits on - variable dummy, write-dummy level control, DDR swaps, and especially the
 wr/rd splice enables - then enable 16-line mode as the last step.
+
+## Round 120: everything else in s_config_mspi_for_psram already matches, and a correction
+
+**The remaining pieces of IDF's config are already in place.** Checked each one
+against `psram_ctrlr_ll.h` and the register header:
+
+| IDF call | register | this port |
+| --- | --- | --- |
+| `enable_wr_splice` / `enable_rd_splice` | `SPI_MEM_S_CTRL1_REG` (0x0c) bits 26 / 25 | set - CTRL1 reads 0x2EE00000, both bits on, identical to the reference |
+| `enable_ddr_mode` | `SPI_MEM_S_SMEM_DDR_REG` (0xd8) bit 0 | set - 0x3023 |
+| `enable_variable_dummy` | same, bit 1 | set - 0x3023 |
+| `enable_ddr_wr/rd_data_swap(false)` | same, bits 3 / 2 | clear - 0x3023 ✓ |
+| `enable_wr_dummy_level_control` | `SRAM_CMD` bit 23 | set |
+| 16 data pins muxed | 0x500E121C..0x500E1268 | all 20 registers programmed |
+
+So the whole of `s_config_mspi_for_psram()` is matched, and the **only** difference
+from the reference remains `SDIN_HEX | SDOUT_HEX`. That makes the crash on enabling
+them more interesting, not less: 16-line mode is not a configuration mismatch in
+these registers.
+
+**Correction to rounds 116/117.** Both of those rounds treated
+
+```
+wordtest wrote 0x00000001 read80 0xffffffff read84 0xffffffff
+tune: low-clock reference failed
+```
+
+as evidence that PSRAM reads were failing. They are not. The init deliberately
+closes the AXI port before those steps:
+
+```c
+clrbits_le32((void *)P4_CACHE_FCTRL, BIT(0));   /* "close it again for the tuning" */
+psram_word_test();
+psram_timing_tune();
+```
+
+With the port closed the window cannot be reached at all, so `0xffffffff` from the
+word test and the tuner's failure are **expected outcomes**, not chip faults. The
+failing "self-healing" observations from those rounds still stand (a bad MR4 does
+survive into the next boot), but "the tuner has never calibrated" was an over-read:
+it is not supposed to succeed with the port shut.
+
+**Practical pitfall that cost time this round:** a `write_flash` that prints no
+`Hash of data verified` line silently leaves the previous image in flash - the board
+kept running a build whose message was no longer in the file on disk, and a
+`read_flash` read-back was needed to see it. Always check the hash count, or read
+back, before drawing conclusions from a boot log.
+
+State: port tree at the last verified commit, rebuilt, flashed (hash verified,
+read-back confirmed) and at the `esp32p4>` prompt.
