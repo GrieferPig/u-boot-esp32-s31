@@ -3532,3 +3532,46 @@ look at what pointer it is dereferencing (the `0x94` offset suggests a struct
 field on a NULL `gd->bd` or a device). The `fdt_high` workaround also needs to
 become a proper fix in `dram_init()` - the DRAM bank should describe PSRAM so the
 relocation has somewhere real to go.
+
+## Round 97: FDT relocation fixed with a real PSRAM bank; the fault is in U-Boot before the jump
+
+Two things this round.
+
+**1. The faulting function, resolved against the ELF**
+(`/tmp/p4-sram/u-boot`, `riscv32-esp-elf-addr2line`):
+
+```
+0x4ff17814  printf            lib/vsprintf.c:816
+0x4ff00376  announce_and_cleanup  arch/riscv/lib/bootm.c:53
+```
+
+So the crash is not in the FDT fixups at all - it is `announce_and_cleanup()`
+(the function that prints "Starting kernel ..." and then quiesces devices), and
+the faulting instruction is inside `printf`. `TVAL = 0x94` is a NULL-based
+struct access, consistent with the console device pointer having become invalid.
+
+**2. `dram_init_banksize()` now reports PSRAM as a second bank.** The SRAM bank
+is fully occupied by the running image, which is why `boot_relocate_fdt()` could
+not place the FDT ("device tree - allocation error"). With PSRAM described as a
+bank, the FDT relocates properly:
+
+```
+esp32p4> setenv fdt_high 48e00000
+esp32p4> booti 0x88000000 - 0x88600000
+## Flattened Device Tree blob at 88600000
+   Booting using the fdt blob at 0x88600000
+   Loading Device Tree to 48dfb000, end 48dff13c ... OK
+Working FDT set to 48dfb000
+Unhandled exception code: 939524101
+EPC: 4ff17830 RA: 4ff00376 TVAL: 00000094
+```
+
+`DRAM:` also now reports `768 KiB (effective 16.8 MiB)`, i.e. the extra bank is
+visible. Everything up to and including the FDT relocation and fixups succeeds;
+the very first output of `announce_and_cleanup()` faults, so the handoff line is
+never reached.
+
+Next: find why the console/gd state is bad at that exact point - the two
+candidates are the device-model teardown that `announce_and_cleanup()` performs
+(`board_quiesce_devices`, `dm_remove_devices_flags(DM_REMOVE_ACTIVE_ALL)`) and a
+corrupted `gd`; the `0x94` offset should identify which structure is being read.

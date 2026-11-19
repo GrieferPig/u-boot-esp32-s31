@@ -55,6 +55,18 @@ int dram_init_banksize(void)
 {
 	gd->bd->bi_dram[0].start = gd->ram_base;
 	gd->bd->bi_dram[0].size = gd->ram_size;
+
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+	/*
+	 * U-Boot itself lives in SRAM, but the kernel's memory - and therefore
+	 * the only place a bootm FDT relocation or kernel payload can be placed -
+	 * is PSRAM. Report that as a second bank so boot_relocate_fdt() has real
+	 * memory to target instead of failing with "device tree - allocation
+	 * error" (the SRAM bank is fully occupied by the running image).
+	 */
+	gd->bd->bi_dram[1].start = 0x48000000;
+	gd->bd->bi_dram[1].size = 0x01000000;	/* 16 MiB PSRAM window */
+#endif
 	return 0;
 }
 
