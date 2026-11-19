@@ -5922,3 +5922,23 @@ sctrl 0x02F7C679, kernel runs to /init start.
   uptime; the USB-serial bridge also degrades over long sessions (deaf periods,
   repeated-line floods) independent of SoC state. Re-verify on a cool board
   before trusting new U-Boot crash addresses.
+
+## Round 5 (2026-11-19): reference userspace reaches a shell, ours dies in init
+
+- Pivotal comparison: the reference chain boots the SAME kernel+rootfs to a
+  working root shell (`~ #`, `P4_ABI ... PASS`, no faults), while our chain
+  (same Image/DTB bytes from flash) dies in init with a wild jump into "bin/".
+  The rootfs is exonerated; the difference is firmware/handoff state.
+- Second userspace sample (fresh boot, fresh SPL copy): init[48] faults
+  identically to init[34] (epc=ra=0x2F6E6962 cause 1, same ASCII s0/s1/s2,
+  same sp 0x48BF4E00; only PID and heap pointers differ). Same epc across
+  boots rules out random copy flips; the fault is deterministic in structure.
+- Firmware/handoff differences under suspicion: (a) hart1 ROM-parked (ours)
+  vs IDF-managed (reference) - a ROM mailbox/IPI-ack write into PSRAM would
+  corrupt deterministically; (b) DTB address (ours 0x48600000 allocatable vs
+  reference 0x48F00000 reserved); (c) SPL copy flips (disfavored by
+  determinism). Next: hart1 canary test (fill userspace-area canaries from
+  the prompt with hart1 parked, wait, verify) - blocked this round by a dead
+  serial bridge (repeated 0-char captures); retry on a fresh session.
+- Serial bridge degradation (deaf spells, truncated captures, repeat floods)
+  worsened across the session and is host-side, independent of SoC faults.
