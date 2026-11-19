@@ -4861,3 +4861,54 @@ by the previous 52 s capture. That helper needs a fix before the read-back evide
 be produced, and that is the first thing to do next.
 
 State: our chain flashed (2/2 hashes) and at the `esp32p4>` prompt.
+
+## Round 128: the round 47 dummy alignment broke the PSRAM write path - bisected and reverted
+
+Started from a boot whose own preload verification was failing:
+
+```
+cmp 0x00000000 src 0x0000a045 dst 0x00000000
+cmp 0x00000038 src 0x05435352 dst 0xffffffff
+```
+
+i.e. the SPL copied the kernel into PSRAM through the (verified byte-faithful) alias and
+the part did not take it. A direct alias write confirmed it independently:
+
+```
+mw.l 0x88e00000 0xdeadbeef 1
+md.l 0x88e00000 1        -> 88e00000: ffffffff
+```
+
+The write path was dead in this build. It is **not** the MR4 change from round 124:
+reverting that alone changed nothing.
+
+Bisected `spl_psram.c` by restoring it from `7ea7c8c669` (the commit before round 47's
+"align the cache-path dummy cycles with the 200 MHz IDF set"). The same boot then
+verifies cleanly:
+
+```
+cmp 0x00000000 src 0x0000a045 dst 0x0000a045
+cmp 0x00000038 src 0x05435352 dst 0x05435352
+```
+
+So **round 47's change is what broke the write path**:
+`P4_PSRAM_CACHE_RD_DUMMY` 18 -> `2*(14-1)` and `P4_PSRAM_WR_DUMMY` `2*(5-1)` -> `2*(7-1)`.
+Matching the reference's `SPI_MEM_S_CACHE_SCTRL` field values was the wrong move for this
+part: the values this port runs correctly are its own, and copying the reference's dummy
+numbers silently disabled every PSRAM write while leaving reads working, which is exactly
+the kind of failure that looks like "the cache never writes back".
+
+That invalidates the *interpretation* of several rounds (48-59 were largely measured on
+this broken build), so those conclusions have to be re-derived on top of the restored
+write path. Two of them were re-measured immediately and still hold:
+
+* a **window** store at 0x48e00000 still does not reach the part (the alias keeps reading
+  0xFFFFFFFF) - on the restored build, so the cached window really is write-absorbing;
+* the **alias** store does reach the part, which is why the preload verifies.
+
+State: `spl_psram.c` restored to `7ea7c8c669`; our chain flashed (2/2 hashes), `PROMPT OK`,
+preload verification matching.
+
+Next: re-apply the MR4 explicit write (it is still the right idea for a self-healing init)
+*on top of* the restored dummy values and re-verify the preload after it, rather than
+assuming it is harmless because it built and reached the prompt.

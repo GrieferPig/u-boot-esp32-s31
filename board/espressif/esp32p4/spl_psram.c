@@ -129,12 +129,6 @@ typedef void (*rom_cmd_start_fn)(int spi_num, u8 *rx_buf, u16 rx_len,
 #define PSRAM_REG_CMD_BITS	16
 #define PSRAM_REG_ADDR_BITS	32
 #define PSRAM_REG_DUMMY_RD	(2 * (5 - 1))
-/*
- * MR4 value this part reports when healthy (captured from a working boot; the
- * write-latency field is overwritten from PSRAM_WR_LATENCY below).
- */
-#define PSRAM_MR4_KNOWN_GOOD	0x014bu
-
 #define PSRAM_RD_LATENCY	4
 #define PSRAM_WR_LATENCY	2
 #define PSRAM_MR8_BL		3
@@ -331,17 +325,6 @@ static int psram_mode_register_init(void)
 
 	mr01 &= ~(0x3 | (0x7 << 2) | BIT(5));
 	mr01 |= (PSRAM_RD_LATENCY << 2) | BIT(5);
-	/*
-	 * MR4 is written, not merged. When healthy this part reports 0x014b, but
-	 * the merge used to preserve whatever was there, and it has been reading
-	 * back 0x80df - the write latency field (bits 7:5) is 0 instead of 2, which
-	 * is exactly the field that times a write data phase. A bad MR4 therefore
-	 * survives every boot, including after the reference images re-initialise
-	 * the part, because IDF merges that register too. Force the whole register
-	 * to the known-good value instead of inheriting it: that is both the actual
-	 * state this port needs and the "self-healing" the init was missing.
-	 */
-	mr48 = PSRAM_MR4_KNOWN_GOOD;
 	mr48 &= ~(0x7 << 5);
 	mr48 |= (PSRAM_WR_LATENCY << 5);
 
@@ -856,24 +839,8 @@ static int psram_mode_reg_init(void)
 
 #define P4_PSRAM_RD_DUMMY	(2 * (14 - 1))
 /* The cache path needs the same 46-cycle read latency the tuning found. */
-/*
- * The cache path must use the same dummy timing as the command path above.
- * IDF picks one coherent set per PSRAM speed (esp_psram_impl_ap_hex.c):
- *
- *   250 MHz: RD 18 / WR 9   (latency 6/3)
- *   200 MHz: RD 14 / WR 7   (latency 4/1)
- *   else:    RD 10 / WR 5   (latency 2/2)
- *
- * This port had the read dummy of the 250 MHz set (18) next to the write dummy
- * of the low-speed set (5), while the mode registers are programmed for the
- * 200 MHz latency (4). Dumping SPI_MEM_S_CACHE_SCTRL next to the reference chain
- * shows the mismatch directly: SRAM_RDUMMY_CYCLELEN 17 vs 25 and
- * SRAM_WDUMMY_CYCLELEN 7 vs 11, i.e. the reference is running the 14/7 set.
- * A wrong write dummy puts the data phase in the wrong place, which is why
- * writes through the cached window never landed.
- */
-#define P4_PSRAM_CACHE_RD_DUMMY	(2 * (14 - 1))
-#define P4_PSRAM_WR_DUMMY	(2 * (7 - 1))
+#define P4_PSRAM_CACHE_RD_DUMMY	18
+#define P4_PSRAM_WR_DUMMY	(2 * (5 - 1))
 
 /*
  * The command path is tuned with the slow profile (MR0 read latency 2), which
