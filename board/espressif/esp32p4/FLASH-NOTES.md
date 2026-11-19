@@ -5037,3 +5037,47 @@ explicit **write-through** attribute (cacheable, W bit set, `WRITETHROUGH` set, 
 `NONCACHEABLE` - that is what made entry 15 experiments fail). Write-through pushes every
 store to the part instead of relying on eviction, which is exactly the direction that is
 proven broken.
+
+## Round 132: a write-through attribute does not help - the window's write path is independent of the PMA
+
+Put the external-memory window on an explicit **write-through, cacheable** attribute, at the
+index that actually wins, to see whether pushing each store to the part bypasses the broken
+eviction path.
+
+Entry 15 is the one that wins on this part (a matching entry 0 has no effect - and
+overwriting 15 with a *non-cacheable* attribute kills the SPL, which is what proves 15 is
+the live entry). Kept the ROM's own range and value and only added WRITETHROUGH:
+
+```
+addr = (0x40000000 | (0x10000000/2 - 1)) >> 2     /* the ROM's NAPOT for 256 MiB */
+cfg  = 0xC000001D | BIT(26)                       /* NAPOT|EN|X|W|R + WRITETHROUGH */
+csrw 0xbdf, addr ; csrw 0xbcf, cfg
+```
+
+Unlike the non-cacheable attempt this is survivable: prompt came up, preload still verified
+byte-for-byte (`cmp 0x00000038 src 0x05435352 dst 0x05435352`). But the store test is
+unchanged:
+
+```
+mw.l 0x88e00000 0xffffffff 4
+mw.l 0x48e00000 0x11223344 1
+md.l 0x88e00000 2  -> ffffffff ffffffff
+```
+
+So the window's write direction does not depend on the PMA attribute: with a write-back
+*cacheable* attribute and with a write-*through* cacheable attribute the behaviour is
+identical, and the store never reaches the part either way.
+
+That removes the last attribute-level explanation. What is left is the cache/controller
+write machinery itself. Two things still have not been exercised at all:
+`Cache_PSRAM_MMU_Init` (ROM 0x4FC00514) and `Cache_FLASH_MMU_Init` (0x4FC00510) - IDF has
+them in its ROM interface, and this port has never called either; they initialise the cache
+side of the MMU rather than the MSPI2's own entries, which is a different table from the
+`SPI_MEM_S_MMU_ITEM_*` one that is already verified identical to the reference.
+
+State: write-through change reverted (unproven, and it changes nothing); our chain flashed
+(2/2 hashes), `PROMPT OK`, preload verifying.
+
+Next: call `Cache_PSRAM_MMU_Init()` before programming the `SPI_MEM_S_MMU_ITEM_*` entries
+(it may reset them, so order matters) and re-run the store test - that is the only piece of
+the cache-side PSRAM setup this port has never touched.
