@@ -270,6 +270,16 @@ static int do_p4boot(struct cmd_tbl *cmdtp, int flag, int argc,
 	printf("p4boot: kernel %08x fdt %08x, jumping\n", P4_KERN_RUN,
 	       P4_DTB_RUN);
 
+	/*
+	 * The same handoff the generic RISC-V cleanup_before_linux() performs:
+	 * interrupts off and the pipeline/caches synchronised. booti reaches this
+	 * point before its own fault, so replicate it here instead of relying on
+	 * the bootm path.
+	 */
+	asm volatile("csrci mstatus, 8" ::: "memory");	/* clear MIE */
+	asm volatile("fence.i" ::: "memory");
+	asm volatile("fence" ::: "memory");
+
 	kernel(0, (void *)P4_DTB_RUN);
 	return CMD_RET_SUCCESS;
 }

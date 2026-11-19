@@ -3800,3 +3800,42 @@ so the instructions around 0xA4 can be read correctly, and check whether the
 stall follows `csrw mstatus, a0` writing mstatus from a0 = 0 - i.e. whether the
 kernel expects a different value in a0 at entry than the plain hartid this port
 passes.
+
+## Round 104: the matching kernel build is found; the handoff cleanup changes nothing
+
+Located the vmlinux that actually matches the flashed image:
+`ports/esp32p4-reconstructed/build/vmlinux`, dated Nov 16 21:09, entry point
+**0x48000000** (the earlier one was linked at 0x48400000 and was a different
+build). Its section headers are truncated, so objdump/nm cannot read it, but the
+link address confirms that image offset N is kernel address 0x48000000 + N - the
+PC mapping used since round 100 was right after all.
+
+Made `p4boot` perform the same steps as the generic RISC-V
+`cleanup_before_linux()` (interrupts off and pipeline/cache sync) before the
+jump:
+
+```
+asm volatile("csrci mstatus, 8");   /* clear MIE */
+asm volatile("fence.i");
+asm volatile("fence");
+```
+
+Result: unchanged. The hart still sits at 0x480000A4 afterwards:
+
+```
+pc      = 0x480000A4
+mstatus = 0x80006000      (MIE now clear - our csrci took effect)
+a0      = 0x00000000
+```
+
+So the guest executes `j _start_kernel` at 0x0, then `csrw mstatus, a0` at 0xA0,
+and then does not advance past 0xA4 - with the handoff state now matching what
+`cleanup_before_linux()` would leave. That rules out the missing cleanup as the
+cause.
+
+Next: the instruction at 0xA4 itself. The bytes there are `89 62 93 82`
+(0x82936289), which does not decode as a 32-bit instruction and only as
+compressed pairs, so the first concrete question is whether execution is landing
+on the right boundary at all - i.e. whether the image's `_start_kernel` is 2-byte
+aligned relative to where the `j` lands, or whether the hart is stalling on a
+cache-line refill for the line after 0xA3.
