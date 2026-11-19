@@ -4131,3 +4131,52 @@ Next: leave the PMA alone and make the *data* coherent instead - either get a
 writeback of the window's dirty lines to actually happen (a `Cache_WriteBack_All`
 after a small window write can be checked directly with the alias), or fill the
 kernel's lines from a source that cannot corrupt memory.
+
+## Round 112: window writes are dropped for every cache map; the 0xA4 stall is not stale lines
+
+Two results that close off directions.
+
+**1. A window write never reaches the part, whatever the flush map.** Added
+`p4wb [map]` (ROM `Cache_WriteBack_All`, 0x4fc00414) and wrote a marker through
+the window, flushing with each map in turn:
+
+```
+mw.l 0x48e00000 cafef00d
+p4wb 10 -> md.l 0x88e00000 = 55555555
+p4wb 20 -> md.l 0x88e00000 = 55555555
+p4wb 30 -> md.l 0x88e00000 = 55555555
+```
+
+The write stays visible through the window (`md.l 0x48e00000` = cafef00d) but is
+never seen through the alias, i.e. it is cached and the writeback does nothing for
+it. Combined with the alias write being visible through the window, the window is
+read-through but write-absorbing in the current configuration. Any design that
+depends on writing the kernel through the window is therefore dead, and that also
+explains the corrupted preloads in round 110.
+
+**2. A completely untouched PSRAM region reproduces the 0xA4 stall.** Moved the
+whole layout to memory this board has never used - kernel at 0x48700000
+(alias 0x88700000), FDT at 0x48C00000 (alias 0x88C00000, first placed at
+0x48A00000 which the 3.4 MiB kernel overlapped, then moved past its end) - and
+booted it:
+
+```
+p4boot: kernel 48700000 fdt 48c00000, jumping
+halt -> PC=0x487000A4   (same offset, +0x0A4)
+minstret 0x010249eb -> 0x01024a2f    (~68 instructions in ~2 s)
+```
+
+Same stall, same relative offset, same crawl. So the 0xA4 behaviour is **not**
+stale cache lines for that address - it is intrinsic to executing that boundary
+(the 4-byte `csrci` at 0xA0 followed by the first 2-byte compressed instruction at
+0xA4), which is consistent with the single `Halt cause (2) - Illegal Instruction`
+seen earlier.
+
+The layout change was reverted and the original chain rebuilt, flashed and verified
+at the prompt.
+
+Next: this is a fetch/decode boundary problem, not a memory problem. Check what the
+core does at 0xA4 by stepping *from a fresh region* and reading `mcause` right after
+the step (the earlier step reported 0xA4 -> 0xA0, which matches a trap that returns
+to a vector whose base is misread), and compare with the same bytes executed at an
+address that is not the start of a page-with-boundary.
