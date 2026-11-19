@@ -1073,9 +1073,9 @@ static void psram_cache_check(void)
 	u32 i, v, bad = 0;
 
 	for (i = 0; i < 1024; i++)
-		writel(0xa5a50000u + i, (void *)(0x48000000 + i * 4));
+		writel(0xa5a50000u + i, (void *)(0x88000000 + i * 4));
 	for (i = 0; i < 1024; i++) {
-		v = readl((void *)(0x48000000 + i * 4));
+		v = readl((void *)(0x88000000 + i * 4));
 		if (v != 0xa5a50000u + i)
 			bad++;
 	}
@@ -1465,8 +1465,14 @@ static void psram_rw_test(void)
 #define P4_FLASH_WIN		0x40000000u
 #define P4_KERN_OFF		0x00200000u
 #define P4_DTB_OFF		0x00900000u
-#define P4_KERN_ADDR		0x48000000u
-#define P4_DTB_ADDR		0x48f00000u
+/*
+ * Write through the direct (uncached) alias: TRM ch.9 §9.3.3.1 says
+ * 0x8800_0000-0x8BFF_FFFF is the same external RAM "accessed directly", i.e.
+ * bypassing the cache, so no line can be lost to eviction during the copy.
+ * The alias is 0x8800_0000 + (vaddr - 0x4800_0000).
+ */
+#define P4_KERN_ADDR		0x88000000u
+#define P4_DTB_ADDR		0x88f00000u
 #define P4_PRE_CHUNK		0x1000u
 #define P4_ROM_CACHE_WB_ALL	0x4fc00414u
 #define P4_CACHE_MAP_DCACHE	((1u << 4) | (1u << 5))
@@ -1502,7 +1508,24 @@ void p4_spl_psram_preload(void)
 	}
 
 	((void (*)(u32))P4_ROM_CACHE_WB_ALL)(P4_CACHE_MAP_DCACHE);
-	p4_spl_early_puts(" preload: done\n");
+
+	/* Compare source and destination at a few offsets. */
+	{
+		static const u32 at[] = { 0x0, 0x4, 0x8, 0x38, 0x1000, 0x100000,
+					  0x200000 };
+		u32 i;
+
+		for (i = 0; i < ARRAY_SIZE(at); i++) {
+			p4_spl_early_puts("cmp ");
+			p4_spl_early_hex(at[i]);
+			p4_spl_early_puts(" src ");
+			p4_spl_early_hex(readl((const void *)(P4_FLASH_WIN +
+							      P4_KERN_OFF + at[i])));
+			p4_spl_early_puts(" dst ");
+			p4_spl_early_hex(readl((const void *)(P4_KERN_ADDR + at[i])));
+			p4_spl_early_puts("\n");
+		}
+	}
 }
 
 int p4_spl_psram_init(void)

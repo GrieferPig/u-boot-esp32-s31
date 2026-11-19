@@ -3376,3 +3376,46 @@ the alias from the SPL before jumping to U-Boot.
 
 Code state: PMA non-cacheable restored, preload present with
 `Cache_WriteBack_All`, boots to `esp32p4>`.
+
+## Round 93: the copy is faithful, and the window disagrees with the alias at page 0
+
+Wrote the preload through the direct alias (TRM ch.9 §9.3.3.1: 0x8800_0000 is
+the same external RAM "accessed directly"), which also fixed an old mistake -
+the DTB alias is `0x88f00000`, not `0x888f0000`. The copy is now faithful end to
+end, checked inside the SPL against the flash source:
+
+```
+cmp 0x00000000 src 0x0000a045 dst 0x0000a045
+cmp 0x00000004 src 0x00010000 dst 0x00010000
+cmp 0x00000038 src 0x05435352 dst 0x05435352   <- RISCV Image magic
+cmp 0x00001000 src 0xce061101 dst 0xce061101
+cmp 0x00100000 src 0x8742001b dst 0x8742001b
+cmp 0x00200000 src 0xab764b0c dst 0xab764b0c
+```
+
+The destination read-back line is `preload: done, dtb 0xedfe0dd0 kern
+0x0000a045` - both images are in the part.
+
+U-Boot then disagrees with itself depending on the path:
+
+```
+esp32p4> md.l 0x48000038 1     -> 00000000        (cached window, page 0)
+esp32p4> md.l 0x88000038 1     -> 05435352        (direct alias, same memory)
+esp32p4> md.l 0x48f00000 1     -> edfe0dd0        (cached window, page 240)
+```
+
+So the DTB through the window is correct while the kernel's first page through
+the same window reads zero, and the alias proves the data is there. `booti`
+therefore fails with `Bad Linux RISCV Image magic!` on a correct image.
+
+Ruled out this round: stale cache lines (the SPL's window self-check now runs
+through the alias so it leaves no lines for 0x4800_0000; invalidating the caches
+after the preload instead crashes the SPL), and the copy itself (byte-exact at
+every sampled offset).
+
+Conclusion: the PSRAM MMU entry for **page 0** does not map to PSRAM page 0 the
+way the direct path does, while entry 240 does. Next: read back the MMU entry
+contents from the SPL and compare entry 0 against entry 240 and against the
+reference's table, then look at what the SPL's own window access at
+0x48000000..0x48000FFF returns (the boot-time pattern test passes there before
+the caches are enabled, which is the same access U-Boot later gets wrong).
