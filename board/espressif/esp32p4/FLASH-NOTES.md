@@ -5177,3 +5177,40 @@ register tweak:
 
 State: reference chain was flashed for the comparison and the port's own chain restored
 afterwards; our chain flashed (2/2 hashes), `PROMPT OK`, preload verifying.
+
+## Round 135: the hardware can write the window - proved from the reference's own state
+
+Wrote to the cached PSRAM window with the debugger while the **reference chain was running
+Linux**, i.e. in exactly the state that is known to work:
+
+```
+halt
+mww 0x48e00000 0xffffffff
+mww 0x48e00000 0x11223344
+mdw 0x88e00000 2   ->  88e00000: 11223344 55555555
+mdw 0x48e00000 2   ->  48e00000: 11223344 55555555
+```
+
+The store **lands in the part** - the uncached alias reads 0x11223344. The same store in
+this port's state is absorbed and never arrives.
+
+That is the cleanest statement of the problem so far: the store, the address, the debugger
+path and the hardware are identical; only the machine state differs. And that state cannot
+be a register value, because all 112 MSPI2 registers from 0x000 to 0x1C0 have now been
+compared (rounds 131/133/134) and differ in exactly two - `CACHE_SCTRL` and `SRAM_CMD` -
+whose four combinations have all been tried: ours/ours stays alive with dead writes,
+ours/reference and reference/reference both kill the board at the first cached access.
+
+So the difference is **how that state is reached**, not what it ends up being. IDF reaches
+it by configuring the controller (write/read command, dummy phases, DDR mode, 16-line data
+phase, splice) and *then* performing every mode-register transaction in that configuration;
+this port replays a captured register image and patches it afterwards, and the one time it
+was moved earlier (the mode-register transactions in 16-line mode) the register readback
+came back transposed (`mr0 0x00001111 mr4 0x00008d30`), which says the command path's own
+transfer shape is not 16-line capable here.
+
+That makes `s_psram_common_transaction()` - how IDF performs a single command/address/data
+transfer - the piece to port next, rather than any further register comparison.
+
+State: our chain restored and verified after the comparison (2/2 hashes, `PROMPT OK`, preload
+matching).
