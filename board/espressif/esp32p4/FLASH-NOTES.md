@@ -4461,3 +4461,54 @@ cache controller's AXI burst setup and the pin/DQS configuration all describe da
 width. Find what else IDF's `s_config_mspi_for_psram` /
 `psram_ctrlr_ll_enable_hex_data_line_mode` touches, and switch the whole set
 together instead of the two bits alone.
+
+## Round 119: the hex bits on their own are not the difference, and the PMA route is closed
+
+**IDF's 16-line enable is exactly the two bits.** `psram_ctrlr_ll.h`:
+
+```c
+static inline void psram_ctrlr_ll_enable_hex_data_line_mode(uint32_t mspi_id, bool en)
+{
+    (void)mspi_id;
+    SPIMEM2.mem_sram_cmd.mem_sdin_hex = en;
+    SPIMEM2.mem_sram_cmd.mem_sdout_hex = en;
+}
+```
+
+So the two-bit change this port tried is precisely what IDF does, and it still takes
+the board down. The reason has to be in the *rest* of `s_config_mspi_for_psram()`,
+which IDF programs together with those bits and which this port has not matched
+line for line:
+
+* `enable_oct_line_mode(true)` **and** `enable_hex_data_line_mode(true)` together
+* `enable_variable_dummy(true)`
+* `enable_wr_dummy_level_control(true)`
+* `enable_ddr_wr_data_swap(false)` / `enable_ddr_rd_data_swap(false)`
+* `enable_ddr_mode(true)`
+* `enable_axi_access(true)`, `enable_wr_splice(true)`, `enable_rd_splice(true)`
+
+The splice enables are the most likely candidates: with 16 data lines a 32-bit AXI
+store is a quarter of a transfer, so how the controller splices it decides whether
+two bytes land at offset 0 and two at offset 4.
+
+**The PMA route to an uncached window is closed as well.** Tried writing the
+non-cacheable entry at index 15 (the index that actually wins) but with the
+PSRAM-only base 0x4800_0000 so the flash XIP stays cacheable - the intent being to
+take the CPU off the cache path entirely and get correct window writes without
+touching 16-line mode. The SPL dies the same way it did when entry 15 covered the
+whole 0x4000_0000 window:
+
+```
+P4TRAP cause=0x38000001 epc=0x236ee6fa
+P4TRAP cause=0x30000005 epc=0x4ff40408
+```
+
+i.e. an instruction access fault at a garbage PC. Overwriting the ROM's entry 15 is
+not survivable, whatever range it encodes. Reverted.
+
+State: port tree at the last verified commit, rebuilt, flashed and at the prompt
+(`esp32p4>`); reference chain not needed this round so it stayed as left.
+
+Next: bring the rest of `s_config_mspi_for_psram()` across *before* turning the hex
+bits on - variable dummy, write-dummy level control, DDR swaps, and especially the
+wr/rd splice enables - then enable 16-line mode as the last step.
