@@ -3037,3 +3037,40 @@ the cache path. Per AGENTS.md §11 the next comparison is IDF's read-side LL:
 `psram_ctrlr_ll_set_rd_cmd`, `set_rd_dummy`, `enable_rd_dummy_level_control`,
 `enable_dqs`, and the DDR/splice settings, checked one at a time against the
 values this chain actually holds.
+
+## Round 84: SYSREG is 0x500E5000, and the reference has all cache clocks ON
+
+Found an addressing error in this port's own earlier work. IDF's `reg_base.h`:
+
+```
+DR_REG_HP_SYSTEM_BASE      = HPPERIPH1 + 0x25000   => 0x500E5000
+DR_REG_HP_SYS_CLKRST_BASE  = HPPERIPH1 + 0x26000   => 0x500E6000
+```
+
+`P4_CLKRST_BASE` is 0x500E6000 (correct), but round 77 read the cache clock
+register at 0x500E6020 and called it `HP_SYSTEM_HP_CACHE_CLK_CONFIG_REG` - that
+address belongs to the CLKRST block, not SYSREG. The correct register is
+**0x500E5020** (SYSREG confirmed by its VER_DATE reading 0x20230519). Reading
+the real one on the running reference:
+
+```
+0x500E5020: 00000033     <- L2, L1 D, L1 I1, L1 I0 cache clocks ALL ON
+```
+
+So the earlier conclusion "the reference runs with every HP cache clock off"
+was wrong; the reference has them all enabled, which is consistent with TRM
+ch.9 §9.3.3.1 ("0x4800_0000 ... accessed by HP CPU via cache"). This port had
+left them off (and removed the L2 carve-out on that wrong basis).
+
+Changes kept: `psram_cache_clocks_on()` now sets bits 0/1/4/5 at the correct
+address 0x500E5020 (TRM ch.22 Register 22.15) before mapping the window.
+Tried enabling the L1 D-cache afterwards as well:
+
+* with `Cache_Invalidate_All(L1 D | L2)` it traps (`cause=0x30000005`) - the
+  blanket invalidate discards dirty L2 lines (the SPL's stack), so that
+  sequence is wrong while executing from L2MEM;
+* enabling `Cache_Enable_L1_DCache(0)` alone no longer traps but does not make
+  the window read complete either.
+
+Window read still stalls. State: cache clocks on at 0x500E5020, command path
+verifying (`read80 0x00000001`), boots to `esp32p4>`.

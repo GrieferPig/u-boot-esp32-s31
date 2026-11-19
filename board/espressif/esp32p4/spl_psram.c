@@ -1363,6 +1363,25 @@ static void psram_pma_non_cacheable(void)
 
 
 
+/*
+ * TRM ch.22 System Registers (SYSREG), Register 22.15
+ * HP_SYSTEM_HP_CACHE_CLK_CONFIG_REG at HP_SYSTEM + 0x0020. HP_SYSTEM is
+ * HPPERIPH1 + 0x25000 (0x500E5000, confirmed by its VER_DATE reading
+ * 0x20230519); HP_SYS_CLKRST is a different block at +0x26000 (0x500E6000).
+ * Bits 0/1/4/5 are the L2 / L1 D / L1 I1 / L1 I0 cache clocks. The working
+ * reference has all four enabled (0x00000033), and TRM ch.9 §9.3.3.1 says the
+ * 0x4800_0000 window is "accessed by HP CPU via cache".
+ */
+#define P4_ROM_CACHE_INVALIDATE_ALL	0x4fc00404u
+#define P4_ROM_CACHE_ENABLE_L1_DCACHE	0x4fc004f4u
+
+static void psram_cache_clocks_on(void)
+{
+	setbits_le32((void *)0x500e5020u, BIT(0) | BIT(1) | BIT(4) | BIT(5));
+	udelay(10);
+
+}
+
 static void psram_mmu_map(u32 size)
 {
 	u32 entries = size >> 16;
@@ -1464,8 +1483,8 @@ int p4_spl_psram_init(void)
 	writel(0x00030103u, (void *)(P4_MSPI2_BASE + 0x14));
 
 	setbits_le32((void *)P4_SRAM_CMD, P4_CMD_SDIN_HEX | P4_CMD_SDOUT_HEX);
+	psram_cache_clocks_on();
 	psram_mmu_map(0x01000000);
-	psram_pma_non_cacheable();
 	setbits_le32((void *)P4_CACHE_FCTRL, BIT(0));
 
 	psram_cache_check();
