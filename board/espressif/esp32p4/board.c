@@ -219,15 +219,25 @@ void hw_watchdog_reset(void)
 #define P4_KERN_SRC		0x40200000u
 #define P4_DTB_SRC		0x40900000u
 #define P4_KERN_DST		0x48000000u
-#define P4_DTB_DST		0x48f00000u
 /*
- * Copy through the plain cacheable window. The non-cacheable alias
- * (0x8800_0000) is what earlier rounds used, but the window that is verified
- * working end to end on this chain is 0x4800_0000 (the SPL's window check
- * writes and reads it back), and no cache is enabled here anyway, so the
- * alias buys nothing.
+ * Must be the same address p4boot hands to the kernel, and the same one the SPL
+ * preloads the blob to (through the alias). It used to be 0x48f00000, i.e.
+ * U-Boot's own RAM top, so a p4load followed by p4boot pointed the kernel at an
+ * address that never held a device tree.
  */
-#define P4_NC_OFFSET		0x00000000u
+#define P4_DTB_DST		0x48600000u
+/*
+ * Copy through the uncached alias, not the cached window.
+ *
+ * 0x4800_0000 is served by the cache, and a store there lands in a cache line
+ * and is never written back to the part - measured in FLASH-NOTES round 123:
+ * with the part cleared to 0xFFFFFFFF through the alias, a window store shows up
+ * in the window and leaves the part at 0xFFFFFFFF. A p4load through the window
+ * therefore reports success while the PSRAM never receives the image. The alias
+ * is the path the SPL's preload uses and is verified byte-faithful, so use it
+ * here too.
+ */
+#define P4_NC_OFFSET		0x40000000u
 #define P4_LOAD_CHUNK		0x1000u
 
 /*

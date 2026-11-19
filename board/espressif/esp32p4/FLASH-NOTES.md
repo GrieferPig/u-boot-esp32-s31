@@ -4816,3 +4816,48 @@ p4load needs a reset-free capture, which the current helper does not provide - w
 knowing before reading anything into a truncated `p4load` log.
 
 State: our chain flashed (2/2 hashes) and at the `esp32p4>` prompt.
+
+## Round 127: p4load wrote through the cached window and targeted an address p4boot never reads
+
+Finished p4load far enough to run it end to end, with a reset-free capture helper
+(`p4_run.ps1`: opens the port with DTR/RTS both deasserted and only writes commands,
+unlike `uart_boot.ps1` / `p4_cmd.ps1`, which run esptool first and hard-reset the SoC -
+that reset is what truncated the copy in round 126).
+
+A full pass completes:
+
+```
+p4load: dtb done
+p4load: kernel 354c60 bytes -> 0x48000000 (00000000), dtb 113d -> 0x48f00000 (00000000)
+```
+
+Two real defects were visible in that line.
+
+**1. The DTB went to 0x48f00000, which p4boot never reads.** `P4_DTB_DST` was
+0x48f00000 - U-Boot's own RAM top - while `p4boot` hands the kernel 0x48600000 and the
+SPL preloads the blob to 0x48600000 (through the alias). So `p4load` followed by
+`p4boot` pointed the kernel at an address that never held a device tree. Fixed:
+`P4_DTB_DST = 0x48600000`.
+
+**2. The copy went through the cached window, which never reaches the part.**
+`P4_NC_OFFSET` was 0, with a comment claiming "no cache is enabled here anyway, so the
+alias buys nothing". That is wrong: round 123 measured that a store to 0x4800_0000
+lands in a cache line and never reaches the part (the part stayed 0xFFFFFFFF while the
+window showed the new value). So p4load reported a successful copy while the PSRAM
+never received the image. Fixed: `P4_NC_OFFSET = 0x40000000`, i.e. the uncached alias -
+the same path the SPL's preload uses, which is verified byte-faithful.
+
+After the fix a full pass reports the right destination:
+
+```
+p4load: kernel 354c60 bytes -> 0x48000000 (00000000), dtb 113d -> 0x48600000 (00000000)
+```
+
+Verification status, stated plainly: the load completes, the destinations now match
+`p4boot`, and the copy uses the byte-faithful alias path. The direct read-back proof
+(md through 0x88000038 / 0x88600000 after a load) did not run this round: `p4_run.ps1`
+returned 0 chars on both follow-up attempts, most likely because the port was still held
+by the previous 52 s capture. That helper needs a fix before the read-back evidence can
+be produced, and that is the first thing to do next.
+
+State: our chain flashed (2/2 hashes) and at the `esp32p4>` prompt.
