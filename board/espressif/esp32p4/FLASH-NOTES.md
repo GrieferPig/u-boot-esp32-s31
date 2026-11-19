@@ -5895,3 +5895,30 @@ sctrl 0x02F7C679, kernel runs to /init start.
 - Flash reads flaky, 4th confirmation: 0x4022C4E0 reads b2 40... vs sha256-verified
   file 9d a3... (f3dd3833...09bc52 intact); SPL copy-time reads were correct.
 - Cacheability proven: window-write + INV-no-WB loses the pattern (writes are cached).
+
+## Round 4 (2026-11-19): PMP fix verified, userspace runs; next fault layer
+
+- PMP fix VERIFIED end to end: a boot passed timer/uart/driver init, printed
+  `Run /init as init process`, and the /init script ran (busybox sh PIDs 27/32
+  started, then exec of /sbin/init as init[34]). The deterministic cause-1 fault
+  at the /init entry point (0x48b800de) is gone: U-mode fetch now allowed.
+- Userspace faults (same boot, same 3.5 MB copy, so within-boot deterministic):
+  sh[27] and sh[32] fault IDENTICALLY (cause 5, badaddr 0x2D, epc 0x486B4FA6,
+  same Code). The bytes are genuine busybox BFLT code (file offset 0x34F92,
+  `bin/busybox` is BFLT `setuid ... ram gotpic`, not ELF); raw disassembly shows
+  `c.lw a4,0(s1)` / `lbu a5,0(a4)` / `addi a5,a5,-45` (checks for '-' / '.'),
+  so a4 is a string pointer holding 0x2D (45). epc points past the load
+  (imprecise/async bus-error attribution). init[34]: wild jump into ASCII
+  "bin/" (epc=ra=0x2F6E6962, cause 1), regs full of path-string fragments.
+  Leading hypothesis: copy-time flash misreads (random per boot, fixed within
+  a boot) corrupting pointer/string data; test is reboot-and-compare addresses.
+- Timer oops 0x4822c4ee, 4th identical occurrence (wild jump into gzip data,
+  ra=boot_command_line, memset-like args a0=0x4880C400 a1=0 a2=0xF00).
+  sched_tick gates wq_worker_tick on PF_WQ_WORKER (sched/core.c:5629, intact),
+  so the 0x10 load (worker->current_pwq with worker=0) implies a flipped
+  PF_WQ_WORKER bit on a non-worker task or a freed worker, not a missing gate.
+  Systimer INT_ENA=INT_RAW=0 at prompt: no stale systimer IRQ pending.
+- U-Boot proper init crashes (wild/NULL TVALs, varying EPCs) cluster with
+  uptime; the USB-serial bridge also degrades over long sessions (deaf periods,
+  repeated-line floods) independent of SoC state. Re-verify on a cool board
+  before trusting new U-Boot crash addresses.
