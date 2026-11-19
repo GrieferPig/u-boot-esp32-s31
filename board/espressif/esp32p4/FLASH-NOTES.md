@@ -5614,3 +5614,37 @@ register-for-register.
 
 State: our chain flashed (2/2 hashes), `PROMPT OK`, preload byte-exact, `CACHE_SCTRL`
 identical to the reference.
+
+## Round 145: the store does reach the cache - it is the write-back that never happens
+
+Measured the two views of the same address in one command sequence, with a coherent 200 MHz
+profile and 8 data lines:
+
+```
+mw.l 0x88e00000 0xffffffff 4      # make the device words 0xffffffff through the alias
+mw.l 0x48e00000 0x11223344 1      # store through the cached window
+md.l 0x48e00000 2  ->  48e00000: 11223344 ffffffff     (window: coherent, sees the store)
+md.l 0x88e00000 2  ->  88e00000: ffffffff ffffffff     (device: unchanged)
+p4wb 30                                                    # Cache_WriteBack_All
+md.l 0x88e00000 2  ->  88e00000: ffffffff ffffffff     (still unchanged)
+```
+
+That reclassifies the whole problem. The store is **not** lost and the PSRAM is **not**
+rejecting writes: the value is in the cache (a cached read returns it consistently) and the
+cache never writes the dirty line back to the device. Even the ROM's `Cache_WriteBack_All`
+(0x4FC00414) does not flush it.
+
+Everything this port has in common with the reference is therefore irrelevant to the fault -
+the controller accepts cached reads, the device holds the bytes at 0x88e00000 fine, and the
+alias write path demonstrably works (`mw.l` through the alias changes the device). What is
+broken is only the path from a **dirty cache line** to the device, which also explains why the
+kernel dies once it has touched more memory than the cache can hold (real ESP32-P4 silicon
+runs the same kernel from the same base address).
+
+The next thing to examine is therefore the cache side, not MSPI2: which cache level holds the
+line (L1 DCache versus the shared L2), whether this port's `Cache_Enable_L1_DCache` /
+`Cache_Enable_L2_Cache` calls leave L1 out of the write path entirely, and what the TRM's cache
+chapter requires for a write-back to be issued.
+
+State: 8-line, our chain flashed (2/2 hashes), `PROMPT OK`, `CACHE_SCTRL` = 0x02F7C679
+(identical to the reference), preload byte-exact.
