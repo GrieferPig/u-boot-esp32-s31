@@ -87,6 +87,10 @@ __weak void blue_led_off(void) {}
  * a structure...
  */
 
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+#include <asm/arch-esp32p4/boot-layout.h>
+#endif
+
 #if defined(CONFIG_WATCHDOG) || defined(CONFIG_HW_WATCHDOG)
 static int init_func_watchdog_init(void)
 {
@@ -583,12 +587,14 @@ static int reserve_fdt(void)
 #if defined(CONFIG_ESP32P4_SRAM_ONLY)
 	/*
 	 * U-Boot runs in place. The appended DT sits where .bss will be cleared,
-	 * so it must be copied out before the BSS wipe: park it in the free SRAM
-	 * between the SPL area and the heap.
+	 * so copy it to verified PSRAM before the BSS wipe. It is separate from
+	 * the FIT-staged kernel DTB and runtime stack.
 	 */
 	if (gd->fdt_blob) {
 		gd->fdt_size = ALIGN(fdt_totalsize(gd->fdt_blob), 32);
-		gd->new_fdt = (void *)0x4ff70000;
+		if (gd->fdt_size > P4_RUNTIME_MALLOC - P4_RUNTIME_FDT)
+			return -ENOSPC;
+		gd->new_fdt = (void *)P4_RUNTIME_FDT;
 		debug("Reserving %lu Bytes for FDT at: %08lx\n",
 		      gd->fdt_size, (ulong)gd->new_fdt);
 	}

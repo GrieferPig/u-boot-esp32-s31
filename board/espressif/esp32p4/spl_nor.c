@@ -12,6 +12,7 @@
 #include <linux/bitops.h>
 #include <linux/delay.h>
 #include "spl_hw.h"
+#include <asm/arch-esp32p4/boot-layout.h>
 #include "../common/mspi-mmu.h"
 
 void p4_spl_puts(const char *s);
@@ -55,18 +56,11 @@ void p4_spl_early_hex(u32 v);
 #define ROM_CACHE_EN_IC1		0x4fc004e4u
 #define ROM_CACHE_EN_DC			0x4fc004f4u
 #define ROM_CACHE_EN_L2			0x4fc00504u
-/*
- * ROM Cache_Set_L2_Cache_Mode(cache_size_t, cache_ways_t, cache_line_size_t).
- * IDF's cache_hal_init_l2_cache() calls it with the configured L2 geometry
- * (components/hal/cache_hal.c); CACHE_SIZE_256K = 10 and CACHE_LINE_SIZE_64B = 3
- * per esp32p4/rom/cache.h, matching CONFIG_CACHE_L2_CACHE_256KB and
- * CONFIG_CACHE_L2_CACHE_LINE_64B. Without it the L2 is left in whatever mode
- * the ROM set and accesses through it to the PSRAM window are dropped.
- */
+/* rev1.3 mask-ROM Cache_Set_L2_Cache_Mode(size_idx, ways, line_idx). */
 #define ROM_CACHE_SET_L2_MODE		0x4fc003d4u
-#define P4_L2_SIZE_256K			10u
+#define P4_L2_SIZE_512K			11u
 #define P4_L2_WAYS			8u
-#define P4_L2_LINE_64B			3u
+#define P4_L2_LINE_128B			4u
 #define P4_CACHE_MAP_L2			(1u << 5)
 
 #define CACHE_MAP_L1_ALL (BIT(0) | BIT(1) | BIT(4)) /* I0, I1, shared D */
@@ -92,8 +86,8 @@ void p4_spl_cache_init(void)
 	((rom_invalidate_all_fn)ROM_CACHE_INVALIDATE_ALL)(CACHE_MAP_L1_ALL);
 	clrsetbits_le32((void *)MMU_POWER_CTRL, MMU_PAGE_SIZE_MASK,
 			MMU_PAGE_SIZE_64K);
-	((void (*)(u32, u32, u32))ROM_CACHE_SET_L2_MODE)(P4_L2_SIZE_256K,
-				P4_L2_WAYS, P4_L2_LINE_64B);
+	((void (*)(u32, u32, u32))ROM_CACHE_SET_L2_MODE)(P4_L2_SIZE_512K,
+				P4_L2_WAYS, P4_L2_LINE_128B);
 	((rom_flags_fn)ROM_CACHE_INVALIDATE_ALL)(P4_CACHE_MAP_L2);
 	for (i = 0; i < P4_MMU_ENTRY_COUNT; i++)
 		mmu_write_entry(i, 0);

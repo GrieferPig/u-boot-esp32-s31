@@ -261,9 +261,10 @@ static void configure_cache_port(void)
 	writel(0xf0000000, REG(MSPI2 + 0x48));
 	writel(0xf0008080, REG(MSPI2 + 0x4c));
 	/* CS setup/hold 4 cycles, hold delay 3, split on 2 KiB boundaries. */
-	clrsetbits_le32(REG(MSPI2 + 0x1a0), 0x7e0c0fffu,
-			BIT(31) | (2u << 25) | (3u << 18) | (3u << 7) |
+	clrsetbits_le32(REG(MSPI2 + 0x1a0), 0x7e000fffu,
+			BIT(31) | (2u << 25) | (3u << 7) |
 			(3u << 2) | 3u);
+	clrsetbits_le32(REG(MSPI2 + 0x174), 3u << 18, 3u << 18);
 	clrsetbits_le32(REG(MSPI2 + 0xd8), 0xfu, BIT(0) | BIT(1));
 	setbits_le32(REG(MSPI3 + 0xd4), BIT(1));
 	setbits_le32(REG(MSPI2 + 0x0c), BIT(25) | BIT(26));

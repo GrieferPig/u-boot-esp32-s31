@@ -457,6 +457,7 @@ config RISCV_PRIV_1_9
 
 config STACK_SIZE_SHIFT
 	int
+	default 12 if TARGET_ESP32P4 && SPL
 	default 14
 
 config OF_BOARD_FIXUP

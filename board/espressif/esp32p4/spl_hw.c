@@ -3,9 +3,22 @@
  * Register fields: ESP32-P4 rev1.3 TRM, eFuse, LP_WDT and TIMG chapters.
  */
 #include <asm/io.h>
+#include <asm/global_data.h>
 #include <linux/bitops.h>
 #include <linux/types.h>
 #include "spl_hw.h"
+#include <asm/arch-esp32p4/boot-layout.h>
+
+/* start.S puts the early malloc/GD below the fixed stack reservation. */
+_Static_assert(CONFIG_SPL_TEXT_BASE == P4_SPL_BASE, "P4 SPL link/ROM mismatch");
+_Static_assert(P4_SPL_BASE + CONFIG_SPL_MAX_SIZE <= CONFIG_SPL_BSS_START_ADDR,
+	       "P4 SPL image would overlap BSS");
+_Static_assert(CONFIG_SPL_BSS_START_ADDR + CONFIG_SPL_BSS_MAX_SIZE <=
+	       CONFIG_CUSTOM_SYS_INIT_SP_ADDR - (1u << CONFIG_STACK_SIZE_SHIFT) -
+	       CONFIG_SPL_SYS_MALLOC_F_LEN - sizeof(gd_t) - 16,
+	       "P4 SPL BSS would overwrite early malloc/GD");
+_Static_assert(CONFIG_CUSTOM_SYS_INIT_SP_ADDR < P4_LOW_SRAM_TOP,
+	       "P4 SPL stack would enter reserved ROM/AP SRAM");
 
 #define REG(a) ((void *)(uintptr_t)(a))
 #define EFUSE_BASE	0x5012d000u
@@ -84,7 +97,7 @@ static int protect_regions(void)
 	PMP_ADDR(pmpaddr1, 0x0ffc3fffu); /* locked RW SRAM cache-controller aperture */
 	PMP_ADDR(pmpaddr2, 0x13f03fffu); /* locked RX boot ROM */
 	PMP_ADDR(pmpaddr3, 0x13fc0000u); /* lower limit of SRAM entry */
-	PMP_ADDR(pmpaddr4, 0x13ff0000u); /* TOR RWX retained HP SRAM */
+	PMP_ADDR(pmpaddr4, P4_PHYS_SRAM_END >> 2); /* TOR RWX retained HP SRAM */
 	PMP_ADDR(pmpaddr6, 0x107fffffu); /* RX flash mapping */
 	PMP_ADDR(pmpaddr11, 0x14042fffu); /* RWX LP SRAM */
 	PMP_ADDR(pmpaddr15, 0x1401ffffu); /* locked RW HP peripheral range */

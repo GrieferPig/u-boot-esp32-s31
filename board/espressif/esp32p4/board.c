@@ -18,13 +18,14 @@
 #include <stdio.h>
 #include <linux/libfdt.h>
 #include <asm/global_data.h>
+#include <asm/arch-esp32p4/boot-layout.h>
 #include "psram-handoff.h"
 
 DECLARE_GLOBAL_DATA_PTR;
 
-#define P4_SRAM_TOP		0x4ff80000
+#define P4_SRAM_TOP		P4_LOW_SRAM_TOP
 #define P4_SRAM_MID_BASE	0x4ff00000
-#define P4_SRAM_MID_TOP	0x4ffc0000
+#define P4_SRAM_MID_TOP	P4_LOW_SRAM_TOP
 #define P4_PSRAM_LOW_TOP	0x480e0000
 #define P4_UBOOT_RAM_TOP	0x48f00000
 
@@ -124,8 +125,8 @@ phys_addr_t board_get_usable_ram_top(phys_size_t total_size)
 		return P4_SRAM_TOP;
 
 #ifdef CONFIG_ESP32P4_SRAM_ONLY
-	/* U-Boot proper runs from internal SRAM in this configuration. */
-	return P4_SRAM_MID_TOP;
+	/* Retained code in SRAM; only the runtime stack and GD use PSRAM. */
+	return P4_RUNTIME_TOP;
 #endif
 #ifdef CONFIG_ESP32P4_LOW_RAM_TOP
 	/* Only the ROM-mapped part of PSRAM is usable in this configuration. */
@@ -426,6 +427,13 @@ int p4_cache_sync_stub(unsigned int start, unsigned int bytes)
 	    start - P4_EXT_RAM_BASE >= size ||
 	    bytes > size - (start - P4_EXT_RAM_BASE))
 		return -EINVAL;
+	if (!bytes)
+		return 0;
+	/* Cover full L2 lines, including partially changed executable data.
+	 * Both checked PSRAM bounds are aligned, so expansion stays in RAM. */
+	bytes = ALIGN(start + bytes, P4_L2_LINE_BYTES) -
+		ALIGN_DOWN(start, P4_L2_LINE_BYTES);
+	start = ALIGN_DOWN(start, P4_L2_LINE_BYTES);
 	for (off = 0; off < bytes; off += 0x10000) {
 		unsigned int n = bytes - off > 0x10000 ? 0x10000
 						       : bytes - off;

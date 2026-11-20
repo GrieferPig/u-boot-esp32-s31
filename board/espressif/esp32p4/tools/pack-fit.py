@@ -18,16 +18,16 @@ out = a.out.resolve()
 out.mkdir(parents=True,exist_ok=True)
 fit_off, capacity = 0xf0000, 16 << 20
 devices = [
-    ('uboot', a.uboot, 'standalone', 'u-boot', 0x100000, 0x4ff00000, 0x34000),
+    ('uboot', a.uboot, 'standalone', 'u-boot', 0x100000, 0x4ff00000, 0x2b000),
     ('linux', a.linux, 'kernel', 'linux', 0x200000, 0x48000000, 0x400000),
     ('dtb', a.dtb, 'flat_dt', 'linux', 0x900000, 0x48600000, 0x10000)]
 spl = a.spl.read_bytes()
 if not (32 < len(spl) <= fit_off - 0x2000 and spl[:2] == b"\xe9\x01"
-        and struct.unpack_from("<I", spl, 4)[0] == 0x4ff40000
+        and struct.unpack_from("<I", spl, 4)[0] == 0x4ff2b000
         and struct.unpack_from("<H", spl, 12)[0] == 0x12):
     p.error("expected direct ROM -> P4 U-Boot single-segment SPL")
 addr, n = struct.unpack_from("<II", spl, 24)
-if addr != 0x4ff40000 or not 0 < n < 0x1c000 or n > len(spl) - 33:
+if addr != 0x4ff2b000 or not 0 < n < 0xb000 or n > len(spl) - 33:
     p.error("SPL segment lies outside its reserved SRAM or ESP image")
 with tempfile.TemporaryDirectory(dir=out) as td:
     t = Path(td)

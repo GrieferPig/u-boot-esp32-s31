@@ -1,7 +1,7 @@
 # Standalone ESP32-P4 rev1.3 SPL and FIT
 
 The ROM reads the ESP image at flash offset 0x2000 and enters U-Boot
-SPL at 0x4ff40000. There is a single loadable SRAM segment. There is no
+SPL at 0x4ff2b000. There is a single loadable SRAM segment. There is no
 ESP-IDF SDK, sdkconfig, hardware helper, app, partition table or precompiled
 IDF binary in the build or runtime. ROM functions used by SPL are silicon
 entry points, not linked SDK objects.
@@ -10,7 +10,7 @@ Build via the project-level `make uboot TARGET=esp32p4`, or the ordinary
 `espressif_esp32p4_spl_defconfig` and `espressif_esp32p4_sram_defconfig`,
 using a RISC-V toolchain, host U-Boot dependencies and standalone esptool.
 For the standalone form, wrap the SPL's combined `u-boot-spl-dtb.bin` in
-an RV32 ELF with a single section mapped at 0x4ff40000 and entry at the same
+an RV32 ELF with a single section mapped at 0x4ff2b000 and entry at the same
 address; use `esptool --chip esp32p4 elf2image`. Then use:
 
     python3 board/espressif/esp32p4/tools/pack-fit.py --mkimage OUT/tools/mkimage \
@@ -37,9 +37,26 @@ are 16/32/64 MiB; 4/8 MiB do not fit the reserved DTB layout. Proper
 publishes the AP waiter before releasing hart1, and no SMP kernel starts
 without a ready mailbox.
 
+## 512 KiB L2 profile
+
+The SPL switches rev1.3 L2 to 512 KiB, 8 ways and 128-byte lines.
+L1 geometry does not change. The high SRAM bank is no longer available;
+SPL occupies the bounded low slot `[0x4ff2b000, 0x4ff36000)`, with BSS at
+`0x4ff36000` and an early stack below `0x4ff3c000`. The FIT limits the
+proper payload to `[0x4ff00000, 0x4ff2b000)` so its image cannot overwrite
+the live SPL. Proper BSS can reuse SPL storage after the jump. The protected
+mailbox and ROM data at the top of low SRAM are not used for allocators.
+
+The retained Linux callback remains in low SRAM, bounds operations to
+validated PSRAM and aligns its writeback to complete L2 lines. U-Boot proper
+puts its temporary control FDT at `0x48710000`, heap in
+`[0x48720000, 0x48760000)` and final stack/GD below `0x48800000`, all in the
+already verified PSRAM. These ranges are not the Linux DTB or Linux image.
+Display, camera and DMA coherence are not validated by the emulator.
+
 | Flash offset | Image data | Execution or physical destination |
 |---|---|---|
-| 0x002000 | spl-p4.bin | one segment at 0x4ff40000 |
+| 0x002000 | spl-p4.bin | one segment at 0x4ff2b000 |
 | 0x0f0000 | p4-fit-header.dtb | verified fixed-profile FIT header |
 | 0x100000 | proper u-boot.bin | 0x4ff00000 |
 | 0x200000 | Linux Image | 0x48000000 |

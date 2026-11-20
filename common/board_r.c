@@ -16,6 +16,10 @@
 #include <cyclic.h>
 #include <display_options.h>
 #include <exports.h>
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+#include <asm/arch-esp32p4/boot-layout.h>
+#endif
+
 #ifdef CONFIG_MTD_NOR_FLASH
 #include <flash.h>
 #endif
@@ -235,11 +239,12 @@ static int initr_malloc(void)
 	 */
 #if defined(CONFIG_ESP32P4_SRAM_ONLY)
 	/*
-	 * U-Boot runs in place at CONFIG_TEXT_BASE and the SRAM that the SPL used
-	 * (0x4ff40000 upwards) is free once the hand-over is done, so the heap
-	 * lives there instead of below a relocated copy.
+	 * Code runs in place in low SRAM. 512 KiB L2 owns the high bank;
+	 * the bounded heap uses the SPL-verified PSRAM scratch arena.
 	 */
-	start = 0x4ff30000;
+	if (TOTAL_MALLOC_LEN > P4_RUNTIME_MALLOC_END - P4_RUNTIME_MALLOC)
+		return -ENOSPC;
+	start = P4_RUNTIME_MALLOC;
 #else
 	start = gd->relocaddr - TOTAL_MALLOC_LEN;
 #endif

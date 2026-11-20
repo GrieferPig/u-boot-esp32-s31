@@ -9,13 +9,14 @@
 #include <u-boot/sha256.h>
 #include "spl_hw.h"
 #include "spl_load.h"
+#include <asm/arch-esp32p4/boot-layout.h>
 
 #if CONFIG_SPL_OF_LIBFDT_ASSUME_MASK != 0
 #error "Untrusted FIT input requires full libfdt bounds checking"
 #endif
 
-/* The 0x34000 ceiling leaves the initial proper stack/GD/malloc area
- * clear. Linux handoff cache synchronization currently covers 4 MiB. */
+/* Limit position-independent proper payload below the live SPL. Its
+ * BSS can reuse the SPL only after handoff. */
 #include "psram-handoff.h"
 
 #define FLASH_WIN 0x40000000U
@@ -27,7 +28,7 @@ struct fit_slot {
 	u32 off, dst, store, limit;
 };
 static const struct fit_slot slots[] = {
-	{ "uboot", "standalone", "u-boot", 0x100000, 0x4ff00000, 0x4ff00000, 0x34000 },
+	{ "uboot", "standalone", "u-boot", 0x100000, P4_PROPER_BASE, P4_PROPER_BASE, P4_PROPER_SLOT },
 	{ "linux", "kernel", "linux", 0x200000, 0x48000000, 0x88000000, 0x400000 },
 	{ "dtb", "flat_dt", "linux", 0x900000, 0x48600000, 0x88600000, 0x10000 },
 };
