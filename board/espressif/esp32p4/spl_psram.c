@@ -268,7 +268,6 @@ static void configure_cache_port(void)
 	clrsetbits_le32(REG(MSPI2 + 0xd8), 0xfu, BIT(0) | BIT(1));
 	setbits_le32(REG(MSPI3 + 0xd4), BIT(1));
 	setbits_le32(REG(MSPI2 + 0x0c), BIT(25) | BIT(26));
-	setbits_le32(REG(MSPI2 + 0x3c), BIT(0));
 }
 
 static int psram_pmp_open(u32 size)
@@ -432,6 +431,8 @@ int p4_spl_psram_init(void)
 	((void (*)(u32))0x4fc004f4u)(0); /* Cache_Enable_L1_DCache */
 	((void (*)(u32))0x4fc00504u)(0); /* Cache_Enable_L2_Cache */
 	p4_spl_wdt_feed();
+	/* Enable PSRAM AXI requests and clear CLOSE_AXI_INF_EN (SLV_ERR only). */
+	clrsetbits_le32(REG(MSPI2 + 0x3c), BIT(31), BIT(0));
 	if (psram_check_window(size) || psram_pmp_open(size)) {
 		p4_spl_early_puts("psram: memory test/PMP failed; no handoff\n");
 		return -1;
