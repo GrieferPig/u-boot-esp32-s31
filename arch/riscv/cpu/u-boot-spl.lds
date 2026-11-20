@@ -42,6 +42,11 @@ SECTIONS
 		__binman_sym_start = .;
 		KEEP(*(SORT(.binman_sym*)));
 		__binman_sym_end = .;
+#ifdef CONFIG_ESP32P4_SPL_FIT_PAYLOAD
+		/* Keep padding in a loadable section: objcopy otherwise strips
+		 * it and the appended control FDT starts before _end. */
+		. = ALIGN(8);
+#endif
 	} > .spl_mem
 
 	. = ALIGN(8);

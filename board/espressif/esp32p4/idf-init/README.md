@@ -1,6 +1,8 @@
 # ESP32-P4 v1.3 ROM → U-Boot with matched IDF hardware initialization
 
-This is a raw development image, **not** a replacement safe for secure-boot or
+**Current default:** see [FIT-BOOT.md](FIT-BOOT.md) for the complete P4 build and new FIT header at 0x0f0000. The old bare-image recipe below documents fallback revision 735a4f1d; it does not generate a complete image for the new SPL.
+
+This is a development image, **not** a replacement safe for secure-boot or
 flash-encrypted devices. The adapter refuses those devices and any revision other
 than 1.3. No eFuse programming, secure-boot enrollment, partition loader or IDF
 application is linked into U-Boot. The full IDF bootloader is built separately as

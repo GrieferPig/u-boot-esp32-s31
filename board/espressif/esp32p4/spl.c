@@ -236,6 +236,11 @@ void spl_board_init(void)
 			;
 	}
 
+#ifdef CONFIG_ESP32P4_SPL_FIT_PAYLOAD
+	if (p4_spl_load_fit())
+		for (;;)
+			asm volatile("wfi");
+#else
 	{
 		void p4_spl_psram_preload(void);
 
@@ -251,6 +256,7 @@ void spl_board_init(void)
 			;
 	}
 
+#endif
 	p4_spl_enter_uboot(0);
 }
 

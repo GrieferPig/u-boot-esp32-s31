@@ -24,6 +24,15 @@ config ESP32P4_SPL_IDF_INIT
 	  The board image must include the hardware-only SRAM segment built
 	  and packaged by idf-init. No additional loader or IDF app runs.
 
+config ESP32P4_SPL_FIT_PAYLOAD
+	bool "Load a bounded P4 FIT and verify all three SHA-256 hashes"
+	depends on ESP32P4_SPL_IDF_INIT
+	select SPL_SHA256
+	select SPL_OF_LIBFDT
+	help
+	  ROM enters U-Boot SPL directly. The FIT selects M-mode U-Boot,
+	  RV32 Linux and its DTB; no ESP-IDF app loader or OpenSBI stage.
+
 config ESP32P4_IDF_WDT_HANDOFF
 	bool "Preserve watchdog ownership passed from the matched SPL"
 	depends on ESP32P4_SRAM_ONLY
