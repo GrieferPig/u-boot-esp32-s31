@@ -1991,23 +1991,5 @@ int p4_spl_psram_init(void)
 	 */
 	p4_spl_early_puts("psram: check skipped (hex mode)\n");
 
-	/*
-	 * Release hart1 (AP CPU) from reset last of all. TRM ch.12 Reset and
-	 * Clock, HP_SYS_CLKRST_HP_RST_EN0 (0x500E60C0): RST_EN_CORE1_GLOBAL
-	 * (bit 8, default 1) holds hart1 in reset out of power-on. IDF's
-	 * bootloader leaves it held; this release is Linux-specific. Hart1 boots from the static HP
-	 * ROM vector (LP_CLKRST STAT_VECTOR_SEL default 1 = 0x4FC00000) and
-	 * parks in the ROM. With it held, hart1's CLIC window (0x208xxxxx)
-	 * faults, which kills the kernel's timer affinity setup
-	 * (p4_configure_slot store to 0x20811044). Releasing it here gives
-	 * its ROM boot the whole U-Boot boot to settle before anything
-	 * (p4boot/Linux) needs the second hart's window: releasing it from
-	 * the prompt and jumping within seconds was observed to corrupt
-	 * U-Boot's stack via the still-active ROM boot (store fault with
-	 * TVAL = 0xC), while a settled release is stable.
-	 */
-	clrbits_le32((void *)0x500e60c0u, BIT(8));
-	p4_spl_early_puts("psram: hart1 released\n");
-
 	return 0;
 }

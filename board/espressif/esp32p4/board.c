@@ -599,8 +599,8 @@ static int p4_prep_dtb(void)
 /*
  * Publish the firmware mailbox (status = 2 = pending until the waiter
  * proves itself), then park hart1 in the LP-RAM waiter: install,
- * read back, unstall it, enable its clock, deassert reset, and publish
- * its entry through the ROM hook. Then wait for it to report parked.
+ * read back, unstall it, enable its clock, publish the ROM boot hook,
+ * then deassert reset. Then wait for it to report parked.
  * Returns 1 when hart1 is parked (SMP on), 0 otherwise; on 0 the magic
  * is cleared so the kernel fails the SMP validate fast instead of
  * hanging a hart.
@@ -647,10 +647,10 @@ static int p4_park_hart1(void)
 
 	/*
 	 * Park hart1 in the waiter the IDF way: unstall it (it parks in the
-	 * HP ROM at POR), make sure its clock is on and it is out of reset,
-	 * then publish the waiter through the ROM's appcpu boot hook — the
-	 * parked hart1 spins on that hook and jumps to it. No SW reset, no
-	 * reset-vector change: the ROM owns hart1's boot.
+	 * HP ROM when released), enable its clock, and publish the waiter
+	 * through the ROM hook before releasing core1. The ROM owns the
+	 * reset vector; publishing while core1 is held eliminates the
+	 * window in which it can read an empty entry.
 	 */
 	{
 		u32 v = readl((void *)P4_PMU_SW_STALL);
@@ -661,14 +661,20 @@ static int p4_park_hart1(void)
 		while ((readl((void *)P4_CORE_STALLED_ST) & BIT(1)) &&
 		       spin2++ < 100000)
 			;
+		if (readl((void *)P4_CORE_STALLED_ST) & BIT(1)) {
+			puts("p4: hart1 remains stalled\n");
+			mbox[0] = 0;
+			return 0;
+		}
 		printf("p4: stall %08x clk %08x rst %08x\n",
 		       readl((void *)P4_CORE_STALLED_ST),
 		       readl((void *)P4_CORE1_CLK),
 		       readl((void *)P4_RST_EN_CORE1));
 		/* Hart1's CPU clock gates its fetch: default off. */
 		setbits_le32((void *)P4_CORE1_CLK, BIT(4));
-		clrbits_le32((void *)P4_RST_EN_CORE1, BIT(8));
 		((void (*)(u32))P4_ROM_APPBOOT)(P4_LPRAM_WAIT);
+		asm volatile("fence iorw, iorw" ::: "memory");
+		clrbits_le32((void *)P4_RST_EN_CORE1, BIT(8));
 		printf("p4: boot hook set, cause %08x\n",
 		       readl((void *)P4_LP_RST_CAUSE));
 	}
@@ -683,6 +689,7 @@ static int p4_park_hart1(void)
 	}
 	if (mbox[1] == 1 && mbox[3] == 0) {
 		smp = 1;
+		((void (*)(u32))P4_ROM_APPBOOT)(0);
 		/* Restore entry: the kernel requires the Image address,
 		 * the 1 was only the waiter-alive marker. */
 		mbox[4] = P4_KERN_RUN;
