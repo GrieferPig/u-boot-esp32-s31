@@ -82,4 +82,12 @@ SECTIONS
 		. = ALIGN(8);
 		__bss_end = .;
 	}
+#ifdef CONFIG_ESP32P4_SRAM_ONLY
+	/* Keep proper BSS below early GD and the F malloc pool. The extra
+	 * 256 bytes cover generated GD and the downward round/alignment. */
+	ASSERT(__bss_end + 0x100 <= CONFIG_CUSTOM_SYS_INIT_SP_ADDR
+	       - (1 << CONFIG_STACK_SIZE_SHIFT) - CONFIG_SYS_MALLOC_F_LEN,
+	       "ESP32-P4 proper BSS overlaps early stack/malloc")
+#endif
+
 }

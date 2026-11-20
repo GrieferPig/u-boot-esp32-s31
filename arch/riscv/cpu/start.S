@@ -414,14 +414,22 @@ relocate_secondary_harts:
  * initialization, now running from RAM.
  */
 call_board_init_r:
-#ifdef CONFIG_ESP32P4_HW_IDF_HANDOFF
-	/* A real C cache callback may clobber caller-saved t6. */
+#if defined(CONFIG_ESP32P4_HW_IDF_HANDOFF) || defined(CONFIG_ESP32P4_SRAM_ONLY)
+	/* The C cache callbacks may clobber the caller-saved offset. */
 	mv	s6, t6
 #endif
 	jal	invalidate_icache_all
+#ifdef CONFIG_ESP32P4_SRAM_ONLY
+	/* Keep the in-place monitor; there is no relocated code to write back.
+	 * The ROM's full L2 writeback can stall on a power-on reset.
+	 */
+	beqz	s6, 11f
+#endif
 	jal	flush_dcache_all
-
-#ifdef CONFIG_ESP32P4_HW_IDF_HANDOFF
+#ifdef CONFIG_ESP32P4_SRAM_ONLY
+11:
+#endif
+#if defined(CONFIG_ESP32P4_HW_IDF_HANDOFF) || defined(CONFIG_ESP32P4_SRAM_ONLY)
 	mv	t6, s6
 #endif
 	la	t0, board_init_r        /* offset of board_init_r() */

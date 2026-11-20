@@ -11,6 +11,7 @@
 #include <linux/bitops.h>
 #include <linux/delay.h>
 #include "psram-handoff.h"
+#include "cache-range.h"
 #include "spl_hw.h"
 #include "spl_psram.h"
 #include "../common/ap-psram.h"
@@ -268,7 +269,6 @@ static void configure_cache_port(void)
 	clrsetbits_le32(REG(MSPI2 + 0xd8), 0xfu, BIT(0) | BIT(1));
 	setbits_le32(REG(MSPI3 + 0xd4), BIT(1));
 	setbits_le32(REG(MSPI2 + 0x0c), BIT(25) | BIT(26));
-	setbits_le32(REG(MSPI2 + 0x3c), BIT(0));
 }
 
 static int psram_pmp_open(u32 size)
@@ -300,7 +300,7 @@ static int psram_mmu_map(u32 size)
 	/*
 	 * Page size for the PSRAM side of the MMU (MSPI2 + 0x384). Never
 	 * programmed before, which left the window correct only with the caches
-	 * off (the uncached path does not use this mapping) and wrong as soon as
+	 * off before publishing the cached aperture and wrong as soon as
 	 * the L2 was on. 0x13200004 is what the working reference holds, with
 	 * bits [4:3] = 2 selecting 64 KiB pages - the same geometry the flash
 	 * side is given in p4_spl_flash_init().
@@ -337,26 +337,34 @@ static int psram_check_window(u32 size)
 	for (i = 0; i < pages; i++) {
 		u32 off = (i + 1) * P4_EXT_PAGE - 16;
 
+		if (p4_cache_discard_data(P4_EXT_RAM_BASE + off, 8))
+			goto sync_error;
 		for (k = 0; k < 2; k++)
 			original[i][k] =
-				readl((void *)(P4_EXT_RAM_ALIAS + off + 4 * k));
+				readl((void *)(P4_EXT_RAM_BASE + off + 4 * k));
 	}
 	for (i = 0; i < pages; i++) {
 		u32 off = (i + 1) * P4_EXT_PAGE - 16;
 		u32 sig = 0x6b53a7c9u ^ (i * 0x9e3779b9u);
 
-		writel(sig, (void *)(P4_EXT_RAM_ALIAS + off));
-		writel(~sig, (void *)(P4_EXT_RAM_ALIAS + off + 4));
+		writel(sig, (void *)(P4_EXT_RAM_BASE + off));
+		writel(~sig, (void *)(P4_EXT_RAM_BASE + off + 4));
+		/* Different virtual tags cannot hide physical aliases:
+		 * drain each write to the part before checking any page. */
+		if (p4_cache_republish(P4_EXT_RAM_BASE + off, 8))
+			goto sync_error;
+		if (!(i & 31))
+			p4_spl_wdt_feed();
 	}
 	asm volatile("fence iorw, iorw" ::: "memory");
 	for (i = 0; i < pages; i++) {
 		u32 off = (i + 1) * P4_EXT_PAGE - 16;
 		u32 sig = 0x6b53a7c9u ^ (i * 0x9e3779b9u);
 
-		if (readl((void *)(P4_EXT_RAM_ALIAS + off)) != sig ||
-		    readl((void *)(P4_EXT_RAM_ALIAS + off + 4)) != ~sig) {
+		if (readl((void *)(P4_EXT_RAM_BASE + off)) != sig ||
+		    readl((void *)(P4_EXT_RAM_BASE + off + 4)) != ~sig) {
 			p4_spl_early_puts("psram: mirror/data error at ");
-			p4_spl_early_hex(P4_EXT_RAM_ALIAS + off);
+			p4_spl_early_hex(P4_EXT_RAM_BASE + off);
 			p4_spl_early_puts("\n");
 			err = -1;
 			break;
@@ -367,10 +375,20 @@ static int psram_check_window(u32 size)
 
 		for (k = 0; k < 2; k++)
 			writel(original[i][k],
-			       (void *)(P4_EXT_RAM_ALIAS + off + 4 * k));
+			       (void *)(P4_EXT_RAM_BASE + off + 4 * k));
+		if (p4_cache_republish(P4_EXT_RAM_BASE + off, 8))
+			goto sync_error;
+		if (!(i & 31))
+			p4_spl_wdt_feed();
 	}
 	asm volatile("fence iorw, iorw" ::: "memory");
 	return err;
+
+sync_error:
+	p4_spl_early_puts("psram: cached page sync timeout at ");
+	p4_spl_early_hex(i);
+	p4_spl_early_puts("\n");
+	return -1;
 }
 
 int p4_spl_psram_init(void)
@@ -432,6 +450,8 @@ int p4_spl_psram_init(void)
 	((void (*)(u32))0x4fc004f4u)(0); /* Cache_Enable_L1_DCache */
 	((void (*)(u32))0x4fc00504u)(0); /* Cache_Enable_L2_Cache */
 	p4_spl_wdt_feed();
+	/* Enable PSRAM AXI requests and clear CLOSE_AXI_INF_EN (SLV_ERR only). */
+	clrsetbits_le32(REG(MSPI2 + 0x3c), BIT(31), BIT(0));
 	if (psram_check_window(size) || psram_pmp_open(size)) {
 		p4_spl_early_puts("psram: memory test/PMP failed; no handoff\n");
 		return -1;
@@ -444,6 +464,6 @@ int p4_spl_psram_init(void)
 	p4_spl_early_hex(size);
 	p4_spl_early_puts(" MHz ");
 	p4_spl_early_hex(P4_SPEED_MHZ);
-	p4_spl_early_puts(" page/alias test OK\n");
+	p4_spl_early_puts(" page/alias test OK (cached readback)\n");
 	return 0;
 }

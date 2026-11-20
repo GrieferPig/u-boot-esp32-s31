@@ -63,11 +63,8 @@ void p4_spl_early_hex(u32 v);
 #define P4_L2_LINE_128B			4u
 #define P4_CACHE_MAP_L2			(1u << 5)
 
-#define CACHE_MAP_L1_ALL (BIT(0) | BIT(1) | BIT(4)) /* I0, I1, shared D */
-
 typedef void (*rom_void_fn)(void);
 typedef void (*rom_flags_fn)(u32 flags);
-typedef void (*rom_invalidate_all_fn)(u32 map);
 
 static void mmu_write_entry(u32 entry, u32 content)
 {
@@ -83,7 +80,7 @@ void p4_spl_cache_init(void)
 	/* Cache geometry and flash table come from the rev1.3 mask ROM API;
 	 * use this before any cached PSRAM access. */
 	((rom_void_fn)ROM_CACHE_INIT)();
-	((rom_invalidate_all_fn)ROM_CACHE_INVALIDATE_ALL)(CACHE_MAP_L1_ALL);
+	/* The stack is live. Do not globally invalidate the shared L1 D-cache. */
 	clrsetbits_le32((void *)MMU_POWER_CTRL, MMU_PAGE_SIZE_MASK,
 			MMU_PAGE_SIZE_64K);
 	((void (*)(u32, u32, u32))ROM_CACHE_SET_L2_MODE)(P4_L2_SIZE_512K,

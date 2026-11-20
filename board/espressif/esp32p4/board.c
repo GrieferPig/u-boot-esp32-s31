@@ -4,8 +4,8 @@
  *
  * Two phases share this file:
  *  - SPL: runs from internal SRAM, brings PSRAM up and loads U-Boot proper.
- *  - U-Boot proper: runs from PSRAM at CONFIG_TEXT_BASE and boots the kernel
- *    that the SPL placed in PSRAM.
+ *  - U-Boot proper: runs from internal SRAM and boots the kernel
+ *    that the SPL placed in cached PSRAM.
  */
 
 #if defined(CONFIG_SPL_BUILD)
@@ -20,6 +20,10 @@
 #include <asm/global_data.h>
 #include <asm/arch-esp32p4/boot-layout.h>
 #include "psram-handoff.h"
+#include "cache-range.h"
+#if defined(CONFIG_ESP32P4_SRAM_ONLY) && !defined(CONFIG_SPL)
+#include <u-boot/sha256.h>
+#endif
 
 DECLARE_GLOBAL_DATA_PTR;
 
@@ -224,66 +228,21 @@ void hw_watchdog_reset(void)
 #include <command.h>
 
 /*
- * "p4load" - copy the kernel and device tree from the flash window into PSRAM.
- *
- * The PSRAM window is mapped twice: 0x48000000 is the cacheable alias and
- * 0x88000000 the non-cacheable one (SOC_NON_CACHEABLE_OFFSET_PSRAM). Writes
- * through 0x48000000 land in the L1/L2 cache and stay there - the ROM cache
- * writeback helper does not push them to the part from this context - so the
- * payload is copied through the non-cacheable alias and the kernel/DTB are
- * booted from the cacheable alias afterwards.
+ * Only the SPL's validated FIT places the kernel and its DTB in PSRAM.
+ * The final FDT lives at a separate fixed address required by Linux's
+ * AP mailbox and reserved-memory node. Use the cached address at
+ * every CPU access; bounded cache operations republish changed data.
  */
-#define P4_KERN_SRC		0x40200000u
-#define P4_DTB_SRC		0x40900000u
-#define P4_KERN_DST		0x48000000u
-/*
- * Must be the same address p4boot hands to the kernel, and the same one the SPL
- * preloads the blob to (through the alias). It used to be 0x48f00000, i.e.
- * U-Boot's own RAM top, so a p4load followed by p4boot pointed the kernel at an
- * address that never held a device tree.
- */
-#define P4_DTB_DST		0x48600000u
-/*
- * Copy through the uncached alias, not the cached window.
- *
- * 0x4800_0000 is served by the cache, and a store there lands in a cache line
- * and is never written back to the part - measured in FLASH-NOTES round 123:
- * with the part cleared to 0xFFFFFFFF through the alias, a window store shows up
- * in the window and leaves the part at 0xFFFFFFFF. A p4load through the window
- * therefore reports success while the PSRAM never receives the image. The alias
- * is the path the SPL's preload uses and is verified byte-faithful, so use it
- * here too.
- */
-#define P4_NC_OFFSET		0x40000000u
-#define P4_LOAD_CHUNK		0x1000u
+#define P4_KERN_RUN		P4_FIT_IMAGE
+#define P4_DTB_KERN		0x48f00000u
+#define P4_DTB_STAGE_BYTES	0x4000u
 
 /*
- * "p4boot" - jump straight to the preloaded kernel.
- *
- * The kernel image and the device tree are placed in PSRAM by the SPL and the
- * kernel is entered at its link address, 0x4800_0000.
- *
- * This used to carry an "alias" mode that entered at the uncached
- * 0x8800_0000 alias instead. It is gone: the kernel relocates itself to its link
- * address whatever it is entered at (measured - mepc came back as a link address),
- * so entering through the alias only moved the same failure, and the device-tree
- * /memory fixup it needed was a workaround for an address the kernel never keeps.
- * See FLASH-NOTES rounds 114 and 121-125.
+ * Internal SRAM BSS, checked against proper's live early stack/GD/heap
+ * by the linker. Staging avoids in-place FDT mutation in PSRAM.
  */
-#define P4_KERN_RUN		0x48000000u
-#define P4_DTB_RUN		0x48600000u
-#define P4_KERN_ALIAS		0x88000000u
-#define P4_DTB_ALIAS		0x88600000u
-/*
- * The kernel's SMP start (arch/riscv/kernel/cpu_ops_spinwait.c
- * p4_prepare_secondary) requires the DTB at 0x48f00000: it checks the
- * firmware mailbox's dtb field and dtb_early_pa against it, and the DTB's
- * own reserved-mem names boot-dtb@48f00000. p4boot copies the SPL blob
- * there fresh through the uncached alias at boot time, so no lifetime
- * hazard with U-Boot's own allocations exists.
- */
-#define P4_DTB_KERN		0x48f00000u
-#define P4_DTB_KERN_ALIAS	0x88f00000u
+static u8 p4_dtb_stage[P4_DTB_STAGE_BYTES] __aligned(P4_L2_LINE_BYTES);
+
 /*
  * Firmware secondary-hart mailbox, published to the kernel as
  * /chosen espressif,cpu1-boot-mailbox. Layout and values must match both
@@ -316,141 +275,19 @@ void hw_watchdog_reset(void)
 #define P4_ROM_APPBOOT		0x4fc000a8u
 
 /*
- * "p4wb [map]" - ROM Cache_WriteBack_All (0x4fc00414), map bits from
- * esp32p4/rom/cache.h: 0x01/0x02 L1 I0/I1, 0x10 L1 D, 0x20 L2.
- *
- * This exists to settle one question: a store to the cached PSRAM window is
- * absorbed by the cache and the part keeps the old contents, so either the
- * writeback path works and nothing flushes, or it does not work at all.
- */
-static int do_p4wb(struct cmd_tbl *cmdtp, int flag, int argc,
-		   char *const argv[])
-{
-	u32 map = (1u << 4) | (1u << 5);
-
-	if (argc > 1)
-		map = simple_strtoul(argv[1], NULL, 16);
-
-	((void (*)(u32))0x4fc00414u)(map);
-	printf("p4wb: writeback all, map 0x%02x\n", map);
-	return CMD_RET_SUCCESS;
-}
-
-U_BOOT_CMD(p4wb, 2, 0, do_p4wb, "write back caches (map arg)", "[map]");
-
-/*
- * "p4wba <addr> <size>" - ROM Cache_WriteBack_Addr (0x4FC003F4) for one line or
- * range, map 0x30 (L1 D + L2, the ROM's own SPI_FLASH_MMAP_INVALIDATE_CACHE_ADDR
- * pair). A whole-cache pass returns but does not push a dirty PSRAM line, so this
- * checks whether a targeted writeback reaches the part.
- */
-static int do_p4wba(struct cmd_tbl *cmdtp, int flag, int argc,
-		    char *const argv[])
-{
-	ulong addr, size;
-
-	if (argc < 3)
-		return CMD_RET_USAGE;
-
-	addr = simple_strtoul(argv[1], NULL, 16);
-	size = simple_strtoul(argv[2], NULL, 16);
-
-	((void (*)(u32, u32, u32))0x4fc003f4u)(0x30u, (u32)addr, (u32)size);
-	printf("p4wba: writeback 0x30 @ %08lx size %lx\n", addr, size);
-	return CMD_RET_SUCCESS;
-}
-
-U_BOOT_CMD(p4wba, 3, 0, do_p4wba, "write back one range", "<addr> <size>");
-
-/*
- * Cache sync engine (real base 0x3FF10000 = IDF DR_REG_CACHE_BASE, not the
- * 0x500E5000 SYSREG block). TRM ch.9 has no register summary for these
- * (TRM 未覆盖); offsets/fields from IDF cache_reg.h v5.4.1: SYNC_CTRL +0x98
- * (WRITEBACK_ENA bit 2, SYNC_DONE bit 4, self-clearing), SYNC_MAP +0x9C
- * (bit 4 L1-D, bit 5 L2), SYNC_ADDR +0xA0 (virtual address), SYNC_SIZE +0xA4.
- */
-#define P4_CACHE_SYNC_CTRL	0x3ff10098u
-#define P4_CACHE_SYNC_MAP	0x3ff1009cu
-#define P4_CACHE_SYNC_ADDR	0x3ff100a0u
-#define P4_CACHE_SYNC_SIZE	0x3ff100a4u
-#define P4_CACHE_SYNC_MAP_D_L2	0x30u
-#define P4_CACHE_SYNC_WB	0x4u
-#define P4_CACHE_SYNC_INV	0x1u
-#define P4_CACHE_SYNC_DONE	0x10u
-
-/* One sync-engine op (writeback or invalidate) over a range; 0 = done. */
-static int p4_cache_sync_op(unsigned int addr, unsigned int bytes, unsigned int op)
-{
-	unsigned int off;
-
-	for (off = 0; off < bytes; off += 0x10000) {
-		unsigned int n = bytes - off > 0x10000 ? 0x10000
-						       : bytes - off;
-		unsigned int spin = 0;
-
-		writel(P4_CACHE_SYNC_MAP_D_L2, (void *)P4_CACHE_SYNC_MAP);
-		writel(addr + off, (void *)P4_CACHE_SYNC_ADDR);
-		writel(n, (void *)P4_CACHE_SYNC_SIZE);
-		writel(op, (void *)P4_CACHE_SYNC_CTRL);
-		while (!(readl((void *)P4_CACHE_SYNC_CTRL) &
-			 P4_CACHE_SYNC_DONE)) {
-			if (++spin > 1000000)
-				return -1;
-		}
-	}
-	asm volatile("fence" ::: "memory");
-	return 0;
-}
-
-/* Invalidate a cached PSRAM range (drop possibly stale lines). */
-static int p4_cache_sync_inv(unsigned int addr, unsigned int bytes)
-{
-	return p4_cache_sync_op(addr, bytes, P4_CACHE_SYNC_INV);
-}
-
-/*
- * Retained SRAM cache-sync stub for the kernel handoff. The kernel looks for
- * /chosen espressif,chip-revision (= 103, this silicon) and
- * espressif,cache-sync-entry (address of int sync(start, bytes) in the
- * 0x4FF00000-0x4FFC0000 retained SRAM window) and panics without them
- * ("P4 retained executable cache callback missing"). This stub lives in
- * U-Boot's own SRAM text, so it is present whenever p4boot runs, and drives
- * exactly the writeback sequence proven from the prompt: L1-D + L2, chunked,
- * DONE-polled with a timeout.
+ * Linux retains this SRAM callback for executable data. It serializes
+ * it across harts and does its own instruction fence. Complete D-cache
+ * writeback before L2 writeback, never evict dirty data here.
  */
 int p4_cache_sync_stub(unsigned int start, unsigned int bytes)
 {
 	u32 size = p4_ext_size();
-	unsigned int off;
 
 	if (!size || start < P4_EXT_RAM_BASE ||
 	    start - P4_EXT_RAM_BASE >= size ||
 	    bytes > size - (start - P4_EXT_RAM_BASE))
 		return -EINVAL;
-	if (!bytes)
-		return 0;
-	/* Cover full L2 lines, including partially changed executable data.
-	 * Both checked PSRAM bounds are aligned, so expansion stays in RAM. */
-	bytes = ALIGN(start + bytes, P4_L2_LINE_BYTES) -
-		ALIGN_DOWN(start, P4_L2_LINE_BYTES);
-	start = ALIGN_DOWN(start, P4_L2_LINE_BYTES);
-	for (off = 0; off < bytes; off += 0x10000) {
-		unsigned int n = bytes - off > 0x10000 ? 0x10000
-						       : bytes - off;
-		unsigned int spin = 0;
-
-		writel(P4_CACHE_SYNC_MAP_D_L2, (void *)P4_CACHE_SYNC_MAP);
-		writel(start + off, (void *)P4_CACHE_SYNC_ADDR);
-		writel(n, (void *)P4_CACHE_SYNC_SIZE);
-		writel(P4_CACHE_SYNC_WB, (void *)P4_CACHE_SYNC_CTRL);
-		while (!(readl((void *)P4_CACHE_SYNC_CTRL) &
-			 P4_CACHE_SYNC_DONE)) {
-			if (++spin > 1000000)
-				return -1;
-		}
-	}
-	asm volatile("fence" ::: "memory");
-	return 0;
+	return p4_cache_writeback(start, bytes) ? -EIO : 0;
 }
 
 /*
@@ -543,62 +380,77 @@ P4_WAITER_MARK(0x4a)			/* J: release seen, about to jump */
 extern char p4_waiter_start[];
 extern char p4_waiter_end[];
 
-static int p4_check_payload(void)
+static const struct p4_fit_handoff *p4_get_fit(void)
 {
-	/*
-	 * The checks read through the uncached alias on purpose: the cached window
-	 * can serve a stale line, so a magic number read through it proves nothing
-	 * about what the part actually holds.
-	 */
-	if (readl((const void *)(P4_KERN_ALIAS + 0x38)) != 0x05435352u) {
-		printf("p4: bad RISCV Image magic at %08x\n", P4_KERN_ALIAS);
-		return -1;
-	}
-	if (readl((const void *)P4_DTB_ALIAS) != 0xedfe0dd0u) {
-		printf("p4: no fdt at %08x\n", P4_DTB_ALIAS);
-		return -1;
-	}
-	return 0;
+	const struct p4_fit_handoff *fit = (void *)P4_FIT_HANDOFF;
+
+	if (!p4_ext_size() || READ_ONCE(fit->magic) != P4_FIT_MAGIC)
+		return NULL;
+	asm volatile("fence r,r" ::: "memory");
+	if (fit->image_len < 64 || fit->image_len > P4_FIT_IMAGE_LIMIT ||
+	    fit->dtb_len < sizeof(struct fdt_header) ||
+	    fit->dtb_len > P4_FIT_DTB_LIMIT)
+		return NULL;
+	return fit;
 }
 
-/*
- * Relocate the DTB to where the kernel demands it (0x48F00000, see the
- * P4_DTB_KERN comment): fresh through the uncached alias, then drop any
- * lines U-Boot may hold for the range so the libfdt edits below read
- * the fresh copy from the part. Installs the kernel handoff (retained
- * sync stub address, chip revision, cpu1 boot mailbox) into the copy.
- */
-static int p4_prep_dtb(void)
+static bool p4_fit_sha_ok(const void *data, u32 size, const u8 *expected)
 {
-	const u32 *dtb_src = (const u32 *)P4_DTB_SRC;
-	void *fdt = (void *)P4_DTB_KERN;
-	u32 dsize, newsize;
+	sha256_context ctx;
+	u8 actual[SHA256_SUM_LEN];
+	const u8 *p = data;
+
+	sha256_starts(&ctx);
+	while (size) {
+		u32 n = min_t(u32, size, 0x4000u);
+
+		sha256_update(&ctx, p, n);
+		size -= n;
+		p += n;
+	}
+	sha256_finish(&ctx, actual);
+	return !memcmp(expected, actual, sizeof(actual));
+}
+
+/* Obtain the range from the verified RISC-V Image header; check that
+ * its in-memory extent contains the exact original FIT file bytes.
+ */
+static u32 p4_image_span(const struct p4_fit_handoff *fit)
+{
+	const u8 *img = (void *)P4_KERN_RUN;
+	u32 span;
+
+	if (p4_cache_discard_data(P4_KERN_RUN, P4_L2_LINE_BYTES) ||
+	    readl(img + 0x38) != 0x05435352u || readl(img + 0x14))
+		return 0;
+	span = readl(img + 0x10);
+	return span >= fit->image_len && span <= P4_FIT_IMAGE_LIMIT ? span : 0;
+}
+
+/* Copy the checked FIT FDT into SRAM before mutating it. Pack the
+ * declared structure/strings, then copy it once into cached PSRAM.
+ * Only the data range we own is cleaned/invalidated. A subsequent
+ * full byte comparison forces a refill, not a read of dirty stores.
+ */
+static int p4_prep_dtb(const struct p4_fit_handoff *fit)
+{
+	const void *src = (void *)P4_FIT_DTB;
+	void *dst = (void *)P4_DTB_KERN;
+	void *fdt = p4_dtb_stage;
+	u32 size = p4_ext_size(), final;
 	int chosen, mem;
-	u32 size = p4_ext_size();
 	fdt32_t rev, entry, mbox[2], reg[2];
 
-	if (!size)
+	if (p4_cache_discard_data(P4_FIT_DTB, fit->dtb_len) ||
+	    !p4_fit_sha_ok(src, fit->dtb_len, fit->dtb_hash) ||
+	    fdt_check_full(src, fit->dtb_len)) {
+		puts("p4: FIT DTB cached reload invalid\n");
 		return -EINVAL;
-
-	dsize = fdt_totalsize(dtb_src);
-	if (dsize < 40 || dsize > 0x10000) {
-		printf("p4: implausible dtb size %x\n", dsize);
-		return -1;
-	}
-	memcpy((void *)(P4_DTB_KERN_ALIAS), (const void *)P4_DTB_ALIAS, dsize);
-	if (readl((const void *)P4_DTB_KERN_ALIAS) != 0xedfe0dd0u) {
-		printf("p4: dtb relocate failed\n");
-		return -1;
-	}
-	if (p4_cache_sync_inv(P4_DTB_KERN, 0x00010000)) {
-		printf("p4: dtb invalidate failed\n");
-		return -1;
 	}
 
-	newsize = min_t(u32, fdt_totalsize(fdt) + 0x1000, 0x10000u);
-	if (fdt_open_into(fdt, fdt, newsize)) {
-		printf("p4: fdt_open_into failed\n");
-		return -1;
+	if (fdt_open_into(src, fdt, sizeof(p4_dtb_stage))) {
+		puts("p4: DTB does not fit into SRAM staging\n");
+		return -EINVAL;
 	}
 	mem = fdt_path_offset(fdt, "/memory@48000000");
 	reg[0] = cpu_to_fdt32(P4_EXT_RAM_BASE);
@@ -612,24 +464,37 @@ static int p4_prep_dtb(void)
 
 	chosen = fdt_path_offset(fdt, "/chosen");
 	if (chosen < 0) {
-		printf("p4: no /chosen in dtb\n");
-		return -1;
+		puts("p4: no /chosen in dtb\n");
+		return -EINVAL;
 	}
 	rev = cpu_to_fdt32(103);
 	entry = cpu_to_fdt32((u32)p4_cache_sync_stub);
 	mbox[0] = cpu_to_fdt32(P4_MBOX_ADDR);
 	mbox[1] = cpu_to_fdt32(P4_MBOX_SIZE);
-	if (fdt_setprop(fdt, chosen, "espressif,chip-revision",
-			&rev, 4) ||
-	    fdt_setprop(fdt, chosen, "espressif,cache-sync-entry",
-			&entry, 4) ||
-	    fdt_setprop(fdt, chosen, "espressif,cpu1-boot-mailbox",
-			mbox, 8)) {
-		printf("p4: fdt setprop failed\n");
-		return -1;
+	if (fdt_setprop(fdt, chosen, "espressif,chip-revision", &rev, 4) ||
+	    fdt_setprop(fdt, chosen, "espressif,cache-sync-entry", &entry, 4) ||
+	    fdt_setprop(fdt, chosen, "espressif,cpu1-boot-mailbox", mbox, 8) ||
+	    fdt_pack(fdt)) {
+		puts("p4: DTB fixup/pack failed\n");
+		return -EINVAL;
+	}
+	final = fdt_totalsize(fdt);
+	if (final < sizeof(struct fdt_header) || final > sizeof(p4_dtb_stage) ||
+	    fdt_check_full(fdt, final))
+		return -EINVAL;
+	memcpy(dst, fdt, final);
+	if (p4_cache_republish(P4_DTB_KERN, final)) {
+		puts("p4: final cached DTB sync failed\n");
+		return -EIO;
+	}
+	if (fdt_check_full(dst, final) || memcmp(dst, fdt, final)) {
+		puts("p4: final cached DTB reload mismatch\n");
+		return -EIO;
 	}
 	printf("p4: handoff stub @ %08x mbox @ %08x\n",
 	       (u32)p4_cache_sync_stub, P4_MBOX_ADDR);
+	printf("P4 DTB-CACHED: %u byte reload OK, mem %08x/%08x\n",
+	       final, P4_EXT_RAM_BASE, size);
 	return 0;
 }
 
@@ -750,34 +615,47 @@ static int do_p4boot(struct cmd_tbl *cmdtp, int flag, int argc,
 		     char *const argv[])
 {
 	void (*kernel)(u32 hart, void *dtb) = (void *)P4_KERN_RUN;
+	const struct p4_fit_handoff *fit = p4_get_fit();
+	bool verify = argc == 2 && !strcmp(argv[1], "verify");
+	u32 span;
 
-	if (p4_check_payload() || p4_prep_dtb())
-		return CMD_RET_FAILURE;
-
-	if (!p4_park_hart1())
-		return CMD_RET_FAILURE;
-	printf("p4boot: kernel %08x fdt %08x, jumping\n", P4_KERN_RUN, P4_DTB_KERN);
-
-	/*
-	 * Push the payload (and the freshly patched DTB) to the part before
-	 * entering the kernel: instruction/data fetches must see device
-	 * contents, not just dirty cache lines.
-	 */
-	if (p4_cache_sync_stub(P4_KERN_RUN, 0x00400000) ||
-	    p4_cache_sync_stub(P4_DTB_KERN, 0x00010000)) {
-		printf("p4boot: cache sync failed\n");
+	if (argc > 1 && !verify)
+		return CMD_RET_USAGE;
+	if (!fit || !(span = p4_image_span(fit))) {
+		puts("p4boot: missing or invalid SPL FIT handoff\n");
 		return CMD_RET_FAILURE;
 	}
+	if (p4_prep_dtb(fit) || !p4_park_hart1())
+		return CMD_RET_FAILURE;
 
-	asm volatile("csrci mstatus, 8" ::: "memory");	/* clear MIE */
-	asm volatile("fence.i" ::: "memory");
-	asm volatile("fence" ::: "memory");
-
+	/*
+	 * SPL has already written back and checked these bytes. There are no
+	 * writers to the Image here. Drop stale data and instruction lines
+	 * for the bounded Image only, then (opt-in) rehash exact FIT bytes.
+	 */
+	if (p4_cache_discard_data(P4_KERN_RUN, span) ||
+	    p4_cache_range(P4_KERN_RUN, span, P4_SYNC_L1I,
+			   P4_SYNC_INVALIDATE)) {
+		puts("p4boot: Image cache invalidate failed\n");
+		return CMD_RET_FAILURE;
+	}
+	if (verify) {
+		if (!p4_fit_sha_ok((void *)P4_KERN_RUN, fit->image_len,
+				   fit->image_hash)) {
+			puts("p4boot: cached Image SHA256 mismatch; halted\n");
+			return CMD_RET_FAILURE;
+		}
+		printf("p4boot: cached Image SHA256 recheck OK (%u bytes)\n",
+		       fit->image_len);
+	}
+	printf("p4boot: kernel %08x fdt %08x, jumping\n", P4_KERN_RUN, P4_DTB_KERN);
+	asm volatile("csrci mstatus,8; fence rw,rw; fence.i" ::: "memory");
 	kernel(0, (void *)P4_DTB_KERN);
 	return CMD_RET_SUCCESS;
 }
 
-U_BOOT_CMD(p4boot, 1, 0, do_p4boot, "jump to the preloaded kernel", "");
+U_BOOT_CMD(p4boot, 2, 0, do_p4boot, "jump to the preloaded kernel",
+	   "[verify] - also recheck exact FIT Image SHA256");
 
 /*
  * "p4park" - run the full p4boot prep (DTB relocate + handoff + mailbox +
@@ -787,9 +665,10 @@ U_BOOT_CMD(p4boot, 1, 0, do_p4boot, "jump to the preloaded kernel", "");
 static int do_p4park(struct cmd_tbl *cmdtp, int flag, int argc,
 		     char *const argv[])
 {
+	const struct p4_fit_handoff *fit = p4_get_fit();
 	int smp;
 
-	if (p4_check_payload() || p4_prep_dtb())
+	if (!fit || !p4_image_span(fit) || p4_prep_dtb(fit))
 		return CMD_RET_FAILURE;
 
 	smp = p4_park_hart1();
@@ -862,58 +741,6 @@ static int do_p4csr(struct cmd_tbl *cmdtp, int flag, int argc,
 U_BOOT_CMD(p4csr, 2, 0, do_p4csr, "read one CSR (PMA/PMP/mode)",
 	   "<csr number>");
 
-static int do_p4load(struct cmd_tbl *cmdtp, int flag, int argc,
-		     char *const argv[])
-{
-	const u32 *kern = (const u32 *)P4_KERN_SRC;
-	const u32 *dtb = (const u32 *)P4_DTB_SRC;
-	u32 ksize, dsize, off;
-
-	if (dtb[0] != 0xedfe0dd0u) {
-		printf("p4load: no fdt at 0x%08x\n", P4_DTB_SRC);
-		return CMD_RET_FAILURE;
-	}
-
-	ksize = kern[4];			/* arm64 image_size at 0x10 */
-	dsize = __builtin_bswap32(dtb[1]);	/* fdt totalsize, big endian */
-	if (ksize < 0x100000u || ksize > 0x01000000u || dsize > 0x10000u) {
-		printf("p4load: implausible sizes k=%x d=%x\n", ksize, dsize);
-		return CMD_RET_FAILURE;
-	}
-
-	printf("p4load: start k=%x d=%x\n", ksize, dsize);
-
-	for (off = 0; off < dsize; off += P4_LOAD_CHUNK) {
-		u32 n = dsize - off > P4_LOAD_CHUNK ? P4_LOAD_CHUNK
-						    : dsize - off;
-
-		printf("p4load: dtb off %x src %08x\n", off,
-		       readl((const void *)(P4_DTB_SRC + off)));
-		memcpy((void *)(P4_DTB_DST + P4_NC_OFFSET + off),
-		       (const void *)(P4_DTB_SRC + off), n);
-		printf("p4load: dtb off %x copied\n", off);
-	}
-	printf("p4load: dtb done\n");
-
-	for (off = 0; off < ksize; off += P4_LOAD_CHUNK) {
-		u32 n = ksize - off > P4_LOAD_CHUNK ? P4_LOAD_CHUNK
-						    : ksize - off;
-
-		printf("p4load: k off %x\n", off);
-		memcpy((void *)(P4_KERN_DST + P4_NC_OFFSET + off),
-		       (const void *)(P4_KERN_SRC + off), n);
-		printf("p4load: k off %x done\n", off);
-	}
-
-	printf("p4load: kernel %x bytes -> 0x%08x (%08x), dtb %x -> 0x%08x (%08x)\n",
-	       ksize, P4_KERN_DST, readl((void *)P4_KERN_DST), dsize,
-	       P4_DTB_DST, readl((void *)P4_DTB_DST));
-	return CMD_RET_SUCCESS;
-}
-
-U_BOOT_CMD(p4load, 1, 1, do_p4load,
-	   "copy kernel and fdt from flash into psram",
-	   "");
 #endif
 
 void hw_watchdog_init(void)

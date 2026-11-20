@@ -18,6 +18,7 @@
 /* Limit position-independent proper payload below the live SPL. Its
  * BSS can reuse the SPL only after handoff. */
 #include "psram-handoff.h"
+#include "cache-range.h"
 
 #define FLASH_WIN 0x40000000U
 #define FIT_OFF   0x000f0000U
@@ -25,16 +26,16 @@
 #define CHUNK     0x4000U
 struct fit_slot {
 	const char *node, *type, *os;
-	u32 off, dst, store, limit;
+	u32 off, dst, limit;
 };
 static const struct fit_slot slots[] = {
-	{ "uboot", "standalone", "u-boot", 0x100000, P4_PROPER_BASE, P4_PROPER_BASE, P4_PROPER_SLOT },
-	{ "linux", "kernel", "linux", 0x200000, 0x48000000, 0x88000000, 0x400000 },
-	{ "dtb", "flat_dt", "linux", 0x900000, 0x48600000, 0x88600000, 0x10000 },
+	{ "uboot", "standalone", "u-boot", 0x100000, P4_PROPER_BASE, P4_PROPER_SLOT },
+	{ "linux", "kernel", "linux", 0x200000, P4_FIT_IMAGE, P4_FIT_IMAGE_LIMIT },
+	{ "dtb", "flat_dt", "linux", 0x900000, P4_FIT_DTB, P4_FIT_DTB_LIMIT },
 };
 struct payload {
 	u32 len;
-	const u8 *hash;
+	u8 hash[SHA256_SUM_LEN];
 };
 
 static int prop(const void *f, int n, const char *k, const void *val, int size)
@@ -62,6 +63,7 @@ static int describe(const void *f, int images, int i, struct payload *p)
 	const struct fit_slot *s = slots + i;
 	int len, n = fdt_subnode_offset(f, images, s->node), h;
 	u32 off, load, entry;
+	const u8 *hash;
 
 	if (n < 0 || !STR(f, n, "type", s->type) || !STR(f, n, "os", s->os) ||
 	    !STR(f, n, "arch", "riscv") || !STR(f, n, "compression", "none") ||
@@ -74,8 +76,11 @@ static int describe(const void *f, int images, int i, struct payload *p)
 	h = fdt_subnode_offset(f, n, "hash-1");
 	if (h < 0 || !STR(f, h, "algo", "sha256"))
 		return -1;
-	p->hash = fdt_getprop(f, h, "value", &len);
-	return p->hash && len == SHA256_SUM_LEN ? 0 : -1;
+	hash = fdt_getprop(f, h, "value", &len);
+	if (!hash || len != SHA256_SUM_LEN)
+		return -1;
+	memcpy(p->hash, hash, SHA256_SUM_LEN);
+	return 0;
 }
 
 int p4_spl_load_fit(void)
@@ -84,7 +89,9 @@ int p4_spl_load_fit(void)
 	struct payload p[ARRAY_SIZE(slots)];
 	int i, conf, images;
 	u32 off, n, kspan, psram_size = p4_ext_size();
+	struct p4_fit_handoff *rec = (void *)P4_FIT_HANDOFF;
 
+	WRITE_ONCE(rec->magic, 0);
 	if (!psram_size)
 		goto invalid;
 
@@ -104,11 +111,11 @@ int p4_spl_load_fit(void)
 		    (i && (slots[i].dst - P4_EXT_RAM_BASE > psram_size ||
 		     slots[i].limit > psram_size - (slots[i].dst - P4_EXT_RAM_BASE))))
 			goto invalid;
-	/* All ranges checked before the first copy. Verify the bytes actually
-	 * loaded, including PSRAM via its uncached alias. No raw fallback. */
+	/* All ranges checked before the first copy. Hash the cached reload
+	 * after draining and invalidating both data levels. No raw fallback. */
 	for (i = 0; i < ARRAY_SIZE(slots); i++) {
 		const struct fit_slot *s = &slots[i];
-		u8 *mem = (u8 *)(uintptr_t)s->store;
+		u8 *mem = (u8 *)(uintptr_t)s->dst;
 		const u8 *src = (const u8 *)(uintptr_t)(FLASH_WIN + s->off);
 		sha256_context ctx;
 		u8 sum[SHA256_SUM_LEN];
@@ -117,6 +124,8 @@ int p4_spl_load_fit(void)
 		for (off = 0; off < p[i].len; off += n) {
 			n = min(CHUNK, p[i].len - off);
 			memcpy(mem + off, src + off, n);
+			if (i && p4_cache_republish(s->dst + off, n))
+				goto sync_error;
 			sha256_update(&ctx, mem + off, n);
 			p4_spl_wdt_feed();
 		}
@@ -129,19 +138,30 @@ int p4_spl_load_fit(void)
 	}
 	/* RISC-V Image.image_size includes its uninitialized tail; FIT stores
 	 * only file bytes. Never read fill or the next object as kernel data. */
-	if (readl((void *)(slots[1].store + 0x38)) != 0x05435352 ||
-	    readl((void *)(slots[1].store + 0x14)) ||
-	    fdt_check_header((void *)slots[2].store) ||
-	    fdt_totalsize((void *)slots[2].store) != p[2].len)
+	if (readl((void *)(slots[1].dst + 0x38)) != 0x05435352 ||
+	    readl((void *)(slots[1].dst + 0x14)) ||
+	    fdt_check_header((void *)slots[2].dst) ||
+	    fdt_totalsize((void *)slots[2].dst) != p[2].len)
 		goto invalid;
-	kspan = readl((void *)(slots[1].store + 0x10));
+	kspan = readl((void *)(slots[1].dst + 0x10));
 	if (kspan < p[1].len || kspan > slots[1].limit)
 		goto invalid;
-	memset((void *)(slots[1].store + p[1].len), 0, kspan - p[1].len);
+	memset((void *)(slots[1].dst + p[1].len), 0, kspan - p[1].len);
+	if (p4_cache_republish(slots[1].dst + p[1].len, kspan - p[1].len))
+		goto sync_error;
+	rec->image_len = p[1].len;
+	rec->dtb_len = p[2].len;
+	memcpy(rec->image_hash, p[1].hash, SHA256_SUM_LEN);
+	memcpy(rec->dtb_hash, p[2].hash, SHA256_SUM_LEN);
+	asm volatile("fence rw,w" ::: "memory");
+	WRITE_ONCE(rec->magic, P4_FIT_MAGIC);
 	((int (*)(u32, u32, u32))0x4fc003f4)(0x10, slots[0].dst, p[0].len);
 	((int (*)(u32, u32, u32))0x4fc003f4)(0x20, slots[0].dst, p[0].len);
 	asm volatile("fence rw,rw; fence.i" ::: "memory");
 	return 0;
+sync_error:
+	puts("P4 FIT: cached payload sync timeout; halted\n");
+	return -1;
 invalid:
 	puts("P4 FIT: invalid manifest/image; halted\n");
 	return -1;
