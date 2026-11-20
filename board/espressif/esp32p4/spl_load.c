@@ -11,6 +11,9 @@
 #include "spl_load.h"
 #include "spl_nor.h"
 #include "ubload.h"
+#ifdef CONFIG_ESP32P4_SPL_IDF_INIT
+#include "idf-init/abi.h"
+#endif
 
 void p4_spl_puts(const char *s);
 void p4_spl_early_hex(u32 v);
@@ -61,23 +64,7 @@ int p4_spl_load_uboot(void)
 	p4_spl_early_hex(readl((void *)0x40100004));
 	p4_spl_puts("\n");
 
-	/* Is the lower half of the HP SRAM free for U-Boot? */
-	{
-		static const u32 addr[] = { 0x4ff00000, 0x4ff20000, 0x4ff3fffc };
-		u32 i;
-
-		p4_spl_puts("P4S ");
-		for (i = 0; i < 3; i++) {
-			writel(~addr[i], (void *)addr[i]);
-			p4_spl_puts(readl((void *)addr[i]) == ~addr[i] ? ":ok" : ":BAD");
-		}
-		p4_spl_puts("\n");
-	}
-
-	p4_spl_puts("payload ");
-	writel(0x12345678, (void *)P4_UBOOT_LOAD_ADDR);
-	p4_spl_early_hex(readl((void *)P4_UBOOT_LOAD_ADDR));
-	p4_spl_puts("\n");
+	/* Never probe-write the ROM interface word at 0x4ff3fffc. */
 
 	/* Copy in chunks so progress is visible on the console. */
 	{
@@ -157,5 +144,8 @@ void p4_spl_enter_uboot(u32 dtb)
 
 	udelay(10000);
 
+#ifdef CONFIG_ESP32P4_SPL_IDF_INIT
+	p4_idf_api()->finish();
+#endif
 	entry(0, dtb);
 }

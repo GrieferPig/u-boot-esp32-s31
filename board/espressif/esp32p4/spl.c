@@ -123,7 +123,7 @@ void p4_spl_early_hex(u32 value)
 }
 
 /*
- * The ROM does not zero our BSS (the image carries a single load segment), so
+ * The ROM does not zero our BSS (the SRAM segments contain only initialized data), so
  * do it before start.S reads the global-data lottery word from BSS.
  */
 static void p4_spl_clear_bss(void)
@@ -134,9 +134,24 @@ static void p4_spl_clear_bss(void)
 		*p++ = 0;
 }
 
+#ifdef CONFIG_ESP32P4_SPL_IDF_INIT
+#include "idf-init/abi.h"
+#endif
+
 void harts_early_init(void)
 {
 	p4_spl_clear_bss();
+#ifdef CONFIG_ESP32P4_SPL_IDF_INIT
+	/* No system-wide watchdog, clock or memory writes ahead of the
+	 * matched bootloader hardware sequence. This is ROM-loaded SRAM. */
+	if (p4_idf_api()->magic != P4_IDF_MAGIC || p4_idf_api()->start()) {
+		p4_spl_puts("P4SPL: matched init failed; halted\n");
+		for (;;)
+			asm volatile("wfi");
+	}
+	p4_systimer_enable();
+	p4_spl_puts("P4SPL: IDF hardware init returned\n");
+#else
 	void *wdt = (void *)P4_LP_WDT_BASE;
 
 	p4_systimer_enable();
@@ -169,6 +184,7 @@ void harts_early_init(void)
 	}
 
 	p4_spl_puts("P4SPL:wdt-off\n");
+#endif
 }
 
 static void p4_dump_block(const char *name, u32 base, int first, int last)

@@ -274,6 +274,10 @@ static void psram_replay(void)
 	 */
 	for (i = 0; i < ARRAY_SIZE(psram_m3); i++)
 		writel(psram_m3[i].val, (void *)(P4_MSPI3_BASE + psram_m3[i].off));
+#ifndef CONFIG_ESP32P4_SPL_IDF_INIT
+	/* Legacy captures describe an already-running application. Replaying
+	 * these over the matched bootloader state also gates the analog I2C
+	 * clock while the ADC entropy source still owns it. */
 	for (i = 0; i < ARRAY_SIZE(psram_ck); i++)
 		writel(psram_ck[i].val, (void *)(P4_CLKRST_BASE + psram_ck[i].off));
 	for (i = 0; i < ARRAY_SIZE(psram_lpc); i++)
@@ -282,6 +286,7 @@ static void psram_replay(void)
 		writel(psram_lpp[i].val, (void *)(P4_LPPERI_BASE + psram_lpp[i].off));
 	for (i = 0; i < ARRAY_SIZE(psram_pmu); i++)
 		writel(psram_pmu[i].val, (void *)(P4_PMU_BASE + psram_pmu[i].off));
+#endif
 	udelay(100);
 }
 
@@ -455,11 +460,13 @@ static const u32 psram_pmu_state[][2] = {
 
 static void psram_pmu_fixup(void)
 {
+#ifndef CONFIG_ESP32P4_SPL_IDF_INIT
 	void *pmu = (void *)P4_PMU_BASE;
 	u32 i;
 
 	for (i = 0; i < ARRAY_SIZE(psram_pmu_state); i++)
 		writel(psram_pmu_state[i][1], pmu + psram_pmu_state[i][0]);
+#endif
 }
 
 
@@ -1499,13 +1506,33 @@ static int psram_timing_tune(void)
  * M-mode `go` at the same address works, U-mode fetch faults). Mirror the
  * generic entry, unlocked, so the kernel keeps full control.
  */
-static void psram_pmp_open(void)
+static int psram_pmp_open(void)
 {
+#ifdef CONFIG_ESP32P4_SPL_IDF_INIT
+	/* The IDF bootloader has set CPU/peripheral/ROM protection. Do not
+	 * replace its first PMP config word with the legacy catch-all.
+	 * Use the same PSRAM-only window as the existing AP contract. */
+	u32 addr = 0x127fffff, cfg = 0x1f000000, prior, actual;
+
+	asm volatile("csrr %0, 0x3a1; csrr %1, 0x3b7"
+		     : "=r"(prior), "=r"(actual));
+	if (prior & 0xff000000)
+		return (prior >> 24) == 0x1f && actual == addr ? 0 : -1;
+
+	asm volatile("csrw 0x3b7, %0; csrs 0x3a1, %1; fence" ::
+		     "r"(addr), "r"(cfg) : "memory");
+	asm volatile("csrr %0, 0x3a1; csrr %1, 0x3b7"
+		     : "=r"(prior), "=r"(actual));
+	if ((prior >> 24) != 0x1f || actual != addr)
+		return -1;
+#else
 	u32 all = ~0u, rwxn = 0x1fu; /* NAPOT | R | W | X, unlocked */
 
 	asm volatile("csrw 0x3b0, %0" :: "r" (all));
 	asm volatile("csrw 0x3a0, %0" :: "r" (rwxn));
 	asm volatile("fence" ::: "memory");
+#endif
+	return 0;
 }
 
 /*
@@ -1923,8 +1950,13 @@ int p4_spl_psram_init(void)
 	 * the MSPI2 window and both reads and writes are correct - that is the
 	 * state every working verification in this port has been run in.
 	 */
-	psram_pmp_open();
+	if (psram_pmp_open()) {
+		p4_spl_early_puts("psram: PMP window unavailable\n");
+		return -1;
+	}
+#ifndef CONFIG_ESP32P4_SPL_IDF_INIT
 	psram_pma_non_cacheable();
+#endif
 	psram_mmu_map(0x01000000);
 
 	/*
@@ -1962,8 +1994,8 @@ int p4_spl_psram_init(void)
 	/*
 	 * Release hart1 (AP CPU) from reset last of all. TRM ch.12 Reset and
 	 * Clock, HP_SYS_CLKRST_HP_RST_EN0 (0x500E60C0): RST_EN_CORE1_GLOBAL
-	 * (bit 8, default 1) holds hart1 in reset out of power-on; IDF's
-	 * bootloader releases it for the app. Hart1 boots from the static HP
+	 * (bit 8, default 1) holds hart1 in reset out of power-on. IDF's
+	 * bootloader leaves it held; this release is Linux-specific. Hart1 boots from the static HP
 	 * ROM vector (LP_CLKRST STAT_VECTOR_SEL default 1 = 0x4FC00000) and
 	 * parks in the ROM. With it held, hart1's CLIC window (0x208xxxxx)
 	 * faults, which kills the kernel's timer affinity setup

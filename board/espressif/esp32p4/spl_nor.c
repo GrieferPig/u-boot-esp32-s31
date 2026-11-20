@@ -80,6 +80,7 @@ static void mmu_write_entry(u32 entry, u32 content)
 }
 
 
+#ifndef CONFIG_ESP32P4_SPL_IDF_INIT
 static void cache_enable_all(void)
 {
 	/* External memory (flash and PSRAM) goes through the L2 cache on the P4. */
@@ -89,14 +90,20 @@ static void cache_enable_all(void)
 	((rom_flags_fn)ROM_CACHE_EN_IC1)(0);
 }
 
+#endif
+
 int p4_spl_flash_init(u32 size)
 {
 	u32 pages = DIV_ROUND_UP(size, P4_MMU_PAGE_SIZE);
-	u32 i, val;
+	u32 i;
+#ifndef CONFIG_ESP32P4_SPL_IDF_INIT
+	u32 val;
+#endif
 
 	if (pages > P4_MMU_ENTRY_COUNT)
 		return -1;
 
+#ifndef CONFIG_ESP32P4_SPL_IDF_INIT
 	/* Make sure the cache block clock is up before touching the MMU. */
 	/*
 	 * Do not touch PERI_CLK_CTRL02 here: the reference boot leaves it at 0,
@@ -126,13 +133,17 @@ int p4_spl_flash_init(u32 size)
 	for (i = 0; i < P4_MMU_ENTRY_COUNT; i++)
 		mmu_write_entry(i, 0);
 
-	/* Linear map: virtual page i -> physical page i. */
+#endif
+	/* IDF already initialized cache geometry and the fixed 64-KiB MMU.
+	 * Only the raw Linux flash window, not an IDF app mapping, is ours. */
 	for (i = 0; i < pages; i++)
 		mmu_write_entry(i, i | P4_MMU_FLASH_VALID);
 
+#ifndef CONFIG_ESP32P4_SPL_IDF_INIT
 	p4_spl_puts("en ");
 	cache_enable_all();
 	udelay(100);
+#endif
 	p4_spl_puts("ok ");
 
 	return 0;
