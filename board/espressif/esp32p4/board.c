@@ -279,9 +279,7 @@ void hw_watchdog_reset(void)
 #define P4_MBOX_ADDR		0x4ff3c000u
 #define P4_MBOX_SIZE		28u
 #define P4_MBOX_MAGIC		0x534d5034u
-/* Hart1 waiter home: LP TCM RAM, selected by HPCORE1_STAT_VECTOR_SEL
- * (LP_CLKRST+0x14 bit 31 = 0; IDF lp_clkrst_reg.h). HPCORE1_SW_RESET
- * (same register, bit 29, WT) reboots hart1 into it. */
+/* Hart1 waiter home: the HP mask ROM jumps here via its appcpu hook. */
 #define P4_LPRAM_WAIT		0x50108000u
 #define P4_LPCLKRST_CTRL0	0x50111014u
 #define P4_RST_EN_CORE1		0x500e60c0u
@@ -428,16 +426,35 @@ int p4_cache_sync_stub(unsigned int start, unsigned int bytes)
 
 /*
  * Hart1 firmware waiter, copied to LP RAM by p4boot and entered via
- * HPCORE1_SW_RESET with STAT_VECTOR_SEL = LP RAM. Mirrors the retained IDF
+ * ets_set_appcpu_boot_addr with no secondary software reset. Mirrors the IDF
  * loader's secondary_wait (main/p4_hardware_loader.c): M-mode, interrupts
  * off out of reset; open user-PSRAM PMP entry 7 exactly as IDF does
- * (PMP_L|NAPOT|R|W|X over [0x48000000, 0x58000000): pmpaddr7 = 0x127FFFFF,
+ * (PMP_L|NAPOT|R|W|X over [0x48000000, 0x4c000000): pmpaddr7 = 0x127FFFFF,
  * the entry-7 byte of pmpcfg1 = 0x9F); report 0/1 in mailbox status; then
  * poll release and jump to the kernel image entry, whose head selects the
  * secondary path itself (arch/riscv/kernel/head.S esp32p4_secondary_start).
  * Both HP harts share L1D, so the SRAM mailbox needs no cache management.
  * Written with the assembler (never hand-encoded) and position-independent.
  */
+/* No stack, function calls or absolute code references: this entire waiter
+ * moves into LP RAM. Limit polling so a full UART cannot stop CPU bringup.
+ * t2-t6 are disposable at each marker; t0, t1, a0 and a1 are preserved.
+ * Numeric labels are local to each expansion. TXFIFO_CNT = STATUS[23:16]. */
+#define P4_WAITER_MARK(value) \
+ "	lui t4, 0x500ca\n" \
+ "	li t5, 100\n" \
+ "	li t2, 128\n" \
+ "	li t3, " #value "\n" \
+ "90:	lw t6, 0x1c(t4)\n" \
+ "	srli t6, t6, 16\n" \
+ "	andi t6, t6, 0xff\n" \
+ "	bltu t6, t5, 91f\n" \
+ "	addi t2, t2, -1\n" \
+ "	bnez t2, 90b\n" \
+ "	j 92f\n" \
+ "91:	sw t3, 0(t4)\n" \
+ "92:\n"
+
 __asm__(
 ".pushsection .text.hart1waiter,\"ax\"\n"
 ".global p4_waiter_start\n"
@@ -446,6 +463,7 @@ __asm__(
 "	li t1, 1\n"
 "	sw t1, 16(t0)\n"		/* marker: entry = hartid (alive) */
 "	fence\n"
+P4_WAITER_MARK(0x57)			/* W: entered */
 "1:	lw t1, 0(t0)\n"		/* magic published? */
 "	li t2, 0x534d5034\n"
 "	bne t1, t2, 1b\n"
@@ -468,6 +486,7 @@ __asm__(
 "3:	sw zero, 12(t0)\n"		/* status = 0 (PMP ok) */
 "	li t1, 1\n"
 "	sw t1, 4(t0)\n"			/* ready = 1 (IRQ-off and parked) */
+P4_WAITER_MARK(0x50)			/* P: ready/parked */
 "5:	lw t1, 8(t0)\n"		/* release? */
 "	beqz t1, 5b\n"
 "	lw t1, 12(t0)\n"		/* paranoia: jump only on success */
@@ -476,11 +495,13 @@ __asm__(
 "	lw t1, 16(t0)\n"		/* entry */
 "	lw a1, 20(t0)\n"		/* dtb */
 "	li a0, 1\n"
+P4_WAITER_MARK(0x4a)			/* J: release seen, about to jump */
 "	jr t1\n"
 ".global p4_waiter_end\n"
 "p4_waiter_end:\n"
 ".popsection\n"
 );
+#undef P4_WAITER_MARK
 extern char p4_waiter_start[];
 extern char p4_waiter_end[];
 
@@ -563,8 +584,8 @@ static int p4_prep_dtb(void)
 /*
  * Publish the firmware mailbox (status = 2 = pending until the waiter
  * proves itself), then park hart1 in the LP-RAM waiter: install,
- * read back, select LP RAM as its reset vector, enable its CPU clock,
- * SW-reset it, release it, then wait for it to report parked.
+ * read back, unstall it, enable its clock, deassert reset, and publish
+ * its entry through the ROM hook. Then wait for it to report parked.
  * Returns 1 when hart1 is parked (SMP on), 0 otherwise; on 0 the magic
  * is cleared so the kernel fails the SMP validate fast instead of
  * hanging a hart.
