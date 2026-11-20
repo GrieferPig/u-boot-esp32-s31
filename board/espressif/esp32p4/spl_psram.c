@@ -11,6 +11,7 @@
 #include <linux/bitops.h>
 #include <linux/delay.h>
 #include "psram-handoff.h"
+#include "cache-range.h"
 #include "spl_hw.h"
 #include "spl_psram.h"
 #include "../common/ap-psram.h"
@@ -268,7 +269,6 @@ static void configure_cache_port(void)
 	clrsetbits_le32(REG(MSPI2 + 0xd8), 0xfu, BIT(0) | BIT(1));
 	setbits_le32(REG(MSPI3 + 0xd4), BIT(1));
 	setbits_le32(REG(MSPI2 + 0x0c), BIT(25) | BIT(26));
-	setbits_le32(REG(MSPI2 + 0x3c), BIT(0));
 }
 
 static int psram_pmp_open(u32 size)
@@ -300,7 +300,7 @@ static int psram_mmu_map(u32 size)
 	/*
 	 * Page size for the PSRAM side of the MMU (MSPI2 + 0x384). Never
 	 * programmed before, which left the window correct only with the caches
-	 * off (the uncached path does not use this mapping) and wrong as soon as
+	 * off before publishing the cached aperture and wrong as soon as
 	 * the L2 was on. 0x13200004 is what the working reference holds, with
 	 * bits [4:3] = 2 selecting 64 KiB pages - the same geometry the flash
 	 * side is given in p4_spl_flash_init().
@@ -325,51 +325,153 @@ static int psram_mmu_map(u32 size)
 }
 
 
-/* Scratch lanes near the end of each page. Keep all signatures live at
- * once so higher-address mirroring cannot pass by testing only one page
- * at a time. Restore previous words before placing any payload. */
+/*
+ * HIL diagnostic only. The linked selector is the sole payload byte
+ * changed between reverse-order stock (0xf1) and spread (0xf3).
+ * Volatile prevents optimizer specialization.
+ */
+const volatile u32 p4_wb_order_selector = 0x4f5244f1u;
+
+static inline u32 probe_offset(u32 page, u32 spread_mask)
+{
+	/* Choose one of the last 16 lines within the same 2 KiB controller
+	 * split. Page 481 remains at the original line in the 32 MiB arm.
+	 * Supported periodic aliases have equal page number modulo 16. */
+	return (page + 1) * P4_EXT_PAGE - 16 -
+	       (((page - 1u) & spread_mask) * P4_L2_LINE_BYTES);
+}
+
+enum {
+	PROBE_L1D_WB = 1,
+	PROBE_L2_WB,
+	PROBE_L1D_INV,
+	PROBE_L2_INV,
+};
+
+static int probe_sync(u32 addr, bool dirty)
+{
+	if (dirty) {
+		if (p4_cache_range(addr, 8, P4_SYNC_L1D, P4_SYNC_WBACK))
+			return PROBE_L1D_WB;
+		if (p4_cache_range(addr, 8, P4_SYNC_L2, P4_SYNC_WBACK))
+			return PROBE_L2_WB;
+	}
+	if (p4_cache_range(addr, 8, P4_SYNC_L1D, P4_SYNC_INVALIDATE))
+		return PROBE_L1D_INV;
+	if (p4_cache_range(addr, 8, P4_SYNC_L2, P4_SYNC_INVALIDATE))
+		return PROBE_L2_INV;
+	return 0;
+}
+
+static int psram_probe_fail(const char *phase, u32 ordinal, u32 page, u32 step,
+			    u32 choice)
+{
+	/* Read only, once, before UART; none of these registers is an ACK. */
+	u32 ctrl = readl(REG(P4_SYNC_CTRL)), map = readl(REG(P4_SYNC_MAP));
+	u32 addr = readl(REG(P4_SYNC_VADDR)), len = readl(REG(P4_SYNC_BYTES));
+	u32 fifo = readl(REG(MSPI2 + 0x178)), raw = readl(REG(MSPI2 + 0xc8));
+	u32 axie = readl(REG(MSPI2 + 0x170)), scmd = readl(REG(MSPI2 + 0x44));
+	u32 rcmd = readl(REG(MSPI2 + 0x48)), wcmd = readl(REG(MSPI2 + 0x4c));
+	u32 cs = readl(REG(MSPI2 + 0x1a0)), ecc = readl(REG(MSPI2 + 0x174));
+	u32 dqs0 = readl(REG(IOMUX + DQS0)), dqs1 = readl(REG(IOMUX + DQS1));
+	u32 fctrl = readl(REG(MSPI2 + 0x3c)), sctrl = readl(REG(MSPI2 + 0x40));
+	u32 ddr = readl(REG(MSPI2 + 0xd8));
+
+	p4_spl_early_puts("psram: cached page sync timeout phase=");
+	p4_spl_early_puts(phase);
+#define SHOW(label, v) do { p4_spl_early_puts(" " label "="); p4_spl_early_hex(v); } while (0)
+	SHOW("reverse", choice & 1);
+	SHOW("spread", (choice >> 1) & 1);
+	SHOW("ord1", ordinal);
+	SHOW("mmu_page", page);
+	SHOW("set_idx", (addr >> 7) & 0x1ff); /* 512 KiB, 8-way, 128-byte */
+	SHOW("step", step);
+	SHOW("ctrl", ctrl);
+	SHOW("map", map);
+	SHOW("addr", addr);
+	SHOW("len", len);
+	SHOW("fifo", fifo);
+	SHOW("raw", raw);
+	SHOW("axie", axie);
+	SHOW("scmd", scmd);
+	SHOW("rcmd", rcmd);
+	SHOW("wcmd", wcmd);
+	SHOW("cs", cs);
+	SHOW("ecc", ecc);
+	SHOW("dqs0", dqs0);
+	SHOW("dqs1", dqs1);
+	SHOW("ddr", ddr);
+	SHOW("sctrl", sctrl);
+	SHOW("fctrl", fctrl);
+#undef SHOW
+	p4_spl_early_puts("\n");
+	return -1;
+}
+
+/* Save and verify forward in both images. Only the traversal of dirty
+ * writeback passes changes; page signatures, safety gates and all
+ * controller accesses are identical. Restore original words before FIT. */
 static int psram_check_window(u32 size)
 {
 	static u32 original[P4_EXT_MAX / P4_EXT_PAGE][2];
-	u32 pages = size / P4_EXT_PAGE, i, k;
-	int err = 0;
+	u32 pages = size / P4_EXT_PAGE, order, i, k, off;
+	u32 choice = p4_wb_order_selector;
+	bool reverse = (choice & 1) != 0, spread = (choice & 2) != 0;
+	u32 spread_mask = spread ? 15u : 0u;
+	int err = 0, rc;
 
 	for (i = 0; i < pages; i++) {
-		u32 off = (i + 1) * P4_EXT_PAGE - 16;
-
+		off = probe_offset(i, spread_mask);
+		rc = probe_sync(P4_EXT_RAM_BASE + off, false);
+		if (rc)
+			return psram_probe_fail("save", i + 1, i, rc, choice);
 		for (k = 0; k < 2; k++)
 			original[i][k] =
-				readl((void *)(P4_EXT_RAM_ALIAS + off + 4 * k));
+				readl((void *)(P4_EXT_RAM_BASE + off + 4 * k));
 	}
-	for (i = 0; i < pages; i++) {
-		u32 off = (i + 1) * P4_EXT_PAGE - 16;
-		u32 sig = 0x6b53a7c9u ^ (i * 0x9e3779b9u);
+	for (order = 0; order < pages; order++) {
+		u32 sig;
 
-		writel(sig, (void *)(P4_EXT_RAM_ALIAS + off));
-		writel(~sig, (void *)(P4_EXT_RAM_ALIAS + off + 4));
+		i = reverse ? pages - order - 1 : order;
+		off = probe_offset(i, spread_mask);
+		sig = 0x6b53a7c9u ^ (i * 0x9e3779b9u);
+		writel(sig, (void *)(P4_EXT_RAM_BASE + off));
+		writel(~sig, (void *)(P4_EXT_RAM_BASE + off + 4));
+		rc = probe_sync(P4_EXT_RAM_BASE + off, true);
+		if (rc)
+			return psram_probe_fail("signature", order + 1, i, rc, choice);
+		if (!(order & 31))
+			p4_spl_wdt_feed();
 	}
 	asm volatile("fence iorw, iorw" ::: "memory");
 	for (i = 0; i < pages; i++) {
-		u32 off = (i + 1) * P4_EXT_PAGE - 16;
 		u32 sig = 0x6b53a7c9u ^ (i * 0x9e3779b9u);
 
-		if (readl((void *)(P4_EXT_RAM_ALIAS + off)) != sig ||
-		    readl((void *)(P4_EXT_RAM_ALIAS + off + 4)) != ~sig) {
+		off = probe_offset(i, spread_mask);
+		if (readl((void *)(P4_EXT_RAM_BASE + off)) != sig ||
+		    readl((void *)(P4_EXT_RAM_BASE + off + 4)) != ~sig) {
 			p4_spl_early_puts("psram: mirror/data error at ");
-			p4_spl_early_hex(P4_EXT_RAM_ALIAS + off);
+			p4_spl_early_hex(P4_EXT_RAM_BASE + off);
 			p4_spl_early_puts("\n");
 			err = -1;
 			break;
 		}
 	}
-	for (i = 0; i < pages; i++) {
-		u32 off = (i + 1) * P4_EXT_PAGE - 16;
-
+	for (order = 0; order < pages; order++) {
+		i = reverse ? pages - order - 1 : order;
+		off = probe_offset(i, spread_mask);
 		for (k = 0; k < 2; k++)
 			writel(original[i][k],
-			       (void *)(P4_EXT_RAM_ALIAS + off + 4 * k));
+			       (void *)(P4_EXT_RAM_BASE + off + 4 * k));
+		rc = probe_sync(P4_EXT_RAM_BASE + off, true);
+		if (rc)
+			return psram_probe_fail("restore", order + 1, i, rc, choice);
+		if (!(order & 31))
+			p4_spl_wdt_feed();
 	}
 	asm volatile("fence iorw, iorw" ::: "memory");
+	p4_spl_early_puts(spread ? "psram: WB probe reverse-spread done\n" :
+				  "psram: WB probe reverse-stock done\n");
 	return err;
 }
 
@@ -432,6 +534,8 @@ int p4_spl_psram_init(void)
 	((void (*)(u32))0x4fc004f4u)(0); /* Cache_Enable_L1_DCache */
 	((void (*)(u32))0x4fc00504u)(0); /* Cache_Enable_L2_Cache */
 	p4_spl_wdt_feed();
+	/* Enable PSRAM AXI requests and clear CLOSE_AXI_INF_EN (SLV_ERR only). */
+	clrsetbits_le32(REG(MSPI2 + 0x3c), BIT(31), BIT(0));
 	if (psram_check_window(size) || psram_pmp_open(size)) {
 		p4_spl_early_puts("psram: memory test/PMP failed; no handoff\n");
 		return -1;
@@ -444,6 +548,6 @@ int p4_spl_psram_init(void)
 	p4_spl_early_hex(size);
 	p4_spl_early_puts(" MHz ");
 	p4_spl_early_hex(P4_SPEED_MHZ);
-	p4_spl_early_puts(" page/alias test OK\n");
+	p4_spl_early_puts(" page/alias test OK (cached readback)\n");
 	return 0;
 }

@@ -570,7 +570,8 @@ static int p4_check_payload(void)
  */
 static int p4_prep_dtb(void)
 {
-	const u32 *dtb_src = (const u32 *)P4_DTB_SRC;
+	/* Use the copy verified by SPL, not the original NOR bytes. */
+	const void *dtb_src = (const void *)P4_DTB_ALIAS;
 	void *fdt = (void *)P4_DTB_KERN;
 	u32 dsize, newsize;
 	int chosen, mem;
@@ -581,11 +582,11 @@ static int p4_prep_dtb(void)
 		return -EINVAL;
 
 	dsize = fdt_totalsize(dtb_src);
-	if (dsize < 40 || dsize > 0x10000) {
+	if (dsize < 40 || dsize > 0x10000 || fdt_check_header(dtb_src)) {
 		printf("p4: implausible dtb size %x\n", dsize);
 		return -1;
 	}
-	memcpy((void *)(P4_DTB_KERN_ALIAS), (const void *)P4_DTB_ALIAS, dsize);
+	memcpy((void *)P4_DTB_KERN_ALIAS, dtb_src, dsize);
 	if (readl((const void *)P4_DTB_KERN_ALIAS) != 0xedfe0dd0u) {
 		printf("p4: dtb relocate failed\n");
 		return -1;
