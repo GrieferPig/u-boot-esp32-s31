@@ -37,3 +37,36 @@ The P4 SPL parser is a fixed-address board FIT profile over libfdt, not the gene
       OUT/flash.bin /path/to/esp-emu /path/to/rev0-rom.elf fresh-rev1.3.efuse NEGATIVE-LOGS
 
 Look for three P4 FIT SHA256 OK lines before proper, two online CPUs, P4_SMP PASS and P4_SIGNAL PASS before login. The negative verifier only modifies temporary emulator copies. Do not infer physical flash/PSRAM timings or a silicon IPI fix. The former raw loader is preserved at revision 735a4f1d / local tag p4-pre-fit-735a4f1d; roll back the whole matching image, not a mixture of artifacts.
+
+## Rev1.3 full-capacity AP Hex RAM
+
+Apply the paired Linux cache-range patch to the P4 Linux tree, then use
+`rebuild-linux-image.sh LINUX-TREE ORIGINAL-IMAGE OUT-LINUX` with the original
+32-bit NOMMU `Image(2)` and RISC-V ESP GCC 15.2.0. Pass the resulting
+`OUT-LINUX/arch/riscv/boot/Image` to `build-native-fit.sh`. The original
+kernel baked a 16 MiB executable-cache limit into its driver; it can
+occasionally boot with larger DT memory yet later panic during a userspace
+exec. Do not use that old kernel with the new full-capacity flash image.
+
+The build links only IDF bootloader hardware support and the AP Hex PSRAM
+driver and timing closure from a pinned SDK. The scratch IDF app build
+produces archives only; none of its bootloader, app, partition table, FreeRTOS
+scheduler, or startup hooks is installed. `P4_IDF_PSRAM_BUILD` can point to
+existing pinned app-mode archive output for the selected profile.
+
+Start with `stock` (80 MHz PSRAM). `perf` selects the pinned IDF 200 MHz
+profile; it has emulator coverage but is not board timing qualification.
+The image detects AP/compatible, known-good-die x16 PSRAM, accepts 16/32/64
+MiB, reads back every mapped MMU entry, and simultaneously compares distinct
+scratch signatures through the direct aperture before the FIT is read.
+The checker restores the scratch words. Absent and unknown parts and 4/8
+MiB devices cannot boot this fixed DTB layout. The SPL publishes the usable
+size; U-Boot updates the verified DT copy and does not remap it. Linux's
+fixed retained-DTB and framebuffer reservations remain in place.
+
+The AP is held through SPL and proper, then enters the ROM with the LP
+waiter address already published. Both harts use an exact-aperture PMP7
+entry; the AP locks its own entry and no pre-existing PMP entry is unlocked
+or overwritten. Its ROM-provided PMA is not replaced with FreeRTOS's region
+table. A missing AP handshake refuses to enter SMP Linux. U-Boot proper
+also bounds its retained executable cache callback to the measured window.

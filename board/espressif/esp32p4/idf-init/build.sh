@@ -20,5 +20,6 @@ cmake -S "$IDF_PATH/components/bootloader/subproject" -B "$ref" -G Ninja \
 	-DSDKCONFIG="$out/sdkconfig" -DPYTHON="$(command -v python)"
 cmake --build "$ref" --parallel "${JOBS:-8}"
 python "$board/make-hal.py" "$ref" "$out"
-python "$board/pack.py" "$3" "$out/p4-hal.bin" "$ref/bootloader.bin" "$out/spl-p4.bin"
-sha256sum "$ref/bootloader.bin" "$out/p4-hal.bin" "$out/spl-p4.bin"
+bash "$board/build-psram.sh" "$1" "$2" "$out/p4-hal.bin" "$out"
+python "$board/pack.py" "$3" "$out/p4-hw-combined.bin" "$ref/bootloader.bin" "$out/spl-p4.bin"
+sha256sum "$ref/bootloader.bin" "$out/p4-hal.bin" "$out/p4-psram.bin" "$out/spl-p4.bin"

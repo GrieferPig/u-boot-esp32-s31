@@ -41,7 +41,8 @@ for k,v in requested.items():
     if actual.get(k)!=v:raise SystemExit(f'IDF profile mismatch: {k} expected {v}, actual {actual.get(k)}')
 PY
     python "$here/make-hal.py" "$P4_IDF_BUILD" "$out"
-    python "$here/pack.py" "$out/spl/spl/u-boot-spl-dtb.bin" "$out/p4-hal.bin" "$P4_IDF_BUILD/bootloader.bin" "$out/spl-p4.bin"
+    bash "$here/build-psram.sh" "$1" "$sdk" "$out/p4-hal.bin" "$out"
+    python "$here/pack.py" "$out/spl/spl/u-boot-spl-dtb.bin" "$out/p4-hw-combined.bin" "$P4_IDF_BUILD/bootloader.bin" "$out/spl-p4.bin"
 else
     bash "$here/build.sh" "$1" "$sdk" "$out/spl/spl/u-boot-spl-dtb.bin" "$out"
 fi

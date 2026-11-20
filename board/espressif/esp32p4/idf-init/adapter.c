@@ -26,7 +26,6 @@ static int start(void)
 static void finish(void)
 {
 	wdt_hal_context_t wdt = RWDT_HAL_CONTEXT_DEFAULT();
-	bootloader_random_disable();
 	bootloader_console_deinit();
 	/* IDF stops the boot RWDT in its app's startup functions, not in
 	 * bootloader_init. This is the equivalent ownership boundary. */
@@ -44,4 +43,6 @@ static void feed(void)
 	wdt_hal_write_protect_enable(&wdt);
 }
 __attribute__((section(".p4_api"),used))
-const struct p4_idf_ops p4_idf_table = { P4_IDF_MAGIC, start, finish, feed };
+const struct p4_idf_ops p4_idf_table = {
+	P4_IDF_MAGIC, start, finish, feed, bootloader_random_disable
+};

@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <linux/libfdt.h>
 #include <asm/global_data.h>
+#include "psram-handoff.h"
 
 DECLARE_GLOBAL_DATA_PTR;
 
@@ -68,7 +69,9 @@ int dram_init_banksize(void)
 	 * error" (the SRAM bank is fully occupied by the running image).
 	 */
 	gd->bd->bi_dram[1].start = 0x48000000;
-	gd->bd->bi_dram[1].size = 0x01000000;	/* 16 MiB PSRAM window */
+	gd->bd->bi_dram[1].size = p4_ext_size();
+	if (!gd->bd->bi_dram[1].size)
+		return -EINVAL;
 #endif
 	return 0;
 }
@@ -418,8 +421,13 @@ static int p4_cache_sync_inv(unsigned int addr, unsigned int bytes)
  */
 int p4_cache_sync_stub(unsigned int start, unsigned int bytes)
 {
+	u32 size = p4_ext_size();
 	unsigned int off;
 
+	if (!size || start < P4_EXT_RAM_BASE ||
+	    start - P4_EXT_RAM_BASE >= size ||
+	    bytes > size - (start - P4_EXT_RAM_BASE))
+		return -EINVAL;
 	for (off = 0; off < bytes; off += 0x10000) {
 		unsigned int n = bytes - off > 0x10000 ? 0x10000
 						       : bytes - off;
@@ -443,9 +451,9 @@ int p4_cache_sync_stub(unsigned int start, unsigned int bytes)
  * Hart1 firmware waiter, copied to LP RAM by p4boot and entered via
  * ets_set_appcpu_boot_addr with no secondary software reset. Mirrors the IDF
  * loader's secondary_wait (main/p4_hardware_loader.c): M-mode, interrupts
- * off out of reset; open user-PSRAM PMP entry 7 exactly as IDF does
- * (PMP_L|NAPOT|R|W|X over [0x48000000, 0x4c000000): pmpaddr7 = 0x127FFFFF,
- * the entry-7 byte of pmpcfg1 = 0x9F); report 0/1 in mailbox status; then
+ * off out of reset; open user-PSRAM PMP entry 7 over exactly the mapped
+ * aperture (PMP_L|NAPOT|R|W|X, byte 7 = 0x9f). Do not inherit the IDF
+ * app's different FreeRTOS policy; report 0/1 in mailbox status; then
  * poll release and jump to the kernel image entry, whose head selects the
  * secondary path itself (arch/riscv/kernel/head.S esp32p4_secondary_start).
  * Both HP harts share L1D, so the SRAM mailbox needs no cache management.
@@ -482,13 +490,22 @@ P4_WAITER_MARK(0x57)			/* W: entered */
 "1:	lw t1, 0(t0)\n"		/* magic published? */
 "	li t2, 0x534d5034\n"
 "	bne t1, t2, 1b\n"
-"	lui t1, 0x12800\n"		/* pmpaddr7 = NAPOT(0x48000000, 0x4c000000) */
-"	addi t1, t1, -1\n"		/* 0x127fffff */
+"	lw t1, 28(t0)\n"		/* private waiter field, not Linux ABI */
+"	li t2, 0x121fffff\n"		/* 16 MiB NAPOT */
+"	beq t1, t2, 6f\n"
+"	li t2, 0x123fffff\n"		/* 32 MiB NAPOT */
+"	beq t1, t2, 6f\n"
+"	li t2, 0x127fffff\n"		/* 64 MiB NAPOT */
+"	bne t1, t2, 2f\n"
+"6:\n"
+"	csrr t2, 0x3a1\n"
+"	srli t2, t2, 24\n"
+"	bnez t2, 2f\n"		/* never modify a pre-existing policy */
 "	csrw 0x3b7, t1\n"
 "	lui t1, 0x9f000\n"		/* entry7 = L|NAPOT|R|W|X */
 "	csrrs zero, 0x3a1, t1\n"
 "	csrr t1, 0x3b7\n"		/* verify PMP took */
-"	li t2, 0x127fffff\n"
+"	lw t2, 28(t0)\n"
 "	bne t1, t2, 2f\n"
 "	csrr t1, 0x3a1\n"
 "	srli t1, t1, 24\n"
@@ -550,8 +567,12 @@ static int p4_prep_dtb(void)
 	const u32 *dtb_src = (const u32 *)P4_DTB_SRC;
 	void *fdt = (void *)P4_DTB_KERN;
 	u32 dsize, newsize;
-	int chosen;
-	fdt32_t rev, entry, mbox[2];
+	int chosen, mem;
+	u32 size = p4_ext_size();
+	fdt32_t rev, entry, mbox[2], reg[2];
+
+	if (!size)
+		return -EINVAL;
 
 	dsize = fdt_totalsize(dtb_src);
 	if (dsize < 40 || dsize > 0x10000) {
@@ -568,11 +589,21 @@ static int p4_prep_dtb(void)
 		return -1;
 	}
 
-	newsize = fdt_totalsize(fdt) + 0x1000;
+	newsize = min_t(u32, fdt_totalsize(fdt) + 0x1000, 0x10000u);
 	if (fdt_open_into(fdt, fdt, newsize)) {
 		printf("p4: fdt_open_into failed\n");
 		return -1;
 	}
+	mem = fdt_path_offset(fdt, "/memory@48000000");
+	reg[0] = cpu_to_fdt32(P4_EXT_RAM_BASE);
+	reg[1] = cpu_to_fdt32(size);
+	if (mem < 0 || fdt_address_cells(fdt, 0) != 1 ||
+	    fdt_size_cells(fdt, 0) != 1 ||
+	    fdt_setprop(fdt, mem, "reg", reg, sizeof(reg))) {
+		puts("p4: invalid DTB memory node\n");
+		return -EINVAL;
+	}
+
 	chosen = fdt_path_offset(fdt, "/chosen");
 	if (chosen < 0) {
 		printf("p4: no /chosen in dtb\n");
@@ -601,9 +632,8 @@ static int p4_prep_dtb(void)
  * proves itself), then park hart1 in the LP-RAM waiter: install,
  * read back, unstall it, enable its clock, publish the ROM boot hook,
  * then deassert reset. Then wait for it to report parked.
- * Returns 1 when hart1 is parked (SMP on), 0 otherwise; on 0 the magic
- * is cleared so the kernel fails the SMP validate fast instead of
- * hanging a hart.
+ * Returns 1 when hart1 is parked. On failure clear the magic and refuse
+ * to enter this SMP kernel.
  */
 static int p4_park_hart1(void)
 {
@@ -611,8 +641,12 @@ static int p4_park_hart1(void)
 	unsigned long wlen = (unsigned long)(p4_waiter_end -
 					     p4_waiter_start);
 	unsigned int spin = 0;
+	u32 size = p4_ext_size();
 	int alive = 0;
 	int smp = 0;
+
+	if (!size)
+		return 0;
 
 	/*
 	 * A waiter parked by an earlier p4park in this session is still
@@ -622,7 +656,8 @@ static int p4_park_hart1(void)
 	 */
 	if (mbox[0] == P4_MBOX_MAGIC && mbox[1] == 1 && mbox[2] == 0 &&
 	    mbox[3] == 0 && mbox[4] == P4_KERN_RUN &&
-	    mbox[5] == P4_DTB_KERN && mbox[6] == 103) {
+	    mbox[5] == P4_DTB_KERN && mbox[6] == 103 &&
+	    mbox[7] == p4_ext_pmpaddr(size)) {
 		printf("p4: waiter already parked, reusing\n");
 		return 1;
 	}
@@ -633,6 +668,7 @@ static int p4_park_hart1(void)
 	mbox[4] = P4_KERN_RUN;		/* entry */
 	mbox[5] = P4_DTB_KERN;		/* dtb */
 	mbox[6] = 103;			/* revision */
+	mbox[7] = p4_ext_pmpaddr(size);	/* private to the waiter */
 	asm volatile("fence" ::: "memory");
 	mbox[0] = P4_MBOX_MAGIC;
 	asm volatile("fence" ::: "memory");
@@ -696,7 +732,8 @@ static int p4_park_hart1(void)
 		asm volatile("fence" ::: "memory");
 		printf("p4: hart1 parked, SMP on\n");
 	} else {
-		printf("p4: waiter quiet (alive %d status %u), single CPU\n",
+		((void (*)(u32))P4_ROM_APPBOOT)(0);
+		printf("p4: hart1 not parked (alive %d status %u); reset required\n",
 		       alive, mbox[3]);
 		mbox[0] = 0;
 	}
@@ -707,13 +744,13 @@ static int do_p4boot(struct cmd_tbl *cmdtp, int flag, int argc,
 		     char *const argv[])
 {
 	void (*kernel)(u32 hart, void *dtb) = (void *)P4_KERN_RUN;
-	int smp = 0;
 
 	if (p4_check_payload() || p4_prep_dtb())
 		return CMD_RET_FAILURE;
 
+	if (!p4_park_hart1())
+		return CMD_RET_FAILURE;
 	printf("p4boot: kernel %08x fdt %08x, jumping\n", P4_KERN_RUN, P4_DTB_KERN);
-	smp = p4_park_hart1();
 
 	/*
 	 * Push the payload (and the freshly patched DTB) to the part before
@@ -730,8 +767,6 @@ static int do_p4boot(struct cmd_tbl *cmdtp, int flag, int argc,
 	asm volatile("fence.i" ::: "memory");
 	asm volatile("fence" ::: "memory");
 
-	if (!smp)
-		printf("p4boot: single CPU\n");
 	kernel(0, (void *)P4_DTB_KERN);
 	return CMD_RET_SUCCESS;
 }
@@ -753,7 +788,7 @@ static int do_p4park(struct cmd_tbl *cmdtp, int flag, int argc,
 
 	smp = p4_park_hart1();
 	printf("p4park: parked=%d mbox live, release untouched\n", smp);
-	return CMD_RET_SUCCESS;
+	return smp ? CMD_RET_SUCCESS : CMD_RET_FAILURE;
 }
 
 U_BOOT_CMD(p4park, 1, 0, do_p4park, "prep handoff and park hart1, no jump", "");
@@ -882,21 +917,6 @@ void hw_watchdog_init(void)
 #endif
 
 
-#if defined(CONFIG_ESP32P4_SRAM_ONLY)
-/* Map the PSRAM window through the MSPI2 "S" MMU. */
-static void p4_psram_map(u32 size)
-{
-	u32 entries = size >> 16;
-	u32 i;
-
-	for (i = 0; i < entries; i++) {
-		writel(i, (void *)0x5008e380);
-		writel(i | BIT(11) | BIT(10), (void *)0x5008e37c);
-	}
-	puts("P4_UBOOT: psram mmu written\n");
-}
-#endif
-
 int board_late_init(void)
 {
 #ifdef CONFIG_ESP32P4_HW_IDF_HANDOFF
@@ -904,7 +924,7 @@ int board_late_init(void)
 #else
 	puts("P4_UBOOT: M-mode bootloader active (emulator only)\n");
 #if defined(CONFIG_ESP32P4_SRAM_ONLY)
-	p4_psram_map(0x01000000);
+	printf("P4_UBOOT: PSRAM %u MiB from SPL\n", p4_ext_size() >> 20);
 #endif
 #endif
 	return 0;

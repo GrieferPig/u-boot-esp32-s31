@@ -15,8 +15,9 @@ spl, hal, ref, out = [p.resolve() for p in (a.spl, a.hal, a.reference, a.out)]
 # Space up to 0x4ff5c000 precedes SPL stack and BSS at 0x4ff60000.
 if spl.stat().st_size >= 0x1c000 or hal.stat().st_size >= 0x10000:
     parser.error("image exceeds reserved SRAM")
-if hal.read_bytes()[:4] != struct.pack("<I", 0x50444931):
-    parser.error("missing P4 HAL ABI")
+hw = hal.read_bytes()
+if hw[:4] != struct.pack("<I", 0x50444931) or hw[0x4000:0x4004] != struct.pack("<I", 0x50535231):
+    parser.error("missing P4 boot H/W or AP hex H/W ABI")
 header = ref.read_bytes()[:24]
 if (len(header) != 24 or header[0] != 0xe9 or header[2] not in (2, 3)
         or header[3] not in (0x40, 0x4f) or header[12:14] != b"\x12\0"

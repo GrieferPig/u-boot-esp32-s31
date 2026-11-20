@@ -16,6 +16,8 @@
 
 /* The 0x34000 ceiling leaves the initial proper stack/GD/malloc area
  * clear. Linux handoff cache synchronization currently covers 4 MiB. */
+#include "psram-handoff.h"
+
 #define FLASH_WIN 0x40000000U
 #define FIT_OFF   0x000f0000U
 #define HDR_LIMIT 0x00010000U
@@ -80,7 +82,10 @@ int p4_spl_load_fit(void)
 	const void *f = (const void *)(FLASH_WIN + FIT_OFF);
 	struct payload p[ARRAY_SIZE(slots)];
 	int i, conf, images;
-	u32 off, n, kspan;
+	u32 off, n, kspan, psram_size = p4_ext_size();
+
+	if (!psram_size)
+		goto invalid;
 
 	if (fdt_magic(f) != FDT_MAGIC || fdt_totalsize(f) < sizeof(struct fdt_header) ||
 	    fdt_totalsize(f) > HDR_LIMIT || fdt_check_header(f))
@@ -94,7 +99,9 @@ int p4_spl_load_fit(void)
 	    !STR(f, conf, "kernel", "linux") || !STR(f, conf, "fdt", "dtb"))
 		goto invalid;
 	for (i = 0; i < ARRAY_SIZE(slots); i++)
-		if (describe(f, images, i, &p[i]))
+		if (describe(f, images, i, &p[i]) ||
+		    (i && (slots[i].dst - P4_EXT_RAM_BASE > psram_size ||
+		     slots[i].limit > psram_size - (slots[i].dst - P4_EXT_RAM_BASE))))
 			goto invalid;
 	/* All ranges checked before the first copy. Verify the bytes actually
 	 * loaded, including PSRAM via its uncached alias. No raw fallback. */

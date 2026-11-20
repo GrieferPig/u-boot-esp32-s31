@@ -7,6 +7,7 @@ struct p4_idf_ops {
 	int (*start)(void);
 	void (*finish)(void);
 	void (*feed)(void);
+	void (*stop_entropy)(void);
 };
 static inline const struct p4_idf_ops *p4_idf_api(void)
 {

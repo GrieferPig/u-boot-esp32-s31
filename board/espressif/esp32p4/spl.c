@@ -222,7 +222,7 @@ void spl_board_init(void)
 	p4_psram_dump();
 
 	if (p4_spl_psram_init()) {
-		p4_spl_puts("spl: psram_init not ported yet; boot stopped\n");
+		p4_spl_puts("spl: PSRAM initialization or validation failed; boot stopped\n");
 		for (;;)
 			asm volatile("wfi");
 	}

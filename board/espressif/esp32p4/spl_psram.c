@@ -22,6 +22,9 @@
 
 #include "psram_tables.h"
 #include "spl_psram.h"
+#include "idf-init/abi.h"
+#include "idf-init/psram-abi.h"
+#include "psram-handoff.h"
 
 #define P4_CLKRST_BASE		0x500e6000ul
 #define P4_MSPI2_BASE		0x5008e000ul
@@ -1506,13 +1509,13 @@ static int psram_timing_tune(void)
  * M-mode `go` at the same address works, U-mode fetch faults). Mirror the
  * generic entry, unlocked, so the kernel keeps full control.
  */
-static int psram_pmp_open(void)
+static int psram_pmp_open(u32 size)
 {
 #ifdef CONFIG_ESP32P4_SPL_IDF_INIT
 	/* The IDF bootloader has set CPU/peripheral/ROM protection. Do not
 	 * replace its first PMP config word with the legacy catch-all.
 	 * Use the same PSRAM-only window as the existing AP contract. */
-	u32 addr = 0x127fffff, cfg = 0x1f000000, prior, actual;
+	u32 addr = p4_ext_pmpaddr(size), cfg = 0x1f000000, prior, actual;
 
 	asm volatile("csrr %0, 0x3a1; csrr %1, 0x3b7"
 		     : "=r"(prior), "=r"(actual));
@@ -1582,7 +1585,7 @@ static void psram_cache_clocks_on(void)
 }
 
 
-static void psram_mmu_map(u32 size)
+static int psram_mmu_map(u32 size)
 {
 	u32 entries = size >> 16;
 	u32 i;
@@ -1601,6 +1604,19 @@ static void psram_mmu_map(u32 size)
 		writel(i, (void *)(P4_MSPI2_BASE + 0x380));
 		writel(i | BIT(11) | BIT(10), (void *)(P4_MSPI2_BASE + 0x37c));
 	}
+#ifdef CONFIG_ESP32P4_SPL_IDF_INIT
+	for (i = 0; i < entries; i++) {
+		writel(i, (void *)(P4_MSPI2_BASE + 0x380));
+		if (readl((void *)(P4_MSPI2_BASE + 0x37c)) !=
+		    (i | BIT(11) | BIT(10))) {
+			p4_spl_early_puts("psram: MMU read-back mismatch at page ");
+			p4_spl_early_hex(i);
+			p4_spl_early_puts("\n");
+			return -1;
+		}
+	}
+#endif
+	return 0;
 }
 
 /* Write a pattern at an address and read it back through the cache path. */
@@ -1854,8 +1870,141 @@ static void psram_rx_tune(void)
 	}
 }
 
+
+#ifdef CONFIG_ESP32P4_SPL_IDF_INIT
+/* Scratch lanes near the end of each page. Keep all signatures live at
+ * once so higher-address mirroring cannot pass by testing only one page
+ * at a time. Restore previous words before placing any payload. */
+static int psram_check_window(u32 size)
+{
+	static u32 original[P4_EXT_MAX / P4_EXT_PAGE][2];
+	u32 pages = size / P4_EXT_PAGE, i, k;
+	int err = 0;
+
+	for (i = 0; i < pages; i++) {
+		u32 off = (i + 1) * P4_EXT_PAGE - 16;
+
+		for (k = 0; k < 2; k++)
+			original[i][k] =
+				readl((void *)(P4_EXT_RAM_ALIAS + off + 4 * k));
+	}
+	for (i = 0; i < pages; i++) {
+		u32 off = (i + 1) * P4_EXT_PAGE - 16;
+		u32 sig = 0x6b53a7c9u ^ (i * 0x9e3779b9u);
+
+		writel(sig, (void *)(P4_EXT_RAM_ALIAS + off));
+		writel(~sig, (void *)(P4_EXT_RAM_ALIAS + off + 4));
+	}
+	asm volatile("fence iorw, iorw" ::: "memory");
+	for (i = 0; i < pages; i++) {
+		u32 off = (i + 1) * P4_EXT_PAGE - 16;
+		u32 sig = 0x6b53a7c9u ^ (i * 0x9e3779b9u);
+
+		if (readl((void *)(P4_EXT_RAM_ALIAS + off)) != sig ||
+		    readl((void *)(P4_EXT_RAM_ALIAS + off + 4)) != ~sig) {
+			p4_spl_early_puts("psram: mirror/data error at ");
+			p4_spl_early_hex(P4_EXT_RAM_ALIAS + off);
+			p4_spl_early_puts("\n");
+			err = -1;
+			break;
+		}
+	}
+	for (i = 0; i < pages; i++) {
+		u32 off = (i + 1) * P4_EXT_PAGE - 16;
+
+		for (k = 0; k < 2; k++)
+			writel(original[i][k],
+			       (void *)(P4_EXT_RAM_ALIAS + off + 4 * k));
+	}
+	asm volatile("fence iorw, iorw" ::: "memory");
+	return err;
+}
+
+static int psram_idf_init(void)
+{
+	const struct p4_psram_ops *api = (const void *)P4_PSRAM_HAL_ADDR;
+	volatile u32 *record = (void *)P4_EXT_HANDOFF;
+	struct p4_psram_info info = { 0 };
+	static const u32 sizes[] = {
+		0, 4u << 20, 0, 8u << 20, 0, 16u << 20, 64u << 20, 32u << 20
+	};
+	u32 vendor, density, mr0, mr2;
+	int ret;
+
+	record[0] = 0;
+	if (api->magic != P4_PSRAM_HAL_MAGIC ||
+	    (api->clock_mhz != 80 && api->clock_mhz != 200)) {
+		p4_spl_early_puts("psram: invalid AP hex hardware helper\n");
+		return -1;
+	}
+	/* The vendor loader relinquishes its entropy I2C user before its app
+	 * changes the shared analog I2C gate. Do the same before the AP HAL. */
+	p4_idf_api()->stop_entropy();
+	p4_idf_api()->feed();
+	ret = api->init(&info);
+	if (ret) {
+		p4_spl_early_puts("psram: no usable AP hex PSRAM (HAL error ");
+		p4_spl_early_hex(ret);
+		p4_spl_early_puts(")\n");
+		return -1;
+	}
+	vendor = (info.mr01 >> 8) & 0x1f;
+	mr0 = info.mr01 & 0xff;
+	mr2 = info.mr23 & 0xff;
+	density = mr2 & 7;
+	p4_spl_early_puts("psram: MR01/MR23/MR4/MR8 ");
+	p4_spl_early_hex(info.mr01);
+	p4_spl_early_puts(" ");
+	p4_spl_early_hex(info.mr23);
+	p4_spl_early_puts(" ");
+	p4_spl_early_hex(info.mr4);
+	p4_spl_early_puts(" ");
+	p4_spl_early_hex(info.mr8);
+	p4_spl_early_puts("\n");
+	if ((vendor != 0x0d && vendor != 0x1a) || (mr2 >> 5) != 6 ||
+	    sizes[density] != info.size || !info.size ||
+	    (info.mr8 & 0x4f) != 0x4b ||
+	    (mr0 & 0x3f) != (api->clock_mhz == 80 ? 0x28 : 0x30) ||
+	    (info.mr4 >> 5) != (api->clock_mhz == 80 ? 2 : 1)) {
+		p4_spl_early_puts("psram: invalid part, geometry or timing\n");
+		return -1;
+	}
+	if (!p4_ext_valid_size(info.size)) {
+		p4_spl_early_puts("psram: density cannot support fixed FIT/DTB layout: ");
+		p4_spl_early_hex(info.size);
+		p4_spl_early_puts(" bytes\n");
+		return -1;
+	}
+
+	if (psram_mmu_map(info.size))
+		return -1;
+	psram_cache_clocks_on();
+	((void (*)(u32))0x4fc004f4u)(0); /* Cache_Enable_L1_DCache */
+	((void (*)(u32))0x4fc00504u)(0); /* Cache_Enable_L2_Cache */
+	p4_idf_api()->feed();
+	if (psram_check_window(info.size) || psram_pmp_open(info.size)) {
+		p4_spl_early_puts("psram: memory test/PMP failed; no handoff\n");
+		return -1;
+	}
+	record[1] = info.size;
+	record[2] = ~info.size;
+	asm volatile("fence rw,w" ::: "memory");
+	record[0] = P4_EXT_MAGIC;
+	p4_spl_early_puts("psram: x16 bytes ");
+	p4_spl_early_hex(info.size);
+	p4_spl_early_puts(" MHz ");
+	p4_spl_early_hex(api->clock_mhz);
+	p4_spl_early_puts(" page/alias test OK\n");
+	return 0;
+}
+#endif
+
 int p4_spl_psram_init(void)
 {
+#ifdef CONFIG_ESP32P4_SPL_IDF_INIT
+	return psram_idf_init();
+#endif
+
 	/*
 	 * The ROM arms MWDT0 flashboot mode on every flash boot; it keeps
 	 * resetting the SoC even after wdt_en is cleared and will abort a PSRAM
@@ -1950,7 +2099,7 @@ int p4_spl_psram_init(void)
 	 * the MSPI2 window and both reads and writes are correct - that is the
 	 * state every working verification in this port has been run in.
 	 */
-	if (psram_pmp_open()) {
+	if (psram_pmp_open(0x01000000)) {
 		p4_spl_early_puts("psram: PMP window unavailable\n");
 		return -1;
 	}
