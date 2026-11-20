@@ -22,9 +22,13 @@ devices = [
     ('linux', a.linux, 'kernel', 'linux', 0x200000, 0x48000000, 0x400000),
     ('dtb', a.dtb, 'flat_dt', 'linux', 0x900000, 0x48600000, 0x10000)]
 spl = a.spl.read_bytes()
-if not (24 <= len(spl) <= fit_off - 0x2000 and spl[:2]==bytes([0xe9,2])
-        and struct.unpack_from('<I',spl,4)[0]==0x4ff40000):
-    p.error('expected direct ROM -> P4 U-Boot two-segment SPL')
+if not (32 < len(spl) <= fit_off - 0x2000 and spl[:2] == b"\xe9\x01"
+        and struct.unpack_from("<I", spl, 4)[0] == 0x4ff40000
+        and struct.unpack_from("<H", spl, 12)[0] == 0x12):
+    p.error("expected direct ROM -> P4 U-Boot single-segment SPL")
+addr, n = struct.unpack_from("<II", spl, 24)
+if addr != 0x4ff40000 or not 0 < n < 0x1c000 or n > len(spl) - 33:
+    p.error("SPL segment lies outside its reserved SRAM or ESP image")
 with tempfile.TemporaryDirectory(dir=out) as td:
     t = Path(td)
     nodes = []

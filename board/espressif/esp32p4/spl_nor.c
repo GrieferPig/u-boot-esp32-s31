@@ -11,6 +11,8 @@
 #include <asm/io.h>
 #include <linux/bitops.h>
 #include <linux/delay.h>
+#include "spl_hw.h"
+#include "../common/mspi-mmu.h"
 
 void p4_spl_puts(const char *s);
 void p4_spl_early_hex(u32 v);
@@ -67,7 +69,7 @@ void p4_spl_early_hex(u32 v);
 #define P4_L2_LINE_64B			3u
 #define P4_CACHE_MAP_L2			(1u << 5)
 
-#define CACHE_MAP_L1_ALL	0x3u	/* L1 icache | L1 dcache */
+#define CACHE_MAP_L1_ALL (BIT(0) | BIT(1) | BIT(4)) /* I0, I1, shared D */
 
 typedef void (*rom_void_fn)(void);
 typedef void (*rom_flags_fn)(u32 flags);
@@ -75,77 +77,37 @@ typedef void (*rom_invalidate_all_fn)(u32 map);
 
 static void mmu_write_entry(u32 entry, u32 content)
 {
-	writel(entry, (void *)MMU_ITEM_INDEX);
-	writel(content, (void *)MMU_ITEM_CONTENT);
+	esp_mspi_mmu_write((void *)MMU_ITEM_INDEX, (void *)MMU_ITEM_CONTENT,
+			   entry, content);
 }
 
 
-#ifndef CONFIG_ESP32P4_SPL_IDF_INIT
-static void cache_enable_all(void)
+void p4_spl_cache_init(void)
 {
-	/* External memory (flash and PSRAM) goes through the L2 cache on the P4. */
-	((rom_flags_fn)ROM_CACHE_EN_L2)(0);
-	((rom_flags_fn)ROM_CACHE_EN_DC)(0);
-	((rom_flags_fn)ROM_CACHE_EN_IC0)(0);
-	((rom_flags_fn)ROM_CACHE_EN_IC1)(0);
-}
+	u32 i;
 
-#endif
+	/* Cache geometry and flash table come from the rev1.3 mask ROM API;
+	 * use this before any cached PSRAM access. */
+	((rom_void_fn)ROM_CACHE_INIT)();
+	((rom_invalidate_all_fn)ROM_CACHE_INVALIDATE_ALL)(CACHE_MAP_L1_ALL);
+	clrsetbits_le32((void *)MMU_POWER_CTRL, MMU_PAGE_SIZE_MASK,
+			MMU_PAGE_SIZE_64K);
+	((void (*)(u32, u32, u32))ROM_CACHE_SET_L2_MODE)(P4_L2_SIZE_256K,
+				P4_L2_WAYS, P4_L2_LINE_64B);
+	((rom_flags_fn)ROM_CACHE_INVALIDATE_ALL)(P4_CACHE_MAP_L2);
+	for (i = 0; i < P4_MMU_ENTRY_COUNT; i++)
+		mmu_write_entry(i, 0);
+}
 
 int p4_spl_flash_init(u32 size)
 {
 	u32 pages = DIV_ROUND_UP(size, P4_MMU_PAGE_SIZE);
 	u32 i;
-#ifndef CONFIG_ESP32P4_SPL_IDF_INIT
-	u32 val;
-#endif
 
 	if (pages > P4_MMU_ENTRY_COUNT)
 		return -1;
-
-#ifndef CONFIG_ESP32P4_SPL_IDF_INIT
-	/* Make sure the cache block clock is up before touching the MMU. */
-	/*
-	 * Do not touch PERI_CLK_CTRL02 here: the reference boot leaves it at 0,
-	 * and setting those bits stops the PSRAM side of the MMU from answering.
-	 */
-
-	p4_spl_puts("init ");
-	((rom_void_fn)ROM_CACHE_INIT)();
-
-	p4_spl_puts("inv ");
-	((rom_invalidate_all_fn)ROM_CACHE_INVALIDATE_ALL)(CACHE_MAP_L1_ALL);
-
-	p4_spl_puts("pg ");
-
-	/* 64 KiB MMU pages, then a clean table. */
-	val = readl((void *)MMU_POWER_CTRL);
-	val &= ~MMU_PAGE_SIZE_MASK;
-	val |= MMU_PAGE_SIZE_64K;
-	writel(val, (void *)MMU_POWER_CTRL);
-
-	/* L2 geometry, then drop stale lines (IDF cache_hal_init_l2_cache()). */
-	((void (*)(u32, u32, u32))ROM_CACHE_SET_L2_MODE)(P4_L2_SIZE_256K, P4_L2_WAYS,
-							P4_L2_LINE_64B);
-	((rom_flags_fn)ROM_CACHE_INVALIDATE_ALL)(P4_CACHE_MAP_L2);
-
-	p4_spl_puts("tab ");
-	for (i = 0; i < P4_MMU_ENTRY_COUNT; i++)
-		mmu_write_entry(i, 0);
-
-#endif
-	/* IDF already initialized cache geometry and the fixed 64-KiB MMU.
-	 * Only the raw Linux flash window, not an IDF app mapping, is ours. */
 	for (i = 0; i < pages; i++)
 		mmu_write_entry(i, i | P4_MMU_FLASH_VALID);
-
-#ifndef CONFIG_ESP32P4_SPL_IDF_INIT
-	p4_spl_puts("en ");
-	cache_enable_all();
-	udelay(100);
-#endif
-	p4_spl_puts("ok ");
-
 	return 0;
 }
 

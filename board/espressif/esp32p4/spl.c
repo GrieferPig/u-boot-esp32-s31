@@ -19,6 +19,7 @@
 #include "spl_load.h"
 #include "spl_nor.h"
 #include "spl_psram.h"
+#include "spl_hw.h"
 
 /* SYSTIMER, used as the SPL timebase (the P4 has no CLINT / rdtime). */
 #define P4_SYSTIMER_BASE	0x500e2000ul
@@ -134,57 +135,16 @@ static void p4_spl_clear_bss(void)
 		*p++ = 0;
 }
 
-#ifdef CONFIG_ESP32P4_SPL_IDF_INIT
-#include "idf-init/abi.h"
-#endif
-
 void harts_early_init(void)
 {
 	p4_spl_clear_bss();
-#ifdef CONFIG_ESP32P4_SPL_IDF_INIT
-	/* No system-wide watchdog, clock or memory writes ahead of the
-	 * matched bootloader hardware sequence. This is ROM-loaded SRAM. */
-	if (p4_idf_api()->magic != P4_IDF_MAGIC || p4_idf_api()->start()) {
-		p4_spl_puts("P4SPL: matched init failed; halted\n");
+	if (p4_spl_hw_init()) {
+		p4_spl_puts("P4SPL: unsupported revision, boot protection or PMP state; halted\n");
 		for (;;)
 			asm volatile("wfi");
 	}
 	p4_systimer_enable();
-	p4_spl_puts("P4SPL: IDF hardware init returned\n");
-#else
-	void *wdt = (void *)P4_LP_WDT_BASE;
-
-	p4_systimer_enable();
-	p4_spl_puts("\nP4SPL:entry\n");
-
-	/*
-	 * Disarm the ROM-armed LP watchdog before doing slow work: unlock the
-	 * protection, clear the enable bit in CONFIG1 and the config registers,
-	 * feed the counter, then lock it again.
-	 */
-	writel(P4_WDT_WKEY, wdt + P4_LP_WDT_WPROTECT);
-	writel(0, wdt + P4_LP_WDT_CONFIG1);
-	writel(0, wdt + P4_LP_WDT_CONFIG0);
-	writel(P4_WDT_WKEY, wdt + P4_LP_WDT_FEED);
-	writel(0, wdt + P4_LP_WDT_WPROTECT);
-
-	/* Same for both timer-group watchdogs (the HP-domain MWDTs). */
-	{
-		u32 t;
-
-		for (t = 0; t < 2; t++) {
-			u32 base = P4_TIMG_BASE + t * 0x1000;
-
-			writel(P4_WDT_WKEY, (void *)(base + 0x64));
-			writel(readl((void *)(base + 0x48)) & ~(1u << 31),
-			       (void *)(base + 0x48));
-			writel(P4_WDT_WKEY, (void *)(base + 0x60));
-			writel(0, (void *)(base + 0x64));
-		}
-	}
-
-	p4_spl_puts("P4SPL:wdt-off\n");
-#endif
+	p4_spl_puts("P4SPL: native hardware init returned\n");
 }
 
 static void p4_dump_block(const char *name, u32 base, int first, int last)
@@ -220,6 +180,7 @@ void spl_board_init(void)
 {
 	p4_spl_puts("ESP32-P4 SPL active\n");
 	p4_psram_dump();
+	p4_spl_cache_init();
 
 	if (p4_spl_psram_init()) {
 		p4_spl_puts("spl: PSRAM initialization or validation failed; boot stopped\n");
@@ -236,27 +197,9 @@ void spl_board_init(void)
 			;
 	}
 
-#ifdef CONFIG_ESP32P4_SPL_FIT_PAYLOAD
 	if (p4_spl_load_fit())
 		for (;;)
 			asm volatile("wfi");
-#else
-	{
-		void p4_spl_psram_preload(void);
-
-		p4_spl_psram_preload();
-	}
-
-
-	/* payload loading happens from the U-Boot prompt for now */
-
-	if (p4_spl_load_uboot()) {
-		p4_spl_puts("spl: uboot load failed; boot stopped\n");
-		for (;;)
-			;
-	}
-
-#endif
 	p4_spl_enter_uboot(0);
 }
 

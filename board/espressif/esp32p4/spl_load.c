@@ -11,9 +11,7 @@
 #include "spl_load.h"
 #include "spl_nor.h"
 #include "ubload.h"
-#ifdef CONFIG_ESP32P4_SPL_IDF_INIT
-#include "idf-init/abi.h"
-#endif
+#include "spl_hw.h"
 
 void p4_spl_puts(const char *s);
 void p4_spl_early_hex(u32 v);
@@ -144,8 +142,6 @@ void p4_spl_enter_uboot(u32 dtb)
 
 	udelay(10000);
 
-#ifdef CONFIG_ESP32P4_SPL_IDF_INIT
-	p4_idf_api()->finish();
-#endif
+	p4_spl_wdt_finish();
 	entry(0, dtb);
 }

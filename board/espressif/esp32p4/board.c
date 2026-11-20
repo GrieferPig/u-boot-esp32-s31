@@ -8,8 +8,8 @@
  *    that the SPL placed in PSRAM.
  */
 
-#if defined(CONFIG_SPL_BUILD) && defined(CONFIG_ESP32P4_SPL_IDF_INIT)
-#include "idf-init/abi.h"
+#if defined(CONFIG_SPL_BUILD)
+#include "spl_hw.h"
 #endif
 #include <asm/io.h>
 #include <init.h>
@@ -150,8 +150,7 @@ void p4_systimer_enable(void);
 #define P4_TIMG0_BASE	0x500c2000u
 #define P4_TIMG1_BASE	0x500c3000u
 
-#if !defined(CONFIG_ESP32P4_IDF_WDT_HANDOFF) && \
-	!(defined(CONFIG_SPL_BUILD) && defined(CONFIG_ESP32P4_SPL_IDF_INIT))
+#if !defined(CONFIG_ESP32P4_SPL_WDT_HANDOFF) && !defined(CONFIG_SPL_BUILD)
 static void p4_mwdt_off(u32 base)
 {
 	u32 v;
@@ -170,11 +169,10 @@ static void p4_mwdt_off(u32 base)
 
 void p4_watchdogs_off(void)
 {
-#if defined(CONFIG_SPL_BUILD) && defined(CONFIG_ESP32P4_SPL_IDF_INIT)
-	/* Keep the reference's boot-time protection until SPL handoff. */
-	p4_idf_api()->feed();
-#elif defined(CONFIG_ESP32P4_IDF_WDT_HANDOFF)
-	/* IDF super WDT remains on auto-feed. No new owner for the MWDTs. */
+#if defined(CONFIG_SPL_BUILD)
+	p4_spl_wdt_feed();
+#elif defined(CONFIG_ESP32P4_SPL_WDT_HANDOFF)
+	/* SPL left the super watchdog on auto-feed. */
 	return;
 #else
 	void *wdt = (void *)0x50116000;

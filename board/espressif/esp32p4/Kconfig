@@ -17,27 +17,27 @@ config BOARD_SPECIFIC_OPTIONS
 	select GENERIC_RISCV
 	select SUPPORT_SPL
 
-config ESP32P4_SPL_IDF_INIT
-	bool "Call the matching ESP-IDF hardware initialization from SPL"
+config ESP32P4_SPL_PSRAM_200MHZ
+	bool "Run rev1.3 AP Hex PSRAM at 200 MHz"
 	depends on SPL
 	help
-	  The board image must include the hardware-only SRAM segment built
-	  and packaged by idf-init. No additional loader or IDF app runs.
+	  Select the emulator-verified 200 MHz timing profile. The default
+	  is the board's conservative 80 MHz configuration.
 
 config ESP32P4_SPL_FIT_PAYLOAD
-	bool "Load a bounded P4 FIT and verify all three SHA-256 hashes"
-	depends on ESP32P4_SPL_IDF_INIT
+	def_bool y
+	depends on SPL
 	select SPL_SHA256
 	select SPL_OF_LIBFDT
 	help
 	  ROM enters U-Boot SPL directly. The FIT selects M-mode U-Boot,
 	  RV32 Linux and its DTB; no ESP-IDF app loader or OpenSBI stage.
 
-config ESP32P4_IDF_WDT_HANDOFF
-	bool "Preserve watchdog ownership passed from the matched SPL"
+config ESP32P4_SPL_WDT_HANDOFF
+	bool "Preserve watchdog ownership passed from the native SPL"
 	depends on ESP32P4_SRAM_ONLY
 	help
-	  The paired SPL protects boot with the IDF RWDT until application
+	  The paired SPL protects boot with the RTC watchdog until application
 	  handoff. Do not subsequently disable the always-on super watchdog
 	  or reset the timer-group watchdog registers from U-Boot proper.
 

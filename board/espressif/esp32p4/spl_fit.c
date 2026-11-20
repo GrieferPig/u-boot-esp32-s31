@@ -7,7 +7,7 @@
 #include <asm/io.h>
 #include <linux/libfdt.h>
 #include <u-boot/sha256.h>
-#include "idf-init/abi.h"
+#include "spl_hw.h"
 #include "spl_load.h"
 
 #if CONFIG_SPL_OF_LIBFDT_ASSUME_MASK != 0
@@ -117,7 +117,7 @@ int p4_spl_load_fit(void)
 			n = min(CHUNK, p[i].len - off);
 			memcpy(mem + off, src + off, n);
 			sha256_update(&ctx, mem + off, n);
-			p4_idf_api()->feed();
+			p4_spl_wdt_feed();
 		}
 		sha256_finish(&ctx, sum);
 		if (memcmp(sum, p[i].hash, sizeof(sum))) {

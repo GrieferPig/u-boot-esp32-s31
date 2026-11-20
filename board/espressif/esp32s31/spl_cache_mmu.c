@@ -7,6 +7,7 @@
  */
 
 #include <asm/io.h>
+#include "../common/mspi-mmu.h"
 #include <linux/types.h>
 #include <asm/arch-esp32s31/rom.h>
 
@@ -59,8 +60,9 @@ void cache_enable_all(void)
 
 void mmu_write_flash_entry(u32 entry_id, u32 content)
 {
-	writel(entry_id, (void *)SPI_MEM_C_MMU_ITEM_INDEX_REG);
-	writel(content, (void *)SPI_MEM_C_MMU_ITEM_CONTENT_REG);
+	esp_mspi_mmu_write((void *)SPI_MEM_C_MMU_ITEM_INDEX_REG,
+			   (void *)SPI_MEM_C_MMU_ITEM_CONTENT_REG, entry_id,
+			   content);
 }
 
 void s31_spl_cache_mmu_init(void)
