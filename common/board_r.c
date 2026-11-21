@@ -16,6 +16,10 @@
 #include <cyclic.h>
 #include <display_options.h>
 #include <exports.h>
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+#include <asm/arch-esp32p4/boot-layout.h>
+#endif
+
 #ifdef CONFIG_MTD_NOR_FLASH
 #include <flash.h>
 #endif
@@ -68,6 +72,39 @@
 #include <relocate.h>
 
 DECLARE_GLOBAL_DATA_PTR;
+
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+#include <asm/io.h>
+#include <asm/io.h>
+static void p4_putc_wait(char c)
+{
+	/* UART0: wait until the TX FIFO has room, otherwise characters drop. */
+	while (((readl((void *)0x500ca01c) >> 16) & 0x7f) > 100)
+		;
+	writel((u32)c, (void *)0x500ca000);
+}
+static void p4_tick(char c) { p4_putc_wait(c); }
+
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+static void p4_hex(ulong v)
+{
+	static const char hex[] = "0123456789abcdef";
+	int i;
+
+	for (i = 28; i >= 0; i -= 4)
+		p4_putc_wait(hex[(v >> i) & 0xf]);
+}
+#endif
+
+
+#else
+#define p4_tick(c) do { } while (0)
+#endif
+
+
+
+
+
 
 ulong monitor_flash_len;
 
@@ -200,10 +237,23 @@ static int initr_malloc(void)
 	 * This value MUST match the value of gd->start_addr_sp in board_f.c:
 	 * reserve_noncached().
 	 */
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+	/*
+	 * Code runs in place in low SRAM. 512 KiB L2 owns the high bank;
+	 * the bounded heap uses the SPL-verified PSRAM scratch arena.
+	 */
+	if (TOTAL_MALLOC_LEN > P4_RUNTIME_MALLOC_END - P4_RUNTIME_MALLOC)
+		return -ENOSPC;
+	start = P4_RUNTIME_MALLOC;
+#else
 	start = gd->relocaddr - TOTAL_MALLOC_LEN;
+#endif
+	p4_tick('1');
 	gd_set_malloc_start(start);
+	p4_tick('2');
 	mem_malloc_init((ulong)map_sysmem(start, TOTAL_MALLOC_LEN),
 			TOTAL_MALLOC_LEN);
+	p4_tick('3');
 	return 0;
 }
 
@@ -239,6 +289,24 @@ static int initr_dm(void)
 	bootstage_start(BOOTSTAGE_ID_ACCUM_DM_R, "dm_r");
 	ret = dm_init_and_scan(false);
 	bootstage_accum(BOOTSTAGE_ID_ACCUM_DM_R);
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+	p4_tick('D');
+	p4_tick(' ');
+	p4_hex((ulong)gd->fdt_blob);
+	p4_tick(' ');
+	p4_hex((ulong)fdt_check_header(gd->fdt_blob));
+	p4_tick(' ');
+	p4_hex(ret);
+	p4_tick(' ');
+	p4_hex((ulong)uclass_id_count(UCLASS_SERIAL));
+	p4_tick(' ');
+	p4_hex((ulong)fdt_path_offset(gd->fdt_blob, "/soc/serial@500ca000"));
+	p4_tick(' ');
+	p4_hex((ulong)fdt_totalsize(gd->fdt_blob));
+	p4_tick(' ');
+	p4_hex((ulong)uclass_id_count(UCLASS_SIMPLE_BUS));
+	p4_tick(10);
+#endif
 	if (ret)
 		return ret;
 

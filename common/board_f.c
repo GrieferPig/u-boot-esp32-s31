@@ -52,6 +52,9 @@
 
 DECLARE_GLOBAL_DATA_PTR;
 
+
+
+
 /*
  * TODO(sjg@chromium.org): IMO this code should be
  * refactored to a single function, something like:
@@ -83,6 +86,10 @@ __weak void blue_led_off(void) {}
  * literal pool we get on ARM. Or perhaps just encourage each module to use
  * a structure...
  */
+
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+#include <asm/arch-esp32p4/boot-layout.h>
+#endif
 
 #if defined(CONFIG_WATCHDOG) || defined(CONFIG_HW_WATCHDOG)
 static int init_func_watchdog_init(void)
@@ -491,7 +498,17 @@ static int reserve_uboot(void)
 		      gd->mon_len >> 10, gd->relocaddr);
 	}
 
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+	/*
+	 * There is no cache-coherent way to relocate here (the copy would sit in
+	 * the write-back data cache while the instruction fetch reads SRAM), so
+	 * keep U-Boot where the SPL loaded it and put the heap and stack above it.
+	 */
+	gd->relocaddr = CONFIG_TEXT_BASE;
+	gd->start_addr_sp = gd->ram_top;
+#else
 	gd->start_addr_sp = gd->relocaddr;
+#endif
 
 	return 0;
 }
@@ -567,6 +584,22 @@ static int reserve_global_data(void)
 
 static int reserve_fdt(void)
 {
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+	/*
+	 * U-Boot runs in place. The appended DT sits where .bss will be cleared,
+	 * so copy it to verified PSRAM before the BSS wipe. It is separate from
+	 * the FIT-staged kernel DTB and runtime stack.
+	 */
+	if (gd->fdt_blob) {
+		gd->fdt_size = ALIGN(fdt_totalsize(gd->fdt_blob), 32);
+		if (gd->fdt_size > P4_RUNTIME_MALLOC - P4_RUNTIME_FDT)
+			return -ENOSPC;
+		gd->new_fdt = (void *)P4_RUNTIME_FDT;
+		debug("Reserving %lu Bytes for FDT at: %08lx\n",
+		      gd->fdt_size, (ulong)gd->new_fdt);
+	}
+	return 0;
+#endif
 	if (!IS_ENABLED(CONFIG_OF_EMBED)) {
 		/*
 		 * If the device tree is sitting immediately above our image
@@ -999,6 +1032,7 @@ static const init_fnc_t init_sequence_f[] = {
 #endif
 	NULL,
 };
+
 
 void board_init_f(ulong boot_flags)
 {

@@ -1,0 +1,64 @@
+if TARGET_ESP32P4
+
+config SYS_BOARD
+	default "esp32p4"
+
+config SYS_VENDOR
+	default "espressif"
+
+config SYS_CPU
+	default "generic"
+
+config SYS_CONFIG_NAME
+	default "esp32p4"
+
+config BOARD_SPECIFIC_OPTIONS
+	def_bool y
+	select GENERIC_RISCV
+	select SUPPORT_SPL
+
+config ESP32P4_SPL_PSRAM_200MHZ
+	bool "Run rev1.3 AP Hex PSRAM at 200 MHz"
+	depends on SPL
+	help
+	  Select the emulator-verified 200 MHz timing profile. The default
+	  is the board's conservative 80 MHz configuration.
+
+config ESP32P4_SPL_FIT_PAYLOAD
+	def_bool y
+	depends on SPL
+	select SPL_SHA256
+	select SPL_OF_LIBFDT
+	help
+	  ROM enters U-Boot SPL directly. The FIT selects M-mode U-Boot,
+	  RV32 Linux and its DTB; no ESP-IDF app loader or OpenSBI stage.
+
+config ESP32P4_SPL_WDT_HANDOFF
+	bool "Preserve watchdog ownership passed from the native SPL"
+	depends on ESP32P4_SRAM_ONLY
+	help
+	  The paired SPL protects boot with the RTC watchdog until application
+	  handoff. Do not subsequently disable the always-on super watchdog
+	  or reset the timer-group watchdog registers from U-Boot proper.
+
+config ESP32P4_HW_IDF_HANDOFF
+	bool "Use the ESP-IDF hardware handoff contract"
+	default n
+	help
+	  Require a firmware-provided IRAM cache synchronization callback and
+	  revision metadata. The normal emulator board remains unchanged.
+
+endif
+
+config ESP32P4_LOW_RAM_TOP
+	bool "Run U-Boot from the ROM-mapped 896 KiB PSRAM window"
+	help
+	  The ROM only leaves part of the PSRAM window mapped. Select this to
+	  place U-Boot proper at 0x48000000 and cap usable RAM at 0x480e0000 so
+	  it can run from that window when booted by the SPL.
+
+config ESP32P4_SRAM_ONLY
+	bool "Run U-Boot proper from internal SRAM"
+	help
+	  Load U-Boot proper into the lower half of the HP SRAM (0x4ff00000) so
+	  it does not depend on the PSRAM window the ROM leaves mapped.

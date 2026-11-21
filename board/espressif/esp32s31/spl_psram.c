@@ -17,6 +17,8 @@
 #include <linux/types.h>
 
 #include "spl_psram.h"
+#include "../common/ap-psram.h"
+#include "../common/mspi-mmu.h"
 
 /*------------------------------------------------------------------------
  * LDO — PSRAM voltage domain
@@ -574,26 +576,7 @@ static void psram_mode_reg_init(void)
 		   AP_OCT_PSRAM_RD_REG_DUMMY_BITLEN);
 	mr2.val = rx_buf & 0xFF;
 
-	switch (mr2.density) {
-	case 0x1:
-		s_psram_size = 4 * 1024 * 1024;
-		break;
-	case 0x3:
-		s_psram_size = 8 * 1024 * 1024;
-		break;
-	case 0x5:
-		s_psram_size = 16 * 1024 * 1024;
-		break;
-	case 0x7:
-		s_psram_size = 32 * 1024 * 1024;
-		break;
-	case 0x6:
-		s_psram_size = 64 * 1024 * 1024;
-		break;
-	default:
-		s_psram_size = 0;
-		break;
-	}
+	s_psram_size = esp_ap_psram_density(mr2.val);
 }
 
 /*------------------------------------------------------------------------
@@ -860,9 +843,9 @@ static void psram_mmu_map(u32 psram_size_bytes)
 		page_count = 1024;
 
 	for (i = 0; i < page_count; i++) {
-		writel(i, (void *)SPI_MEM_S_MMU_ITEM_INDEX_REG);
-		writel(i | SOC_MMU_PSRAM_VALID | SOC_MMU_ACCESS_PSRAM,
-		       (void *)SPI_MEM_S_MMU_ITEM_CONTENT_REG);
+		esp_mspi_mmu_write((void *)SPI_MEM_S_MMU_ITEM_INDEX_REG,
+				   (void *)SPI_MEM_S_MMU_ITEM_CONTENT_REG, i,
+				   i | SOC_MMU_PSRAM_VALID | SOC_MMU_ACCESS_PSRAM);
 	}
 
 	/* Drop any I-cache lines that captured stale PSRAM contents (via

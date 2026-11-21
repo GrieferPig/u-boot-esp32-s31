@@ -6,8 +6,15 @@
 
 #include <cpu_func.h>
 
+#ifdef CONFIG_ESP32P4_HW_IDF_HANDOFF
+void esp32p4_hardware_cache_sync(void);
+#endif
+
 void invalidate_icache_all(void)
 {
+#ifdef CONFIG_ESP32P4_HW_IDF_HANDOFF
+	esp32p4_hardware_cache_sync();
+#endif
 	asm volatile ("fence.i" ::: "memory");
 }
 

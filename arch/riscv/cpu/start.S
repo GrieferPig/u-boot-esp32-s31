@@ -151,7 +151,16 @@ call_harts_early_init:
 	 */
 	la	t0, hart_lottery
 	li	t1, 1
+#if CONFIG_IS_ENABLED(SMP)
 	amoswap.w s2, t1, 0(t0)
+#else
+	/*
+	 * Single hart: avoid the atomic access. On the ESP32-P4 U-Boot runs from
+	 * PSRAM (or SRAM), where AMO operations are not necessarily supported.
+	 */
+	lw	s2, 0(t0)
+	sw	t1, 0(t0)
+#endif
 	bnez	s2, wait_for_gd_init
 #else
 	/*
@@ -405,8 +414,16 @@ relocate_secondary_harts:
  * initialization, now running from RAM.
  */
 call_board_init_r:
+#ifdef CONFIG_ESP32P4_HW_IDF_HANDOFF
+	/* A real C cache callback may clobber caller-saved t6. */
+	mv	s6, t6
+#endif
 	jal	invalidate_icache_all
 	jal	flush_dcache_all
+
+#ifdef CONFIG_ESP32P4_HW_IDF_HANDOFF
+	mv	t6, s6
+#endif
 	la	t0, board_init_r        /* offset of board_init_r() */
 	add	t4, t0, t6		/* real address of board_init_r() */
 /*

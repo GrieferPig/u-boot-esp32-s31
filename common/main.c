@@ -70,6 +70,9 @@ void main_loop(void)
 		cli_secure_boot_cmd(s);
 
 	autoboot_command(s);
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+	printf("P4: autoboot done, entering cli\n");
+#endif
 
 	/* if standard boot if enabled, assume that it will be able to boot */
 	if (IS_ENABLED(CONFIG_BOOTSTD_PROG)) {
@@ -82,5 +85,8 @@ void main_loop(void)
 
 	cli_loop();
 
+#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+	printf("P4: cli_loop returned\n");
+#endif
 	panic("No CLI available");
 }
