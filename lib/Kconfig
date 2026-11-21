@@ -521,6 +521,13 @@ config SHA256
 	  The SHA256 algorithm produces a 256-bit (32-byte) hash value
 	  (digest).
 
+config SHA256_SMALL
+	bool "Use size-optimized software SHA256"
+	depends on SHA256
+	help
+	  Use a loop instead of unrolled rounds in the SHA256 compressor.
+	  This saves code space on SRAM-constrained boards.
+
 config SHA512
 	bool "Enable SHA512 support"
 	default y if TI_SECURE_DEVICE && FIT_SIGNATURE

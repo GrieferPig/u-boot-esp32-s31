@@ -23,9 +23,9 @@ executable-cache limit with dynamically sized memory.
 
 The stock PSRAM profile is AP Hex x16 at 80 MHz (paired testing uses NOR
 DIO/40). To build PSRAM at 200 MHz enable
-`CONFIG_ESP32P4_SPL_PSRAM_200MHZ` in the SPL config (tested separately with
-ROM NOR QIO/80). SPI NOR and PSRAM are distinct clocks. Clock registers
-and runtime behavior were qualified in esp-emulator, not on silicon.
+`CONFIG_ESP32P4_SPL_PSRAM_200MHZ` in the SPL config. The 80 MHz profile
+initializes the CPLL and runs the AXI bus at 180 MHz before accessing
+cached PSRAM. SPI NOR uses a separate clock.
 
 SPL rejects unsupported revisions and protected devices in read-only
 eFuse checks, initializes peripherals and locked regions natively, and
@@ -69,6 +69,7 @@ overwrite other flash contents. No hardware operation is part of this
 build or its scripts.
 
 Use official esp-emu v1.1.0, a rev0 ROM ELF, fresh rev1.3 eFuse and
-`--psram-size 32M` to run the image. Send `p4boot` at the U-Boot prompt.
-Look for both CPUs, P4_SMP, P4_SIGNAL and login. `check-fit-reject.py`
+`--psram-size 32M` to run the image. U-Boot runs `p4boot` after a
+two-second countdown. Press a key during the countdown for the U-Boot
+prompt. Look for both CPUs and the Linux login prompt. `check-fit-reject.py`
 tests the FIT with independently corrupted temporary copies.

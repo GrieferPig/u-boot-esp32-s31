@@ -10,7 +10,9 @@
 #include <asm/io.h>
 #include <linux/bitops.h>
 #include <linux/delay.h>
+#include <linux/errno.h>
 #include "psram-handoff.h"
+#include "cache-range.h"
 #include "spl_hw.h"
 #include "spl_psram.h"
 #include "../common/ap-psram.h"
@@ -29,6 +31,24 @@
 #define DQS0		0x3cu
 #define DQS1		0x68u
 #define PLL_CAL		(HP_CLK + 0xbcu)
+#define CPU_PLL_CAL_DONE BIT(2)
+#define CPU_PLL_CAL_STOP BIT(3)
+#define ROOT_CLK_CTRL0	(HP_CLK + 0x04u)
+#define ROOT_CLK_CTRL1	(HP_CLK + 0x08u)
+#define ROOT_CLK_CTRL2	(HP_CLK + 0x0cu)
+#define ROOT_CLK_CTRL3	(HP_CLK + 0x10u)
+#define SOC_CLK_UPDATE	BIT(4)
+#define CPU_DIV_FIELDS	GENMASK(28, 5)
+#define HP_CLK_CTRL	(LP_CLK + 0x40u)
+#define HP_ROOT_SRC	GENMASK(1, 0)
+#define HP_ROOT_CPLL	1u
+#define PLL_POWER_CTRL	(PMU + 0xccu)
+#define CPLL_POWER	BIT(27)
+#define CPLL_I2C_POWER	BIT(23)
+#define CPLL_CLOCK_EN	BIT(17)
+#define CPLL_I2C_ADDR	0x67
+#define MPLL_I2C_ADDR	0x63
+#define ROM_SET_CPU_MHZ	0x4fc00044u
 #define CAL_STOP	BIT(9)
 #define CAL_DONE	BIT(8)
 #define MPLL_POWER	BIT(24)
@@ -44,6 +64,7 @@
 #define PSRAM_CS	BIT(1)
 
 #define P4_SPEED_MHZ (IS_ENABLED(CONFIG_ESP32P4_SPL_PSRAM_200MHZ) ? 200u : 80u)
+#define P4_CPLL_MHZ (P4_SPEED_MHZ == 200u ? 400u : 360u)
 #define P4_MPLL_MHZ (P4_SPEED_MHZ == 200u ? 400u : 320u)
 #define READ_LAT (P4_SPEED_MHZ == 200u ? 4u : 2u)
 #define WRITE_LAT (P4_SPEED_MHZ == 200u ? 1u : 2u)
@@ -64,9 +85,9 @@ static int spin_mask(unsigned int addr, unsigned int mask, bool on)
 	return -1;
 }
 
-static int mpll_rw(u8 addr, u8 *value, bool write)
+static int pll_rw(u8 slave, u8 addr, u8 *value, bool write)
 {
-	u32 word = 0x63u | ((u32)addr << 8);
+	u32 word = slave | ((u32)addr << 8);
 
 	if (spin_mask(LP_ANA, I2C_BUSY, false))
 		return -1;
@@ -77,6 +98,74 @@ static int mpll_rw(u8 addr, u8 *value, bool write)
 		return -1;
 	if (!write)
 		*value = (u8)(readl(REG(LP_ANA)) >> 16);
+	return 0;
+}
+
+static void pll_i2c_select(u32 master_select)
+{
+	setbits_le32(REG(HP_CLK_CTRL), BIT(28));
+	setbits_le32(REG(LP_IO), BIT(27));
+	setbits_le32(REG(LP_ANA + 0x34), BIT(0));
+	writel(0, REG(LP_ANA + 0x1c));
+	writel(master_select, REG(LP_ANA + 0x20));
+}
+
+static int update_root_dividers(void)
+{
+	setbits_le32(REG(ROOT_CLK_CTRL0), SOC_CLK_UPDATE);
+	return spin_mask(ROOT_CLK_CTRL0, SOC_CLK_UPDATE, false);
+}
+
+/*
+ * TRM ch.12 Reset and Clock: LP_CLKRST_HP_ROOT_CLK_SRC_SEL,
+ * HP_SYS_CLKRST_SOC_CLK_DIV_UPDATE and CPU_PLL_CAL_STOP/END.
+ * TRM ch.16 Low-Power Management: PMU_IMM_HP_CK_POWER.
+ * TRM ch.49 Analog I2C Controller: ANA_CONF2 routes CPU_PLL to I2C0.
+ *
+ * On EN reset, the ROM leaves SYS_CLK at 20 MHz. Establish the clock
+ * tree before opening the PSRAM AXI path, as bootloader_clock_configure()
+ * does before application PSRAM initialization. The P4 clock constraint
+ * in esp_clk_utils_mspi_speed_mode_sync_before_cpu_freq_switching()
+ * requires the AXI clock to be at least the PSRAM clock. Keep MEM/SYS
+ * at CPLL / 2 and APB at CPLL / 4.
+ */
+static int psram_init_axi_clock(void)
+{
+	/* Rev1.3 analog settings validated by clk_ll_cpll_set_config()
+	 * in Espressif's bootloader clock implementation.
+	 */
+	u8 ref = 5u << 4;
+	u8 div = P4_CPLL_MHZ / 40u;
+	u8 bias = BIT(6) | (3u << 4) | 3u;
+
+	clrbits_le32(REG(HP_CLK_CTRL), HP_ROOT_SRC);
+	writel(CPLL_POWER | CPLL_I2C_POWER, REG(PLL_POWER_CTRL));
+	writel(CPLL_CLOCK_EN, REG(PLL_POWER_CTRL));
+	pll_i2c_select(BIT(11));
+	clrbits_le32(REG(PLL_CAL), CPU_PLL_CAL_STOP);
+	if (pll_rw(CPLL_I2C_ADDR, 2, &ref, true) ||
+	    pll_rw(CPLL_I2C_ADDR, 3, &div, true) ||
+	    pll_rw(CPLL_I2C_ADDR, 6, &bias, true) ||
+	    spin_mask(PLL_CAL, CPU_PLL_CAL_DONE, true))
+		return -ETIMEDOUT;
+	setbits_le32(REG(PLL_CAL), CPU_PLL_CAL_STOP);
+
+	/* Program and apply the /2 CPU divisor before lifting MEM to /1.
+	 * APB retains /2 of SYS. Switch the root only once these are live.
+	 */
+	clrsetbits_le32(REG(ROOT_CLK_CTRL0), CPU_DIV_FIELDS, BIT(5));
+	if (update_root_dividers())
+		return -ETIMEDOUT;
+	writel(0, REG(ROOT_CLK_CTRL1)); /* MEM and SYS divide by one */
+	if (update_root_dividers())
+		return -ETIMEDOUT;
+	writel(BIT(16), REG(ROOT_CLK_CTRL2)); /* APB divides SYS by two */
+	clrbits_le32(REG(ROOT_CLK_CTRL3), GENMASK(7, 0));
+	if (update_root_dividers())
+		return -ETIMEDOUT;
+
+	clrsetbits_le32(REG(HP_CLK_CTRL), HP_ROOT_SRC, HP_ROOT_CPLL);
+	((void (*)(u32))ROM_SET_CPU_MHZ)(P4_CPLL_MHZ / 2u);
 	return 0;
 }
 
@@ -105,26 +194,22 @@ static int mpll_init(void)
 
 	power_vo2();
 	setbits_le32(REG(PMU + 0x15c), MPLL_POWER | I2C_POWER | I2C_RESETB);
-	setbits_le32(REG(LP_CLK + 0x40), BIT(28));
-	setbits_le32(REG(LP_IO), BIT(27));
-	setbits_le32(REG(LP_ANA + 0x34), BIT(0));
-	writel(0, REG(LP_ANA + 0x1c));
-	writel(BIT(9), REG(LP_ANA + 0x20)); /* select MPLL analog bus */
+	pll_i2c_select(BIT(9));
 	clrbits_le32(REG(PLL_CAL), CAL_STOP);
-	if (mpll_rw(3, &v, false))
+	if (pll_rw(MPLL_I2C_ADDR, 3, &v, false))
 		return -1;
 	v |= 3u << 4;
-	if (mpll_rw(3, &v, true) || mpll_rw(1, &v, false))
+	if (pll_rw(MPLL_I2C_ADDR, 3, &v, true) || pll_rw(MPLL_I2C_ADDR, 1, &v, false))
 		return -1;
 	v &= ~BIT(5);
-	if (mpll_rw(1, &v, true))
+	if (pll_rw(MPLL_I2C_ADDR, 1, &v, true))
 		return -1;
 	v |= BIT(5);
-	if (mpll_rw(1, &v, true))
+	if (pll_rw(MPLL_I2C_ADDR, 1, &v, true))
 		return -1;
 	/* 40 MHz XTAL, reference divisor 2. */
 	v = ((P4_MPLL_MHZ / 20 - 1) << 3) | 1;
-	if (mpll_rw(2, &v, true) || spin_mask(PLL_CAL, CAL_DONE, true))
+	if (pll_rw(MPLL_I2C_ADDR, 2, &v, true) || spin_mask(PLL_CAL, CAL_DONE, true))
 		return -1;
 	setbits_le32(REG(PLL_CAL), CAL_STOP);
 
@@ -268,7 +353,6 @@ static void configure_cache_port(void)
 	clrsetbits_le32(REG(MSPI2 + 0xd8), 0xfu, BIT(0) | BIT(1));
 	setbits_le32(REG(MSPI3 + 0xd4), BIT(1));
 	setbits_le32(REG(MSPI2 + 0x0c), BIT(25) | BIT(26));
-	setbits_le32(REG(MSPI2 + 0x3c), BIT(0));
 }
 
 static int psram_pmp_open(u32 size)
@@ -300,7 +384,7 @@ static int psram_mmu_map(u32 size)
 	/*
 	 * Page size for the PSRAM side of the MMU (MSPI2 + 0x384). Never
 	 * programmed before, which left the window correct only with the caches
-	 * off (the uncached path does not use this mapping) and wrong as soon as
+	 * off before publishing the cached aperture and wrong as soon as
 	 * the L2 was on. 0x13200004 is what the working reference holds, with
 	 * bits [4:3] = 2 selecting 64 KiB pages - the same geometry the flash
 	 * side is given in p4_spl_flash_init().
@@ -332,31 +416,40 @@ static int psram_check_window(u32 size)
 {
 	static u32 original[P4_EXT_MAX / P4_EXT_PAGE][2];
 	u32 pages = size / P4_EXT_PAGE, i, k;
-	int err = 0;
+	int err = 0, ret = 0;
 
 	for (i = 0; i < pages; i++) {
 		u32 off = (i + 1) * P4_EXT_PAGE - 16;
 
+		if (p4_cache_discard_data(P4_EXT_RAM_BASE + off, 8))
+			goto sync_error;
 		for (k = 0; k < 2; k++)
 			original[i][k] =
-				readl((void *)(P4_EXT_RAM_ALIAS + off + 4 * k));
+				readl((void *)(P4_EXT_RAM_BASE + off + 4 * k));
 	}
 	for (i = 0; i < pages; i++) {
 		u32 off = (i + 1) * P4_EXT_PAGE - 16;
 		u32 sig = 0x6b53a7c9u ^ (i * 0x9e3779b9u);
 
-		writel(sig, (void *)(P4_EXT_RAM_ALIAS + off));
-		writel(~sig, (void *)(P4_EXT_RAM_ALIAS + off + 4));
+		writel(sig, (void *)(P4_EXT_RAM_BASE + off));
+		writel(~sig, (void *)(P4_EXT_RAM_BASE + off + 4));
+		/* Different virtual tags cannot hide physical aliases:
+		 * drain each write to the part before checking any page. */
+		ret = p4_cache_republish(P4_EXT_RAM_BASE + off, 8);
+		if (ret)
+			goto sync_error;
+		if (!(i & 31))
+			p4_spl_wdt_feed();
 	}
 	asm volatile("fence iorw, iorw" ::: "memory");
 	for (i = 0; i < pages; i++) {
 		u32 off = (i + 1) * P4_EXT_PAGE - 16;
 		u32 sig = 0x6b53a7c9u ^ (i * 0x9e3779b9u);
 
-		if (readl((void *)(P4_EXT_RAM_ALIAS + off)) != sig ||
-		    readl((void *)(P4_EXT_RAM_ALIAS + off + 4)) != ~sig) {
+		if (readl((void *)(P4_EXT_RAM_BASE + off)) != sig ||
+		    readl((void *)(P4_EXT_RAM_BASE + off + 4)) != ~sig) {
 			p4_spl_early_puts("psram: mirror/data error at ");
-			p4_spl_early_hex(P4_EXT_RAM_ALIAS + off);
+			p4_spl_early_hex(P4_EXT_RAM_BASE + off);
 			p4_spl_early_puts("\n");
 			err = -1;
 			break;
@@ -367,10 +460,23 @@ static int psram_check_window(u32 size)
 
 		for (k = 0; k < 2; k++)
 			writel(original[i][k],
-			       (void *)(P4_EXT_RAM_ALIAS + off + 4 * k));
+			       (void *)(P4_EXT_RAM_BASE + off + 4 * k));
+		ret = p4_cache_republish(P4_EXT_RAM_BASE + off, 8);
+		if (ret)
+			goto sync_error;
+		if (!(i & 31))
+			p4_spl_wdt_feed();
 	}
 	asm volatile("fence iorw, iorw" ::: "memory");
 	return err;
+
+sync_error:
+	p4_spl_early_puts(ret == -ETIMEDOUT ?
+			  "psram: MSPI2 write drain timeout at page " :
+			  "psram: cached page sync timeout at ");
+	p4_spl_early_hex(i);
+	p4_spl_early_puts("\n");
+	return -1;
 }
 
 int p4_spl_psram_init(void)
@@ -379,6 +485,10 @@ int p4_spl_psram_init(void)
 	u32 mr01, mr23, mr4, mr8, id, size;
 
 	record[0] = 0;
+	if (psram_init_axi_clock()) {
+		p4_spl_early_puts("psram: AXI clock setup failed\n");
+		return -ETIMEDOUT;
+	}
 	if (mpll_init()) {
 		p4_spl_early_puts("psram: MPLL failed to calibrate\n");
 		return -1;
@@ -432,6 +542,8 @@ int p4_spl_psram_init(void)
 	((void (*)(u32))0x4fc004f4u)(0); /* Cache_Enable_L1_DCache */
 	((void (*)(u32))0x4fc00504u)(0); /* Cache_Enable_L2_Cache */
 	p4_spl_wdt_feed();
+	/* Enable PSRAM AXI requests and clear CLOSE_AXI_INF_EN (SLV_ERR only). */
+	clrsetbits_le32(REG(MSPI2 + 0x3c), BIT(31), BIT(0));
 	if (psram_check_window(size) || psram_pmp_open(size)) {
 		p4_spl_early_puts("psram: memory test/PMP failed; no handoff\n");
 		return -1;
@@ -444,6 +556,6 @@ int p4_spl_psram_init(void)
 	p4_spl_early_hex(size);
 	p4_spl_early_puts(" MHz ");
 	p4_spl_early_hex(P4_SPEED_MHZ);
-	p4_spl_early_puts(" page/alias test OK\n");
+	p4_spl_early_puts(" page/alias test OK (cached readback)\n");
 	return 0;
 }
