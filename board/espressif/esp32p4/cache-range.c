@@ -6,7 +6,7 @@
 #define P4_MSPI2_AXI_STATUS	0x5008e178u
 #define P4_MSPI2_AXI_IDLE	0xfc000000u
 
-static inline int p4_cache_wait(u32 reg, u32 mask, u32 value)
+static __always_inline int p4_cache_wait(u32 reg, u32 mask, u32 value)
 {
 	u32 i;
 

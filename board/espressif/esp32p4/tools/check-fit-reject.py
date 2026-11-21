@@ -16,7 +16,7 @@ if spl_entry not in (0x4ff2b000, 0x4ff40000):
 entry = f"entry 0x{spl_entry:08x}".encode()
 cases=[('uboot',0x100000+128,'P4 FIT: uboot SHA256 mismatch; halted'),
        ('linux',0x200000+128,'P4 FIT: linux SHA256 mismatch; halted'),
-       ('dtb',0x900000+128,'P4 FIT: dtb SHA256 mismatch; halted'),
+       ('dtb',0xb00000+128,'P4 FIT: dtb SHA256 mismatch; halted'),
        ('manifest',0xf0000,'P4 FIT: invalid manifest/image; halted')]
 summary=[]
 with tempfile.TemporaryDirectory(dir=a.evidence) as td:

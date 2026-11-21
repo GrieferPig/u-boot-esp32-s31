@@ -27,7 +27,7 @@
 
 int p4_cache_range(u32 start, u32 bytes, u32 map, u32 op);
 
-static inline int p4_cache_writeback(u32 start, u32 bytes)
+static __always_inline int p4_cache_writeback(u32 start, u32 bytes)
 {
 	int ret = p4_cache_range(start, bytes, P4_SYNC_L1D, P4_SYNC_WBACK);
 
