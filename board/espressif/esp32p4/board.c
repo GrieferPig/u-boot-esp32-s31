@@ -40,7 +40,8 @@ DECLARE_GLOBAL_DATA_PTR;
  */
 int dram_init(void)
 {
-	if (IS_ENABLED(CONFIG_ESP32P4_SRAM_ONLY)) {
+	if (IS_ENABLED(CONFIG_ESP32P4_SRAM_ONLY) &&
+	    !IS_ENABLED(CONFIG_SPL_BUILD)) {
 		gd->ram_base = P4_SRAM_MID_BASE;
 		gd->ram_size = P4_SRAM_MID_TOP - P4_SRAM_MID_BASE;
 	} else {
@@ -55,7 +56,7 @@ int dram_init_banksize(void)
 	gd->bd->bi_dram[0].start = gd->ram_base;
 	gd->bd->bi_dram[0].size = gd->ram_size;
 
-#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+#if defined(CONFIG_ESP32P4_SRAM_ONLY) && !defined(CONFIG_SPL_BUILD)
 	/*
 	 * U-Boot itself lives in SRAM, but the kernel's memory - and therefore
 	 * the only place a bootm FDT relocation or kernel payload can be placed -
@@ -71,7 +72,7 @@ int dram_init_banksize(void)
 	return 0;
 }
 
-#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+#if defined(CONFIG_ESP32P4_SRAM_ONLY) && !defined(CONFIG_SPL_BUILD)
 /*
  * The relocation copies U-Boot through the write-back data cache, so the copy
  * has to be pushed to SRAM before the jump and the instruction cache dropped
@@ -181,7 +182,7 @@ int board_init(void)
 	return 0;
 }
 
-#if defined(CONFIG_ESP32P4_SRAM_ONLY)
+#if defined(CONFIG_ESP32P4_SRAM_ONLY) && !defined(CONFIG_SPL_BUILD)
 /*
  * The ROM leaves several watchdogs armed (RWDT, super watchdog and the TIMG
  * MWDTs). U-Boot feeds them through WATCHDOG_RESET(), which lands here.

@@ -6,4 +6,3 @@ F:	include/configs/esp32s31.h
 F:	configs/espressif_esp32s31_defconfig
 F:	arch/riscv/dts/esp32s31.dts
 F:	arch/riscv/dts/esp32s31-u-boot.dtsi
-F:	doc/board/espressif/esp32s31.rst
