@@ -702,6 +702,14 @@ config ARCH_MISC_INIT
 	  to be performed. This function should be defined by the board
 	  and will be called after the console is set up, after relocation.
 
+config BOARD_PRELOADED_RUNTIME
+	bool
+	help
+	  Use the link address for an already-loaded U-Boot monitor and
+	  reserve its runtime stack separately at the board's RAM top.
+	  The board must provide a bounded CFG_SYS_RUNTIME_MALLOC_BASE
+	  and CFG_SYS_RUNTIME_MALLOC_END for the runtime heap.
+
 config BOARD_EARLY_INIT_F
 	bool "Call board-specific init before relocation"
 	help

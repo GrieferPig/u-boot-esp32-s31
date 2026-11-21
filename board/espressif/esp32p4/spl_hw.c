@@ -1,24 +1,26 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/* Minimal early policy for the ESP32-P4 rev1.3 mask-ROM boot contract.
+/*
+ * Minimal early policy for the ESP32-P4 rev1.3 mask-ROM boot contract.
  * Register fields: ESP32-P4 rev1.3 TRM, eFuse, LP_WDT and TIMG chapters.
  */
 #include <asm/io.h>
 #include <asm/global_data.h>
 #include <linux/bitops.h>
+#include <linux/build_bug.h>
 #include <linux/types.h>
 #include "spl_hw.h"
 #include <asm/arch-esp32p4/boot-layout.h>
 
 /* start.S puts the early malloc/GD below the fixed stack reservation. */
-_Static_assert(CONFIG_SPL_TEXT_BASE == P4_SPL_BASE, "P4 SPL link/ROM mismatch");
-_Static_assert(P4_SPL_BASE + CONFIG_SPL_MAX_SIZE <= CONFIG_SPL_BSS_START_ADDR,
-	       "P4 SPL image would overlap BSS");
-_Static_assert(CONFIG_SPL_BSS_START_ADDR + CONFIG_SPL_BSS_MAX_SIZE <=
-	       CONFIG_CUSTOM_SYS_INIT_SP_ADDR - (1u << CONFIG_STACK_SIZE_SHIFT) -
-	       CONFIG_SPL_SYS_MALLOC_F_LEN - sizeof(gd_t) - 16,
-	       "P4 SPL BSS would overwrite early malloc/GD");
-_Static_assert(CONFIG_CUSTOM_SYS_INIT_SP_ADDR < P4_LOW_SRAM_TOP,
-	       "P4 SPL stack would enter reserved ROM/AP SRAM");
+static_assert(CONFIG_SPL_TEXT_BASE == P4_SPL_BASE, "P4 SPL link/ROM mismatch");
+static_assert(P4_SPL_BASE + CONFIG_SPL_MAX_SIZE <= CONFIG_SPL_BSS_START_ADDR,
+	      "P4 SPL image would overlap BSS");
+static_assert(CONFIG_SPL_BSS_START_ADDR + CONFIG_SPL_BSS_MAX_SIZE <=
+	      CONFIG_CUSTOM_SYS_INIT_SP_ADDR - (1u << CONFIG_STACK_SIZE_SHIFT) -
+	      CONFIG_SPL_SYS_MALLOC_F_LEN - sizeof(gd_t) - 16,
+	      "P4 SPL BSS would overwrite early malloc/GD");
+static_assert(CONFIG_CUSTOM_SYS_INIT_SP_ADDR < P4_LOW_SRAM_TOP,
+	      "P4 SPL stack would enter reserved ROM/AP SRAM");
 
 #define REG(a) ((void *)(uintptr_t)(a))
 #define EFUSE_BASE	0x5012d000u
@@ -54,8 +56,10 @@ void p4_spl_wdt_finish(void)
 
 static void wdt_start(void)
 {
-	/* Keep an active reset watchdog while taking ownership from ROM.
-	 * 612,000 slow-clock ticks preserve the rev1.3 reference window. */
+	/*
+	 * Keep an active reset watchdog while taking ownership from ROM.
+	 * 612,000 slow-clock ticks preserve the rev1.3 reference window.
+	 */
 	writel(WDT_KEY, REG(LP_WDT + RWDT_LOCK));
 	writel(612000, REG(LP_WDT + RWDT_STAGE0));
 	clrsetbits_le32(REG(LP_WDT + RWDT_CFG), RWDT_STAGE_MASK | RWDT_FLASHBOOT,
@@ -74,7 +78,8 @@ static void wdt_start(void)
 	writel(0, REG(LP_WDT + SWD_LOCK));
 }
 
-/* Same mandatory low-address protection as the previous boot stage; only
+/*
+ * Same mandatory low-address protection as the previous boot stage; only
  * entries whose policy is unambiguous in the rev1.3 memory map are used.
  * Never unlock a ROM-locked entry or widen the PSRAM window here.
  */
@@ -87,8 +92,10 @@ static int protect_regions(void)
 	asm volatile("csrr %0, pmpcfg0; csrr %1, pmpcfg1; "
 		     "csrr %2, pmpcfg2; csrr %3, pmpcfg3"
 		     : "=r"(p0), "=r"(p1), "=r"(p2), "=r"(p3));
-	/* ROM may leave these entries configured but never an unrelated PMP
-	 * owner. Unexpected permission words must not be silently erased. */
+	/*
+	 * ROM may leave these entries configured but never an unrelated PMP
+	 * owner. Unexpected permission words must not be silently erased.
+	 */
 	if ((p0 & ~want0) || (p1 & ~want1) || (p2 & ~want2) || (p3 & ~want3))
 		return -1;
 
@@ -112,10 +119,12 @@ static int protect_regions(void)
 	return p0 != want0 || p1 != want1 || p2 != want2 || p3 != want3;
 }
 
-/* Rev1.3 PMA excludes the SoC address gaps while leaving the contiguous
+/*
+ * Rev1.3 PMA excludes the SoC address gaps while leaving the contiguous
  * instruction/data window cacheable. CSR fields and address boundaries:
  * ESP32-P4 TRM CPU chapter, Physical Memory Attributes. Apply on the boot
- * hart only; CPU1 keeps the normal mask-ROM attributes and waiter PMP. */
+ * hart only; CPU1 keeps the normal mask-ROM attributes and waiter PMP.
+ */
 static void memory_attributes(void)
 {
 	const u32 guard = BIT(29) | BIT(0);
@@ -152,8 +161,10 @@ int p4_spl_hw_init(void)
 	u32 rev = readl(REG(EFUSE_BASE + 0x4c));
 	u32 crypt = (readl(REG(EFUSE_BASE + 0x34)) >> 18) & 7;
 
-	/* An unsigned development FIT must not replace a protected boot flow.
-	 * The ROM already loaded the SPL; these are read-only checks. */
+	/*
+	 * An unsigned development FIT must not replace a protected boot flow.
+	 * The ROM already loaded the SPL; these are read-only checks.
+	 */
 	if ((readl(REG(EFUSE_BASE + 0x38)) & BIT(20)) ||
 	    ((crypt ^ (crypt >> 1) ^ (crypt >> 2)) & 1))
 		return -1;

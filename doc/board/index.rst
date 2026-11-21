@@ -24,6 +24,7 @@ Board-specific doc
    congatec/index
    coreboot/index
    emulation/index
+   espressif/index
    gateworks/index
    google/index
    highbank/index

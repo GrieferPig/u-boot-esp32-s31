@@ -2,8 +2,8 @@
 /*
  * ESP32-P4 device tree (M-mode U-Boot, no OpenSBI).
  *
- * U-Boot proper runs from PSRAM at CONFIG_TEXT_BASE; the kernel image and its
- * device tree are placed in PSRAM by the firmware before this stage starts.
+ * U-Boot proper runs from internal SRAM. Linux executes from mapped NOR
+ * with a separate DTB in PSRAM.
  */
 
 /dts-v1/;
@@ -19,7 +19,6 @@
 	};
 
 	chosen {
-		bootargs = "earlycon=esp32p4uart,mmio32,0x500ca000 console=tty0 console=ttyS0,115200 clk_ignore_unused";
 		stdout-path = "serial0:115200n8";
 	};
 
@@ -77,7 +76,7 @@
 		};
 	};
 
-	/* 16 MiB kernel window inside PSRAM; U-Boot proper lives at its top. */
+	/* Control FDT PSRAM aperture. SPL detects the installed size. */
 	memory@48000000 {
 		bootph-all;
 		device_type = "memory";

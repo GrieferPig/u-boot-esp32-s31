@@ -7,16 +7,14 @@
  * 0x40000000 and read the image with ordinary loads.
  */
 
-#include <common.h>
+#include <linux/kernel.h>
+#include <linux/string.h>
 #include <asm/io.h>
 #include <linux/bitops.h>
 #include <linux/delay.h>
 #include "spl_hw.h"
 #include <asm/arch-esp32p4/boot-layout.h>
-#include "../common/mspi-mmu.h"
-
-void p4_spl_puts(const char *s);
-void p4_spl_early_hex(u32 v);
+#include "mspi-mmu.h"
 
 #define P4_MSPI0_BASE		0x5008c000ul
 #define P4_CLKRST_BASE		0x500e6000ul
@@ -27,7 +25,7 @@ void p4_spl_early_hex(u32 v);
 
 #define MMU_PAGE_SIZE_MASK	(3u << 2)
 /* The reference boot leaves 0x04 here (bit 2), not 0x10 (bit 4). */
-#define MMU_PAGE_SIZE_64K	(1u << 2)
+#define MMU_PAGE_SIZE_64K	BIT(2)
 
 /* Cache clock force-on bits, as the S31 port uses. */
 #define CACHE_CTRL0_REG		(P4_CLKRST_BASE + 0x38)
@@ -61,7 +59,7 @@ void p4_spl_early_hex(u32 v);
 #define P4_L2_SIZE_512K			11u
 #define P4_L2_WAYS			8u
 #define P4_L2_LINE_128B			4u
-#define P4_CACHE_MAP_L2			(1u << 5)
+#define P4_CACHE_MAP_L2			BIT(5)
 
 typedef void (*rom_void_fn)(void);
 typedef void (*rom_flags_fn)(u32 flags);
@@ -72,13 +70,14 @@ static void mmu_write_entry(u32 entry, u32 content)
 			   entry, content);
 }
 
-
 void p4_spl_cache_init(void)
 {
 	u32 i;
 
-	/* Cache geometry and flash table come from the rev1.3 mask ROM API;
-	 * use this before any cached PSRAM access. */
+	/*
+	 * Cache geometry and flash table come from the rev1.3 mask ROM API;
+	 * use this before any cached PSRAM access.
+	 */
 	((rom_void_fn)ROM_CACHE_INIT)();
 	/* The stack is live. Do not globally invalidate the shared L1 D-cache. */
 	clrsetbits_le32((void *)MMU_POWER_CTRL, MMU_PAGE_SIZE_MASK,
@@ -99,35 +98,5 @@ int p4_spl_flash_init(u32 size)
 		return -1;
 	for (i = 0; i < pages; i++)
 		mmu_write_entry(i, i | P4_MMU_FLASH_VALID);
-	return 0;
-}
-
-int p4_spl_nor_read(u32 offset, void *buf, u32 len)
-{
-	memcpy(buf, (void *)(P4_FLASH_VADDR + offset), len);
-
-	return 0;
-}
-
-int p4_spl_nor_probe(void)
-{
-	u32 buf[2];
-
-	p4_spl_puts("P4SPL:flash ");
-	if (p4_spl_flash_init(0x800000)) {
-		p4_spl_puts("map failed\n");
-		return -1;
-	}
-
-	p4_spl_nor_read(0, buf, 8);
-	p4_spl_early_hex(buf[0]);
-	p4_spl_early_hex(buf[1]);
-
-	p4_spl_puts(" nor10000 ");
-	p4_spl_nor_read(0x10000, buf, 8);
-	p4_spl_early_hex(buf[0]);
-	p4_spl_early_hex(buf[1]);
-	p4_spl_puts("\n");
-
 	return 0;
 }

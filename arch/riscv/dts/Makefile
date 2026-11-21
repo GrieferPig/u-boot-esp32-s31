@@ -25,4 +25,3 @@ dtbs: $(addprefix $(obj)/, $(dtb-y))
 
 clean-files := *.dtb
 dtb-$(CONFIG_TARGET_ESP32P4) += esp32p4.dtb
-dtb-$(CONFIG_ESP32P4_HW_IDF_HANDOFF) += esp32p4-hw.dtb

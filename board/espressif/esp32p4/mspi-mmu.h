@@ -5,7 +5,7 @@
 #include <asm/io.h>
 
 static inline void esp_mspi_mmu_write(void *selector, void *content,
-				     u32 index, u32 value)
+				      u32 index, u32 value)
 {
 	writel(index, selector);
 	writel(value, content);

@@ -6,15 +6,18 @@
 #ifndef __ESP32P4_CONFIG_H
 #define __ESP32P4_CONFIG_H
 
+#ifdef CONFIG_BOARD_PRELOADED_RUNTIME
+#include <asm/arch-esp32p4/boot-layout.h>
+#define CFG_SYS_RUNTIME_MALLOC_BASE	P4_RUNTIME_MALLOC
+#define CFG_SYS_RUNTIME_MALLOC_END	P4_RUNTIME_MALLOC_END
+#endif
+
 /*
  * SPL reads U-Boot proper from the flash XIP window that it maps before
- * loading (see board/espressif/esp32p4/spl_flash.c). U-Boot proper is flashed
- * at raw offset 0x10000, one megabyte window starting at raw flash zero.
+ * loading. TRM ch.9 System and Memory describes the MSPI NOR mapping.
+ * The P4 FIT places U-Boot proper at raw NOR offset 0x100000.
  */
-#define CFG_SYS_UBOOT_BASE	0x40010000
-
-/* The SPL reads the 16 MHz SYSTIMER as its legacy timebase. */
-#define CFG_SYS_TIMER_RATE	16000000
+#define CFG_SYS_UBOOT_BASE	0x40100000
 
 /*
  * booti allocates below board_get_usable_ram_top() by default, which is where

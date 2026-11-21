@@ -2,9 +2,10 @@
 #ifndef __ESP32P4_BOOT_LAYOUT_H
 #define __ESP32P4_BOOT_LAYOUT_H
 
-/* Rev1.3 512 KiB L2 takes the entire high-SRAM alias. Keep the ROM
- * image and retained Linux callback below it, and do not use the last
- * 16 KiB of low SRAM for early stacks. It owns the ROM/AP handoff. */
+/*
+ * TRM ch.9 System and Memory: 512 KiB L2 occupies high SRAM.
+ * The last 16 KiB of low SRAM is reserved for the ROM/AP handoff.
+ */
 #define P4_PROPER_BASE		0x4ff00000u
 #define P4_SPL_BASE		0x4ff2b000u
 #define P4_PROPER_SLOT		(P4_SPL_BASE - P4_PROPER_BASE)

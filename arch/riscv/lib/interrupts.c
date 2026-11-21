@@ -185,23 +185,8 @@ int disable_interrupts(void)
 	return 0;
 }
 
-#if defined(CONFIG_SPL_BUILD) && defined(CONFIG_TARGET_ESP32P4)
-void p4_spl_early_puts(const char *s);
-void p4_spl_early_hex(u32 value);
-#define P4_TRAP_REPORT(cause, epc) do { \
-	p4_spl_early_puts("P4TRAP cause="); \
-	p4_spl_early_hex(cause); \
-	p4_spl_early_puts(" epc="); \
-	p4_spl_early_hex(epc); \
-	p4_spl_early_puts("\n"); \
-} while (0)
-#else
-#define P4_TRAP_REPORT(cause, epc) do { } while (0)
-#endif
-
 ulong handle_trap(ulong cause, ulong epc, ulong tval, struct pt_regs *regs)
 {
-	P4_TRAP_REPORT(cause, epc);
 	ulong is_irq, irq;
 
 	/* An UEFI application may have changed gd. Restore U-Boot's gd. */

@@ -6,7 +6,9 @@
  * against the device documentation and ESP-IDF a602e67b. No IDF code or
  * object is linked. This executes with hart1 held in reset.
  */
-#include <common.h>
+#include <linux/kernel.h>
+#include <linux/string.h>
+#include <stdio.h>
 #include <asm/io.h>
 #include <linux/bitops.h>
 #include <linux/delay.h>
@@ -15,8 +17,8 @@
 #include "cache-range.h"
 #include "spl_hw.h"
 #include "spl_psram.h"
-#include "../common/ap-psram.h"
-#include "../common/mspi-mmu.h"
+#include "ap-psram.h"
+#include "mspi-mmu.h"
 
 #define REG(a) ((void *)(uintptr_t)(a))
 #define HP_CLK		0x500e6000u
@@ -71,9 +73,6 @@
 #define DUMMY_MR (P4_SPEED_MHZ == 200u ? 12u : 8u)
 #define DUMMY_READ (P4_SPEED_MHZ == 200u ? 26u : 18u)
 #define DUMMY_WRITE DUMMY_MR
-
-void p4_spl_early_puts(const char *s);
-void p4_spl_early_hex(u32 v);
 
 static int spin_mask(unsigned int addr, unsigned int mask, bool on)
 {
@@ -131,7 +130,8 @@ static int update_root_dividers(void)
  */
 static int psram_init_axi_clock(void)
 {
-	/* Rev1.3 analog settings validated by clk_ll_cpll_set_config()
+	/*
+	 * Rev1.3 analog settings validated by clk_ll_cpll_set_config()
 	 * in Espressif's bootloader clock implementation.
 	 */
 	u8 ref = 5u << 4;
@@ -150,7 +150,8 @@ static int psram_init_axi_clock(void)
 		return -ETIMEDOUT;
 	setbits_le32(REG(PLL_CAL), CPU_PLL_CAL_STOP);
 
-	/* Program and apply the /2 CPU divisor before lifting MEM to /1.
+	/*
+	 * Program and apply the /2 CPU divisor before lifting MEM to /1.
 	 * APB retains /2 of SYS. Switch the root only once these are live.
 	 */
 	clrsetbits_le32(REG(ROOT_CLK_CTRL0), CPU_DIV_FIELDS, BIT(5));
@@ -171,9 +172,11 @@ static int psram_init_axi_clock(void)
 
 static void power_vo2(void)
 {
-	/* In-package 1.8 V rail, PMU VO2 (P1 0P1A), not the SPI NOR VDDO.
+	/*
+	 * In-package 1.8 V rail, PMU VO2 (P1 0P1A), not the SPI NOR VDDO.
 	 * Prefer the part's calibrated 1.8 V pair; use the nominal pair if
-	 * this eFuse block does not carry one. DREF=8:0.9 V, MUL=4:2x. */
+	 * this eFuse block does not carry one. DREF=8:0.9 V, MUL=4:2x.
+	 */
 	u32 a = readl(REG(EFUSE + 0x4c)), b = readl(REG(EFUSE + 0x50));
 	u32 dref = a >> 28, mul = (b >> 3) & 7;
 
@@ -275,9 +278,10 @@ static void pad_timing(unsigned int phase, unsigned int dqs, unsigned int data)
 	for (addr = 0x1c; addr <= DQS1; addr += 4) {
 		if (addr == DQS0 || addr == DQS1) {
 			clrsetbits_le32(REG(IOMUX + addr),
-				(3u << 1) | (0xfu << 7) | (0xfu << 17) | (3u << 15),
-				BIT(0) | (phase << 1) | (dqs << 7) |
-				(dqs << 17) | (2u << 15));
+					(3u << 1) | (0xfu << 7) |
+					(0xfu << 17) | (3u << 15),
+					BIT(0) | (phase << 1) | (dqs << 7) |
+					(dqs << 17) | (2u << 15));
 		} else {
 			clrsetbits_le32(REG(IOMUX + addr), (0xfu << 4) | (3u << 12),
 					(data << 4) | (2u << 12));
@@ -287,8 +291,10 @@ static void pad_timing(unsigned int phase, unsigned int dqs, unsigned int data)
 
 static int train(void)
 {
-	/* No memory allocated yet. Write at low speed before testing at the
-	 * selected rate, then restore those words before publishing RAM. */
+	/*
+	 * No memory allocated yet. Write at low speed before testing at the
+	 * selected rate, then restore those words before publishing RAM.
+	 */
 	static const u32 pattern[4] = {
 		0x0123feca, 0x55aaff00, 0xfe039176, 0x042d7bbb
 	};
@@ -307,8 +313,10 @@ static int train(void)
 		goto restore;
 	bus_clock(P4_SPEED_MHZ);
 
-	/* Prefer the zero-delay board point; scan DQS phase and opposing
-	 * DQS/data delays only if the nominal point fails. */
+	/*
+	 * Prefer the zero-delay board point; scan DQS phase and opposing
+	 * DQS/data delays only if the nominal point fails.
+	 */
 	for (phase = 0; phase < 4 && good < 0; phase++) {
 		for (i = 0; i <= 30; i++) {
 			int margin = i & 1 ? (int)((i + 1) / 2) : -(int)(i / 2);
@@ -337,8 +345,10 @@ restore:
 
 static void configure_cache_port(void)
 {
-	/* OPI command and data read/write, 32-bit address, x16 DDR data.
-	 * Dummy field encoding is controller clocks minus one. */
+	/*
+	 * OPI command and data read/write, 32-bit address, x16 DDR data.
+	 * Dummy field encoding is controller clocks minus one.
+	 */
 	u32 fmt = (P4_SPEED_MHZ == 200) ? 0x02f7c679u : 0x01f7c479u;
 
 	writel(fmt, REG(MSPI2 + 0x40));
@@ -357,9 +367,11 @@ static void configure_cache_port(void)
 
 static int psram_pmp_open(u32 size)
 {
-	/* The IDF bootloader has set CPU/peripheral/ROM protection. Do not
+	/*
+	 * The IDF bootloader has set CPU/peripheral/ROM protection. Do not
 	 * replace its first PMP config word with the legacy catch-all.
-	 * Use the same PSRAM-only window as the existing AP contract. */
+	 * Use the same PSRAM-only window as the existing AP contract.
+	 */
 	u32 addr = p4_ext_pmpaddr(size), cfg = 0x1f000000, prior, actual;
 
 	asm volatile("csrr %0, 0x3a1; csrr %1, 0x3b7"
@@ -408,10 +420,11 @@ static int psram_mmu_map(u32 size)
 	return 0;
 }
 
-
-/* Scratch lanes near the end of each page. Keep all signatures live at
+/*
+ * Scratch lanes near the end of each page. Keep all signatures live at
  * once so higher-address mirroring cannot pass by testing only one page
- * at a time. Restore previous words before placing any payload. */
+ * at a time. Restore previous words before placing any payload.
+ */
 static int psram_check_window(u32 size)
 {
 	static u32 original[P4_EXT_MAX / P4_EXT_PAGE][2];
@@ -433,8 +446,10 @@ static int psram_check_window(u32 size)
 
 		writel(sig, (void *)(P4_EXT_RAM_BASE + off));
 		writel(~sig, (void *)(P4_EXT_RAM_BASE + off + 4));
-		/* Different virtual tags cannot hide physical aliases:
-		 * drain each write to the part before checking any page. */
+		/*
+		 * Different virtual tags cannot hide physical aliases:
+		 * drain each write to the part before checking any page.
+		 */
 		ret = p4_cache_republish(P4_EXT_RAM_BASE + off, 8);
 		if (ret)
 			goto sync_error;
@@ -481,10 +496,10 @@ sync_error:
 
 int p4_spl_psram_init(void)
 {
-	volatile u32 *record = REG(P4_EXT_HANDOFF);
+	u32 *record = REG(P4_EXT_HANDOFF);
 	u32 mr01, mr23, mr4, mr8, id, size;
 
-	record[0] = 0;
+	WRITE_ONCE(record[0], 0);
 	if (psram_init_axi_clock()) {
 		p4_spl_early_puts("psram: AXI clock setup failed\n");
 		return -ETIMEDOUT;
@@ -548,10 +563,10 @@ int p4_spl_psram_init(void)
 		p4_spl_early_puts("psram: memory test/PMP failed; no handoff\n");
 		return -1;
 	}
-	record[1] = size;
-	record[2] = ~size;
+	WRITE_ONCE(record[1], size);
+	WRITE_ONCE(record[2], ~size);
 	asm volatile("fence rw,w" ::: "memory");
-	record[0] = P4_EXT_MAGIC;
+	WRITE_ONCE(record[0], P4_EXT_MAGIC);
 	p4_spl_early_puts("psram: x16 bytes ");
 	p4_spl_early_hex(size);
 	p4_spl_early_puts(" MHz ");

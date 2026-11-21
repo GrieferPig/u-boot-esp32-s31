@@ -8,6 +8,16 @@
  */
 
 / {
+#if defined(CONFIG_ESP32P4_NOR_BOOTMETH) && !defined(CONFIG_SPL_BUILD)
+	bootstd {
+		compatible = "u-boot,boot-std";
+
+		nor {
+			compatible = "espressif,esp32p4-nor-bootmeth";
+		};
+	};
+#endif
+
 	binman: binman {
 	};
 };

@@ -151,7 +151,7 @@ call_harts_early_init:
 	 */
 	la	t0, hart_lottery
 	li	t1, 1
-#if CONFIG_IS_ENABLED(SMP)
+#if !defined(CONFIG_TARGET_ESP32P4) || CONFIG_IS_ENABLED(SMP)
 	amoswap.w s2, t1, 0(t0)
 #else
 	/*
@@ -414,22 +414,22 @@ relocate_secondary_harts:
  * initialization, now running from RAM.
  */
 call_board_init_r:
-#if defined(CONFIG_ESP32P4_HW_IDF_HANDOFF) || defined(CONFIG_ESP32P4_SRAM_ONLY)
+#if defined(CONFIG_BOARD_PRELOADED_RUNTIME)
 	/* The C cache callbacks may clobber the caller-saved offset. */
 	mv	s6, t6
 #endif
 	jal	invalidate_icache_all
-#ifdef CONFIG_ESP32P4_SRAM_ONLY
+#ifdef CONFIG_BOARD_PRELOADED_RUNTIME
 	/* Keep the in-place monitor; there is no relocated code to write back.
 	 * The ROM's full L2 writeback can stall on a power-on reset.
 	 */
 	beqz	s6, 11f
 #endif
 	jal	flush_dcache_all
-#ifdef CONFIG_ESP32P4_SRAM_ONLY
+#ifdef CONFIG_BOARD_PRELOADED_RUNTIME
 11:
 #endif
-#if defined(CONFIG_ESP32P4_HW_IDF_HANDOFF) || defined(CONFIG_ESP32P4_SRAM_ONLY)
+#if defined(CONFIG_BOARD_PRELOADED_RUNTIME)
 	mv	t6, s6
 #endif
 	la	t0, board_init_r        /* offset of board_init_r() */

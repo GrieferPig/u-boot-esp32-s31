@@ -22,14 +22,12 @@
 #include <serial.h>
 #include <linux/err.h>
 #if defined(CONFIG_TARGET_ESP32P4)
+#include <asm/arch-esp32p4/rom-watchdog.h>
 #include <asm/arch-esp32p4/soc/uart_reg.h>
 #else
 #include <asm/arch-esp32s31/soc/uart_reg.h>
 #endif
 DECLARE_GLOBAL_DATA_PTR;
-
-/* Provided by the board when CONFIG_HW_WATCHDOG is enabled. */
-void hw_watchdog_reset(void);
 
 /**
  * The UART_REG_UPDATE_REG register offset is far from the uart base
@@ -181,16 +179,14 @@ static int esp_serial_putc(struct udevice *dev, const char ch)
 	return rc;
 }
 
-
 static int esp_serial_pending(struct udevice *dev, bool input)
 {
-	/*
-	 * The console polls this while idling, which is the only regular
-	 * activity U-Boot has at the prompt, so feed the ROM watchdogs here.
-	 */
-	hw_watchdog_reset();
 	struct esp_uart_plat *plat = dev_get_plat(dev);
 	struct uart_esp *regs = plat->regs;
+
+#ifdef CONFIG_TARGET_ESP32P4
+	hw_watchdog_reset();
+#endif
 
 	if (input)
 		return (readl(&regs->status) & UART_RXFIFO_CNT_M);

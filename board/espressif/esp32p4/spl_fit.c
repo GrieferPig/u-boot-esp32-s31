@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0+
-/* Fixed-board FIT profile. The manifest is untrusted: addresses, lengths,
+/*
+ * Fixed-board FIT profile. The manifest is untrusted: addresses, lengths,
  * roles and algorithm are checked, never handed directly to memcpy/jump.
  * SHA256 provides corruption detection, not public-key authentication.
  */
-#include <common.h>
+#include <linux/build_bug.h>
+#include <linux/kernel.h>
+#include <linux/string.h>
+#include <stdio.h>
 #include <asm/io.h>
 #include <linux/libfdt.h>
 #include <u-boot/sha256.h>
@@ -11,12 +15,13 @@
 #include "spl_load.h"
 #include <asm/arch-esp32p4/boot-layout.h>
 
-#if CONFIG_SPL_OF_LIBFDT_ASSUME_MASK != 0
-#error "Untrusted FIT input requires full libfdt bounds checking"
-#endif
+static_assert(CONFIG_SPL_OF_LIBFDT_ASSUME_MASK == 0,
+	      "Untrusted FIT input requires full libfdt bounds checking");
 
-/* Limit position-independent proper payload below the live SPL. Its
- * BSS can reuse the SPL only after handoff. */
+/*
+ * Limit position-independent proper payload below the live SPL. Its
+ * BSS can reuse the SPL only after handoff.
+ */
 #include "psram-handoff.h"
 
 #define FIT_OFF   0x000f0000U
@@ -26,24 +31,31 @@ struct fit_slot {
 	const char *node, *type, *os;
 	u32 off, dst, limit;
 };
+
 static const struct fit_slot slots[] = {
 	{ "uboot", "standalone", "u-boot", 0x100000, P4_PROPER_BASE, P4_PROPER_SLOT },
 	{ "linux", "kernel", "linux", P4_FIT_IMAGE_OFF, P4_FIT_IMAGE, P4_FIT_IMAGE_FLASH_LIMIT },
 	{ "dtb", "flat_dt", "linux", P4_FIT_DTB_OFF, P4_FIT_DTB, P4_FIT_DTB_LIMIT },
 };
+
 struct payload {
 	u32 len;
 	u8 hash[SHA256_SUM_LEN];
 };
 
-static int prop(const void *f, int n, const char *k, const void *val, int size)
+static bool fit_prop_equal(const void *f, int n, const char *k, const void *val, int size)
 {
 	int len;
 	const void *p = fdt_getprop(f, n, k, &len);
 
 	return p && len == size && !memcmp(p, val, len);
 }
-#define STR(f, n, k, s) prop(f, n, k, s, strlen(s) + 1)
+
+static bool fit_string_equal(const void *f, int n, const char *k,
+			     const char *expected)
+{
+	return fit_prop_equal(f, n, k, expected, strlen(expected) + 1);
+}
 
 static int getnum(const void *f, int n, const char *k, u32 *v)
 {
@@ -63,18 +75,19 @@ static int describe(const void *f, int images, int i, struct payload *p)
 	u32 off, load, entry;
 	const u8 *hash;
 
-	if (n < 0 || !STR(f, n, "type", s->type) || !STR(f, n, "os", s->os) ||
-	    !STR(f, n, "arch", "riscv") ||
+	if (n < 0 || !fit_string_equal(f, n, "type", s->type) ||
+	    !fit_string_equal(f, n, "os", s->os) ||
+	    !fit_string_equal(f, n, "arch", "riscv") ||
 	    getnum(f, n, "data-position", &off) || off != s->off - FIT_OFF ||
 	    getnum(f, n, "data-size", &p->len) || p->len < 64 || p->len > s->limit ||
 	    getnum(f, n, "load", &load) || load != s->dst ||
 	    (i < 2 && (getnum(f, n, "entry", &entry) || entry != s->dst)) ||
 	    fdt_getprop(f, n, "data", NULL) || fdt_getprop(f, n, "data-offset", NULL))
 		return -1;
-	if (!STR(f, n, "compression", "none"))
+	if (!fit_string_equal(f, n, "compression", "none"))
 		return -1;
 	h = fdt_subnode_offset(f, n, "hash-1");
-	if (h < 0 || !STR(f, h, "algo", "sha256"))
+	if (h < 0 || !fit_string_equal(f, h, "algo", "sha256"))
 		return -1;
 	hash = fdt_getprop(f, h, "value", &len);
 	if (!hash || len != SHA256_SUM_LEN)
@@ -99,12 +112,14 @@ int p4_spl_load_fit(void)
 	    fdt_totalsize(f) > HDR_LIMIT || fdt_check_header(f))
 		goto invalid;
 	conf = fdt_path_offset(f, "/configurations");
-	if (conf < 0 || !STR(f, conf, "default", "p4"))
+	if (conf < 0 || !fit_string_equal(f, conf, "default", "p4"))
 		goto invalid;
 	conf = fdt_subnode_offset(f, conf, "p4");
 	images = fdt_path_offset(f, "/images");
-	if (conf < 0 || images < 0 || !STR(f, conf, "firmware", "uboot") ||
-	    !STR(f, conf, "kernel", "linux") || !STR(f, conf, "fdt", "dtb"))
+	if (conf < 0 || images < 0 ||
+	    !fit_string_equal(f, conf, "firmware", "uboot") ||
+	    !fit_string_equal(f, conf, "kernel", "linux") ||
+	    !fit_string_equal(f, conf, "fdt", "dtb"))
 		goto invalid;
 	for (i = 0; i < ARRAY_SIZE(slots); i++)
 		if (describe(f, images, i, &p[i]))

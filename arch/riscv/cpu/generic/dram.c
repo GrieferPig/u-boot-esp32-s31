@@ -10,12 +10,12 @@
 
 DECLARE_GLOBAL_DATA_PTR;
 
-__weak int dram_init(void)
+int dram_init(void)
 {
 	return fdtdec_setup_mem_size_base();
 }
 
-__weak int dram_init_banksize(void)
+int dram_init_banksize(void)
 {
 	return fdtdec_setup_memory_banksize();
 }

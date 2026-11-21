@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-#include <common.h>
+#include <linux/kernel.h>
+#include <linux/types.h>
 #include <linux/errno.h>
+#include <spl.h>
 #include "cache-range.h"
 
 #define P4_MSPI2_AXI_STATUS	0x5008e178u
@@ -46,19 +48,18 @@ int p4_cache_range(u32 start, u32 bytes, u32 map, u32 op)
 		if (p4_cache_wait(P4_SYNC_CTRL, P4_SYNC_BUSY | P4_SYNC_DONE,
 				  P4_SYNC_DONE))
 			return -1;
-#ifdef CONFIG_SPL_BUILD
 		/*
 		 * CACHE_SYNC_DONE alone does not establish that the MSPI
 		 * write data reached PSRAM. SPL has exclusive use of MSPI2
 		 * while the second hart is in reset.
 		 */
-		if (map == P4_SYNC_L2 && op == P4_SYNC_WBACK) {
+		if (spl_phase() == PHASE_SPL && map == P4_SYNC_L2 &&
+		    op == P4_SYNC_WBACK) {
 			asm volatile("fence iorw,iorw" ::: "memory");
 			if (p4_cache_wait(P4_MSPI2_AXI_STATUS, P4_MSPI2_AXI_IDLE,
 					  P4_MSPI2_AXI_IDLE))
 				return -ETIMEDOUT;
 		}
-#endif
 	}
 	asm volatile("fence iorw,iorw" ::: "memory");
 	return 0;

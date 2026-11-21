@@ -2,6 +2,8 @@
 #ifndef ESP32P4_PSRAM_HANDOFF_H
 #define ESP32P4_PSRAM_HANDOFF_H
 
+#include <linux/compiler.h>
+
 #define P4_EXT_RAM_BASE 0x48000000u
 #define P4_EXT_PAGE 0x10000u
 #define P4_EXT_MIN (16u << 20) /* retained DTB and Linux fixed image ABI */
@@ -43,14 +45,14 @@ static inline unsigned int p4_ext_pmpaddr(unsigned int size)
 
 static __always_inline unsigned int p4_ext_size(void)
 {
-	const volatile unsigned int *record = (const void *)P4_EXT_HANDOFF;
+	const unsigned int *record = (const void *)P4_EXT_HANDOFF;
 	unsigned int size;
 
-	if (record[0] != P4_EXT_MAGIC)
+	if (READ_ONCE(record[0]) != P4_EXT_MAGIC)
 		return 0;
 	asm volatile("fence r,r" ::: "memory");
-	size = record[1];
-	return record[2] == ~size && p4_ext_valid_size(size) ? size : 0;
+	size = READ_ONCE(record[1]);
+	return READ_ONCE(record[2]) == ~size && p4_ext_valid_size(size) ? size : 0;
 }
 
 #endif

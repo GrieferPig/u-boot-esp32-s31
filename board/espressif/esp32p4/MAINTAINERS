@@ -1,0 +1,10 @@
+ESPRESSIF ESP32-P4 BOARD
+M:	GrieferPig <grieferpig@163.com>
+S:	Maintained
+F:	arch/riscv/dts/esp32p4*
+F:	arch/riscv/include/asm/arch-esp32p4/
+F:	board/espressif/esp32p4/
+F:	configs/espressif_esp32p4_*defconfig
+F:	doc/board/espressif/
+F:	doc/device-tree-bindings/timer/espressif,esp32p4-systimer.txt
+F:	include/configs/esp32p4.h
