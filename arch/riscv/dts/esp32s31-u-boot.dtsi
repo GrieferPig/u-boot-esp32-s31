@@ -4,6 +4,16 @@
 #include <config.h>
 
 / {
+#if defined(CONFIG_ESP32S31_NOR_BOOTMETH) && !defined(CONFIG_SPL_BUILD)
+	bootstd {
+		compatible = "u-boot,boot-std";
+
+		nor {
+			compatible = "espressif,esp32s31-nor-bootmeth";
+		};
+	};
+#endif
+
 	binman: binman {
 		multiple-images;
 	};

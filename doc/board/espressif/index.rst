@@ -7,3 +7,4 @@ Espressif
    :maxdepth: 1
 
    esp32p4
+   esp32s31

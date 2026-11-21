@@ -17,4 +17,9 @@ config BOARD_SPECIFIC_OPTIONS
 	select GENERIC_RISCV
 	select SUPPORT_SPL
 
+config ESP32S31_NOR_BOOTMETH
+	def_bool y
+	depends on BOOTSTD && CMD_BOOTI
+	select BOOTMETH_GLOBAL
+
 endif

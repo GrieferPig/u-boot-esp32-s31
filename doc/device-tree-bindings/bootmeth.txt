@@ -12,6 +12,7 @@ compatible:
    "u-boot,distro-efi" - EFI boot from an .efi file
    "u-boot,efi-bootmgr" - EFI boot using boot manager (bootmgr)
    "espressif,esp32p4-nor-bootmeth" - fixed FIT in P4 memory-mapped SPI NOR
+   "espressif,esp32s31-nor-bootmeth" - S31 Linux Image and DTB in mapped SPI NOR
 
 
 Example:

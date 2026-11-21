@@ -1,0 +1,28 @@
+.. SPDX-License-Identifier: GPL-2.0+
+
+Espressif ESP32-S31
+===================
+
+The ROM loads the M-mode SPL from SPI NOR at offset ``0x2000``. SPL sets up
+flash and PSRAM, reads the FIT at ``0xe000`` and starts OpenSBI. OpenSBI enters
+U-Boot proper in S-mode.
+
+Standard Boot scans the fixed SPI NOR slots. The S31 boot method checks the
+Linux Image and its separate DTB and uses the RISC-V ``booti`` handoff. The
+Linux Image executes in place at ``0x40400000``. Its DTB is mapped at
+``0x4005e000``. The flash offsets come from the S31 integration repository's
+``configs/esp32s31-layout.cfg``.
+
+Build with an RV32 Espressif GNU toolchain and the S31 OpenSBI
+``fw_dynamic.bin``, linked for the board's NOR XIP address:
+
+.. code-block:: bash
+
+   export CROSS_COMPILE=riscv32-esp-elf-
+   make O=out ARCH=riscv espressif_esp32s31_defconfig
+   make O=out ARCH=riscv OPENSBI=/path/to/fw_dynamic.bin
+
+The integration repository's ``make uboot TARGET=esp32s31`` builds OpenSBI,
+packages the SPL in the ESP ROM image format, and checks that the FIT fits
+the 320 KiB slot. The SPI NOR method is also available from the U-Boot
+console via ``bootflow scan``.

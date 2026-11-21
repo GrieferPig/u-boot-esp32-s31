@@ -14,4 +14,5 @@ obj-y	+= spl_psram.o
 else
 obj-y	+= board.o
 obj-y	+= cache.o
+obj-$(CONFIG_ESP32S31_NOR_BOOTMETH) += nor-boot.o
 endif
