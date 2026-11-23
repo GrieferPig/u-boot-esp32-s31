@@ -26,6 +26,18 @@
 #define LP_IO		0x50120000u
 #define LP_CLK		0x50111000u
 #define PMU		0x50115000u
+#define PMU_HP_ACTIVE_BIAS	(PMU + 0x18u)
+#define PMU_HP_ACTIVE_REGULATOR0	(PMU + 0x28u)
+#define PMU_POWER_DCDC_SWITCH	(PMU + 0x10cu)
+#define PMU_DCM_CTRL		(PMU + 0x204u)
+#define PMU_HP_DCM_VSET		GENMASK(22, 18)
+#define PMU_REGULATOR_DBIAS	GENMASK(31, 27)
+#define PMU_REGULATOR_XPD	BIT(18)
+#define PMU_DBIAS_SEL		BIT(14)
+#define PMU_HP_PVT_DBIAS	GENMASK(13, 9)
+#define PMU_DCDC_SWITCH_FORCE	GENMASK(1, 0)
+#define PMU_DCDC_DONE_FORCE	BIT(7)
+#define PMU_DCDC_ON_REQ		BIT(0)
 #define EFUSE		0x5012d000u
 #define MSPI2		0x5008e000u
 #define MSPI3		0x5008f000u
@@ -66,7 +78,9 @@
 #define PSRAM_CS	BIT(1)
 
 #define P4_SPEED_MHZ (IS_ENABLED(CONFIG_ESP32P4_SPL_PSRAM_200MHZ) ? 200u : 80u)
-#define P4_CPLL_MHZ (P4_SPEED_MHZ == 200u ? 400u : 360u)
+#define P4_CPLL_MHZ 360u
+#define P4_CPU_DIV (P4_SPEED_MHZ == 200u ? 1u : 2u)
+#define P4_MEM_DIV (P4_CPLL_MHZ / 180u / P4_CPU_DIV)
 #define P4_MPLL_MHZ (P4_SPEED_MHZ == 200u ? 400u : 320u)
 #define READ_LAT (P4_SPEED_MHZ == 200u ? 4u : 2u)
 #define WRITE_LAT (P4_SPEED_MHZ == 200u ? 1u : 2u)
@@ -121,12 +135,9 @@ static int update_root_dividers(void)
  * TRM ch.16 Low-Power Management: PMU_IMM_HP_CK_POWER.
  * TRM ch.49 Analog I2C Controller: ANA_CONF2 routes CPU_PLL to I2C0.
  *
- * On EN reset, the ROM leaves SYS_CLK at 20 MHz. Establish the clock
- * tree before opening the PSRAM AXI path, as bootloader_clock_configure()
- * does before application PSRAM initialization. The P4 clock constraint
- * in esp_clk_utils_mspi_speed_mode_sync_before_cpu_freq_switching()
- * requires the AXI clock to be at least the PSRAM clock. Keep MEM/SYS
- * at CPLL / 2 and APB at CPLL / 4.
+ * Configure the HP clock tree before opening the PSRAM AXI path,
+ * following ESP-IDF rtc_clk_cpu_freq_to_cpll_mhz() for pre-v3 silicon.
+ * Both PSRAM configurations use MEM/SYS at 180 MHz and APB at 90 MHz.
  */
 static int psram_init_axi_clock(void)
 {
@@ -150,14 +161,12 @@ static int psram_init_axi_clock(void)
 		return -ETIMEDOUT;
 	setbits_le32(REG(PLL_CAL), CPU_PLL_CAL_STOP);
 
-	/*
-	 * Program and apply the /2 CPU divisor before lifting MEM to /1.
-	 * APB retains /2 of SYS. Switch the root only once these are live.
-	 */
-	clrsetbits_le32(REG(ROOT_CLK_CTRL0), CPU_DIV_FIELDS, BIT(5));
+	/* Apply CPU_CLK_DIV_NUM and MEM_CLK_DIV_NUM before selecting CPLL. */
+	clrsetbits_le32(REG(ROOT_CLK_CTRL0), CPU_DIV_FIELDS,
+			(P4_CPU_DIV - 1) << 5);
 	if (update_root_dividers())
 		return -ETIMEDOUT;
-	writel(0, REG(ROOT_CLK_CTRL1)); /* MEM and SYS divide by one */
+	writel(P4_MEM_DIV - 1, REG(ROOT_CLK_CTRL1)); /* SYS /1 */
 	if (update_root_dividers())
 		return -ETIMEDOUT;
 	writel(BIT(16), REG(ROOT_CLK_CTRL2)); /* APB divides SYS by two */
@@ -166,8 +175,34 @@ static int psram_init_axi_clock(void)
 		return -ETIMEDOUT;
 
 	clrsetbits_le32(REG(HP_CLK_CTRL), HP_ROOT_SRC, HP_ROOT_CPLL);
-	((void (*)(u32))ROM_SET_CPU_MHZ)(P4_CPLL_MHZ / 2u);
+	((void (*)(u32))ROM_SET_CPU_MHZ)(P4_CPLL_MHZ / P4_CPU_DIV);
 	return 0;
+}
+
+/*
+ * TRM ch.16 Low-Power Management — PMU_HP_ACTIVE_DCM_VSET and
+ * PMU_HP_ACTIVE_HP_REGULATOR0. Match ESP-IDF rtc_clk_init() on rev1.3:
+ * keep the internal HP regulator on while the external converter starts,
+ * then let the PMU use the external rail before switching to CPLL.
+ */
+static void power_hp_dcdc(void)
+{
+	u32 version = readl(REG(EFUSE + 0x4c));
+	u32 cal = (readl(REG(EFUSE + 0x54)) >> 16) & 0xf;
+	u32 blk = ((version >> 11) & 7) * 100 + ((version >> 8) & 7);
+	u32 dbias = blk >= 2 && blk != 100 && cal ? cal + 16 : 24;
+	u32 pvt = (readl(REG(PMU_HP_ACTIVE_REGULATOR0)) & PMU_HP_PVT_DBIAS) >> 9;
+	u32 vset = max_t(u32, pvt, 27);
+
+	clrsetbits_le32(REG(PMU_HP_ACTIVE_REGULATOR0), PMU_REGULATOR_DBIAS,
+			(dbias << 27) | PMU_REGULATOR_XPD);
+	clrsetbits_le32(REG(PMU_DCM_CTRL), PMU_DCDC_DONE_FORCE, PMU_DCDC_ON_REQ);
+	clrbits_le32(REG(PMU_POWER_DCDC_SWITCH), PMU_DCDC_SWITCH_FORCE);
+	clrsetbits_le32(REG(PMU_HP_ACTIVE_BIAS), PMU_HP_DCM_VSET, vset << 18);
+	setbits_le32(REG(PMU_HP_ACTIVE_REGULATOR0), PMU_DBIAS_SEL);
+	/* rtc_clk_init() allows 1 ms for the DCDC handover. */
+	udelay(1000);
+	clrbits_le32(REG(PMU_HP_ACTIVE_REGULATOR0), PMU_REGULATOR_XPD);
 }
 
 static void power_vo2(void)
@@ -500,6 +535,7 @@ int p4_spl_psram_init(void)
 	u32 mr01, mr23, mr4, mr8, id, size;
 
 	WRITE_ONCE(record[0], 0);
+	power_hp_dcdc();
 	if (psram_init_axi_clock()) {
 		p4_spl_early_puts("psram: AXI clock setup failed\n");
 		return -ETIMEDOUT;
