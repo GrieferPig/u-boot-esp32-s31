@@ -103,13 +103,16 @@ static void psram_ldo_init(void)
 #define LP_AONCLKRST_MSPI_FB_DIV_S        3
 #define LP_AONCLKRST_MSPI_FB_DIV_M        (0x1FU << LP_AONCLKRST_MSPI_FB_DIV_S)
 
-#define PSRAM_MPLL_FREQ_MHZ               500
+#define PSRAM_MPLL_FREQ_MHZ \
+	(IS_ENABLED(CONFIG_ESP32S31_PSRAM_COMPAT_200MHZ) ? \
+	 400 : 500)
 #define XTAL_FREQ_MHZ                     40
 
-static void psram_mpll_init(void)
+static int psram_mpll_init(void)
 {
 	u8 ref_div = 1;
 	u8 fb_div;
+	u32 guard = 3000000U;
 
 	/* Power-up sequence. Also brings up CPLL, since nothing earlier
 	 * in this boot flow sets those bits; without them the PMU FSM
@@ -130,16 +133,26 @@ static void psram_mpll_init(void)
 	 */
 	fb_div = PSRAM_MPLL_FREQ_MHZ * (ref_div + 1) / XTAL_FREQ_MHZ - 1;
 
+	if (IS_ENABLED(CONFIG_ESP32S31_PSRAM_COMPAT_200MHZ) &&
+	    (readl((void *)HP_SYS_CLKRST_ANA_PLL_CTRL0_REG) & BIT(2)))
+		setbits_le32((void *)HP_SYS_CLKRST_ANA_PLL_CTRL0_REG, BIT(3));
 	clrbits_le32((void *)HP_SYS_CLKRST_ANA_PLL_CTRL0_REG,
 		     HP_SYS_CLKRST_REG_MSPI_CAL_STOP);
 	clrsetbits_le32((void *)LP_AONCLKRST_MSPI_DIV_REG,
 			LP_AONCLKRST_MSPI_FB_DIV_M,
 			(u32)fb_div << LP_AONCLKRST_MSPI_FB_DIV_S);
 	while (!(readl((void *)HP_SYS_CLKRST_ANA_PLL_CTRL0_REG) &
-		 HP_SYS_CLKRST_REG_MSPI_CAL_END))
+		 HP_SYS_CLKRST_REG_MSPI_CAL_END) && --guard)
 		;
+	if (!guard) {
+		printf("PSRAM: MPLL calibration timeout (%08x)\n",
+		       readl((void *)HP_SYS_CLKRST_ANA_PLL_CTRL0_REG));
+		return -1;
+	}
 	setbits_le32((void *)HP_SYS_CLKRST_ANA_PLL_CTRL0_REG,
 		     HP_SYS_CLKRST_REG_MSPI_CAL_STOP);
+	puts("PSRAM: MPLL calibration complete\n");
+	return 0;
 }
 
 /*------------------------------------------------------------------------
@@ -260,7 +273,9 @@ static void psram_pin_init(void)
  * used by the mode registers and AXI dummy cycles below. Start commands
  * at 20 MHz, then qualify the high-speed sampling window before mapping.
  */
-#define PSRAM_SPEED_MHZ                   250
+#define PSRAM_SPEED_MHZ \
+	(IS_ENABLED(CONFIG_ESP32S31_PSRAM_COMPAT_200MHZ) ? \
+	 200 : 250)
 #define PSRAM_BUS_FREQ_DIV                (PSRAM_MPLL_FREQ_MHZ / PSRAM_SPEED_MHZ)
 
 static void psram_bus_clock(u32 freqdiv)
@@ -294,7 +309,10 @@ static void psram_ctrlr_init(void)
 	 *   (SMEM/AXI-cached path) and MSPI_ID_3 (MEM/command-mode path
 	 *   that the ROM SPI helpers drive) need their own clock.
 	 */
-	psram_bus_clock(PSRAM_MPLL_FREQ_MHZ / 20);
+	if (IS_ENABLED(CONFIG_ESP32S31_PSRAM_COMPAT_200MHZ))
+		psram_bus_clock(PSRAM_BUS_FREQ_DIV);
+	else
+		psram_bus_clock(PSRAM_MPLL_FREQ_MHZ / 20);
 
 	/* DLL enable for timing calibration — both SMEM (PSRAM AXI) and
 	 * MEM (ROM-helper command) paths.
@@ -380,13 +398,19 @@ static void psram_ctrlr_init(void)
 
 #define AP_OCT_PSRAM_REG_READ             0x4040
 #define AP_OCT_PSRAM_REG_WRITE            0xC0C0
-#define AP_OCT_PSRAM_RD_REG_DUMMY_BITLEN  (2 * (9 - 1))
+#define AP_OCT_PSRAM_RD_REG_DUMMY_BITLEN \
+	(IS_ENABLED(CONFIG_ESP32S31_PSRAM_COMPAT_200MHZ) ? \
+	 (2 * (7 - 1)) : (2 * (9 - 1)))
 
 #define PSRAM_MSPI_ID                     3        /* PSRAM controller uses MSPI3 path */
 #define PSRAM_CS_MASK                     BIT(1)
 
-#define AP_OCT_PSRAM_RD_LATENCY           6
-#define AP_OCT_PSRAM_WR_LATENCY           3
+#define AP_OCT_PSRAM_RD_LATENCY \
+	(IS_ENABLED(CONFIG_ESP32S31_PSRAM_COMPAT_200MHZ) ? \
+	 4 : 6)
+#define AP_OCT_PSRAM_WR_LATENCY \
+	(IS_ENABLED(CONFIG_ESP32S31_PSRAM_COMPAT_200MHZ) ? \
+	 1 : 3)
 
 union psram_mr0 {
 	struct {
@@ -645,8 +669,12 @@ static void psram_mode_reg_init(void)
 #define AP_OCT_PSRAM_SYNC_READ            0x0000
 #define AP_OCT_PSRAM_CMD_BITLEN           16
 #define AP_OCT_PSRAM_ADDR_BITLEN          32
-#define AP_OCT_PSRAM_RD_DUMMY_BITLEN      (2 * (18 - 1))   /* 34 */
-#define AP_OCT_PSRAM_WR_DUMMY_BITLEN      (2 * (9 - 1))    /* 16 */
+#define AP_OCT_PSRAM_RD_DUMMY_BITLEN \
+	(IS_ENABLED(CONFIG_ESP32S31_PSRAM_COMPAT_200MHZ) ? \
+	 (2 * (14 - 1)) : (2 * (18 - 1)))
+#define AP_OCT_PSRAM_WR_DUMMY_BITLEN \
+	(IS_ENABLED(CONFIG_ESP32S31_PSRAM_COMPAT_200MHZ) ? \
+	 (2 * (7 - 1)) : (2 * (9 - 1)))
 
 static void psram_axi_config(void)
 {
@@ -875,13 +903,25 @@ static void psram_mmu_map(u32 psram_size_bytes)
 
 int psram_init(void)
 {
+	if (IS_ENABLED(CONFIG_ESP32S31_PSRAM_COMPAT_200MHZ)) {
+		/* Enable analog I2C before MPLL calibration, as in ESP-IDF. */
+		setbits_le32((void *)(DR_REG_HP_SYS_CLKRST_BASE + 0x40U), BIT(0));
+		setbits_le32((void *)0x2010F018U, BIT(2));
+		setbits_le32((void *)0x2010F01CU, BIT(2));
+		setbits_le32((void *)0x20109C04U, BIT(12));
+		puts("PSRAM: initial 200 MHz compatibility profile\n");
+	}
 	psram_ldo_init();
-	psram_mpll_init();
+	if (psram_mpll_init())
+		return -1;
 	psram_mspi_clock_init();
 	psram_pin_init();
 	psram_ctrlr_init();
 	psram_mode_reg_init();
-	if (!s_psram_size || psram_timing_tune())
+	if (!s_psram_size)
+		return -1;
+	if (!IS_ENABLED(CONFIG_ESP32S31_PSRAM_COMPAT_200MHZ) &&
+	    psram_timing_tune())
 		return -1;
 	psram_axi_config();
 	psram_mmu_map(s_psram_size);
