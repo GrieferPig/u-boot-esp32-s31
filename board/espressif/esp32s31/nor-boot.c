@@ -56,11 +56,20 @@ static int s31_nor_read_bootflow(struct udevice *dev, struct bootflow *bflow)
 	return 0;
 }
 
+int esp32s31_lp_boot(void);
+
 static int s31_nor_boot(struct udevice *dev, struct bootflow *bflow)
 {
 	char image[2 * sizeof(ulong) + 1];
 	char fdt[2 * sizeof(ulong) + 1];
 	char *const argv[] = { "booti", image, "-", fdt, NULL };
+	int ret;
+
+	ret = esp32s31_lp_boot();
+	if (ret) {
+		printf("ESP32-S31 LP boot failed: %d\n", ret);
+		return ret;
+	}
 
 	snprintf(image, sizeof(image), "%lx", S31_LINUX_NOR_ADDR);
 	snprintf(fdt, sizeof(fdt), "%lx", S31_LINUX_DTB_ADDR);

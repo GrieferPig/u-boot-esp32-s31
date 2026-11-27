@@ -85,20 +85,14 @@
 		};
 	};
 
-	/*
-	 * HP-RAM bank above OpenSBI (0x2F000000-), capped below ROM data at
-	 * 0x2F07FFAC by board_get_usable_ram_top().
-	 */
+	/* HP-RAM bank above the OpenSBI runtime. */
 	memory@2f030000 {
 		bootph-all;
 		device_type = "memory";
 		reg = <0x2f030000 0x00050000>;	/* 320 KB HP-RAM */
 	};
 
-	/*
-	 * PSRAM as a second bank so u-boot's lmb knows 0x50000000 is RAM (kernel
-	 * load target); u-boot itself lives in HP-RAM per the cap above.
-	 */
+	/* The SPL loads U-Boot proper into PSRAM before handoff. */
 	memory@50000000 {
 		bootph-all;
 		device_type = "memory";
