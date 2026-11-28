@@ -5,6 +5,14 @@
 
 / {
 #if defined(CONFIG_ESP32S31_NOR_BOOTMETH) && !defined(CONFIG_SPL_BUILD)
+	/* Raw NOR slot, 0xa00000..0xffffff, in the linear XIP mapping. */
+	rootfs@40a00000 {
+		compatible = "nvmxip,qspi";
+		reg = <0x40a00000 0x600000>;
+		lba_shift = <9>;
+		lba = <0x3000>;
+	};
+
 	bootstd {
 		compatible = "u-boot,boot-std";
 

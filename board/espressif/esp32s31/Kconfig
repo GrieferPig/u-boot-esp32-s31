@@ -21,5 +21,6 @@ config ESP32S31_NOR_BOOTMETH
 	def_bool y
 	depends on BOOTSTD && CMD_BOOTI
 	select BOOTMETH_GLOBAL
+	select BOARD_PRELOADED_RUNTIME
 
 endif
